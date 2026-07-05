@@ -7,6 +7,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import RobustScaler
 
 from .features import supervised_frame
+from .risk import periods_per_year
 
 
 def walk_forward_backtest(data: pd.DataFrame, horizon: int = 5, threshold: float = 0.56, cost_bps: float = 10) -> tuple[pd.DataFrame, dict]:
@@ -36,11 +37,12 @@ def walk_forward_backtest(data: pd.DataFrame, horizon: int = 5, threshold: float
     benchmark = data["Close"].reindex(result.index).pct_change().fillna(0)
     result["BuyHold"] = (1 + benchmark).cumprod()
     daily = result["Strategy"]
+    annualizer = periods_per_year(data.index)
     metrics = {
         "total_return": float(result["Equity"].iloc[-1] - 1),
-        "annual_return": float(result["Equity"].iloc[-1] ** (252 / len(result)) - 1),
-        "annual_volatility": float(daily.std() * np.sqrt(252)),
-        "sharpe": float(daily.mean() / daily.std() * np.sqrt(252)) if daily.std() else 0.0,
+        "annual_return": float(result["Equity"].iloc[-1] ** (annualizer / len(result)) - 1),
+        "annual_volatility": float(daily.std() * np.sqrt(annualizer)),
+        "sharpe": float(daily.mean() / daily.std() * np.sqrt(annualizer)) if daily.std() else 0.0,
         "max_drawdown": float((result["Equity"] / result["Equity"].cummax() - 1).min()),
         "trades": int((result["Position"] != 0).sum()),
         "hit_rate": float((result.loc[result["Position"] != 0, "Return"] > 0).mean()),

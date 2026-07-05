@@ -5,7 +5,7 @@ from market_oracle.backtest import walk_forward_backtest
 from market_oracle.catalog import CATEGORIES, CRYPTO, ETF_CATEGORIES
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.model import fit_forecast
-from market_oracle.risk import risk_metrics
+from market_oracle.risk import periods_per_year, risk_metrics
 
 
 def synthetic_data(n=900):
@@ -38,6 +38,8 @@ def test_forecast_bounds():
     assert 0 <= result.probability_up <= 1
     assert result.lower_return < result.upper_return
     assert result.samples > 250
+    assert result.validation_start < result.validation_end
+    assert result.baseline_accuracy >= 0.5
 
 
 def test_risk_and_backtest():
@@ -47,6 +49,11 @@ def test_risk_and_backtest():
     curve, summary = walk_forward_backtest(data, horizon=5)
     assert not curve.empty
     assert np.isfinite(summary["total_return"])
+    assert metrics["periods_per_year"] == 252
+
+
+def test_crypto_uses_365_day_annualization():
+    assert periods_per_year(pd.date_range("2024-01-01", periods=500, freq="D")) == 365
 
 
 def test_catalog_is_broad_and_symbols_are_present():

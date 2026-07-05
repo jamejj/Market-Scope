@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .risk import periods_per_year
+
 
 def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
     change = close.diff()
@@ -26,12 +28,13 @@ def build_features(data: pd.DataFrame, context: pd.DataFrame | None = None) -> p
     c = data["Close"].astype(float)
     v = data["Volume"].astype(float)
     logret = np.log(c).diff()
+    annualizer = periods_per_year(data.index)
     out = pd.DataFrame(index=data.index)
 
     for n in (1, 2, 5, 10, 20, 60):
         out[f"ret_{n}"] = np.log(c / c.shift(n))
     for n in (5, 10, 20, 60):
-        out[f"vol_{n}"] = logret.rolling(n).std() * np.sqrt(252)
+        out[f"vol_{n}"] = logret.rolling(n).std() * np.sqrt(annualizer)
     for n in (10, 20, 50, 100, 200):
         ma = c.rolling(n).mean()
         out[f"ma_dist_{n}"] = c / ma - 1
@@ -64,7 +67,7 @@ def build_features(data: pd.DataFrame, context: pd.DataFrame | None = None) -> p
         for n in (1, 5, 20, 60):
             out[f"market_ret_{n}"] = np.log(market_close / market_close.shift(n))
             out[f"relative_strength_{n}"] = out[f"ret_{n}"] - out[f"market_ret_{n}"]
-        out["market_vol_20"] = market_ret.rolling(20).std() * np.sqrt(252)
+        out["market_vol_20"] = market_ret.rolling(20).std() * np.sqrt(annualizer)
         covariance = logret.rolling(60).cov(market_ret)
         out["market_beta_60"] = covariance / market_ret.rolling(60).var().replace(0, np.nan)
         out["market_corr_60"] = logret.rolling(60).corr(market_ret)

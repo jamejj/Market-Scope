@@ -1,6 +1,19 @@
 # MarketScope
 
-Profesjonalnie wyglądający, lokalny panel badawczy analizujący akcje, ETF-y i krypto. Generuje probabilistyczne prognozy kierunku dla 1, 5 i 20 sesji, ranking instrumentów, miary ryzyka oraz chronologiczny backtest walk-forward.
+Lokalny panel badawczy analizujący akcje, ETF-y i krypto. Generuje probabilistyczne prognozy kierunku dla 1, 5 i 20 dni/sesji, ranking instrumentów, miary ryzyka oraz chronologiczny backtest walk-forward.
+
+## Najważniejsze funkcje
+
+- osobne moduły spółek, ETF-ów i kryptowalut;
+- ponad 170 spółek w katalogu oraz wyszukiwarka globalna;
+- ensemble modeli klasyfikacyjnych i regresyjnych;
+- kontekst szerokiego rynku oraz względna siła instrumentu;
+- uczciwa walidacja chronologiczna z luką zapobiegającą wyciekowi danych;
+- diagnostyka AUC, Brier, trafności i prostej strategii bazowej;
+- ponowny trening modelu produkcyjnego na całej dostępnej historii;
+- prawidłowa annualizacja 365 dni dla krypto i 252 sesji dla giełd;
+- ranking rynku, analiza ryzyka i backtest walk-forward z kosztami transakcji;
+- zakładka **Model**, która tłumaczy ustawienia oraz neutralne sygnały.
 
 ## Uruchomienie
 

@@ -27,6 +27,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+if "training_years" not in st.session_state:
+    st.session_state["training_years"] = 8
+years = int(st.session_state["training_years"])
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_analysis(symbol: str, horizons: tuple[int, ...], years: int):
@@ -92,7 +96,11 @@ def render_analysis(result: dict, profile: dict) -> None:
 
     five_day = result["forecasts"].get(5) or next(iter(result["forecasts"].values()))
     if five_day["quality"] == "NISKA — BRAK PRZEWAGI":
-        st.warning("**Brak potwierdzonej przewagi modelu.** Prognoza została celowo ściągnięta w stronę 50%. Najrozsądniejszy sygnał: obserwuj / brak pozycji.")
+        st.warning(
+            f"**Brak potwierdzonej przewagi modelu.** W walidacji tygodniowej AUC wyniosło "
+            f"{five_day['auc']:.3f}, a Brier {five_day['brier']:.3f}. Prognoza została celowo "
+            "ściągnięta w stronę 50%. Najrozsądniejszy sygnał: obserwuj / brak pozycji."
+        )
     elif five_day["probability_up"] >= 0.54:
         st.success(f"Model wykrywa przewagę wzrostową, a jakość walidacji jest: **{five_day['quality'].lower()}**.")
     elif five_day["probability_up"] <= 0.46:
@@ -100,7 +108,8 @@ def render_analysis(result: dict, profile: dict) -> None:
     else:
         st.info(f"Sygnał neutralny. Jakość walidacji: **{five_day['quality'].lower()}**.")
 
-    horizon_names = {1: "Następna sesja", 5: "Najbliższy tydzień", 20: "Około miesiąca"}
+    unit = "dzień" if symbol.endswith("-USD") else "sesja"
+    horizon_names = {1: f"Następny {unit}", 5: "Najbliższy tydzień", 20: "Około miesiąca"}
     columns = st.columns(len(result["forecasts"]))
     for column, (horizon, forecast) in zip(columns, result["forecasts"].items()):
         with column:
@@ -113,6 +122,28 @@ def render_analysis(result: dict, profile: dict) -> None:
                 f"Zakres 90%: {pct(forecast['lower_return'])} – {pct(forecast['upper_return'])}  ·  "
                 f"AUC {forecast['auc']:.3f}  ·  Brier {forecast['brier']:.3f}  ·  {forecast['quality']}"
             )
+
+    with st.expander("Diagnostyka prognozy — czy model naprawdę ma przewagę?"):
+        diagnostic_rows = []
+        for horizon, forecast in result["forecasts"].items():
+            diagnostic_rows.append({
+                "Horyzont": f"{horizon} dni" if symbol.endswith("-USD") else f"{horizon} sesji",
+                "AUC": forecast["auc"], "Brier": forecast["brier"],
+                "Trafność modelu": forecast["accuracy"],
+                "Trafność prostego bazowego": forecast["baseline_accuracy"],
+                "Przewaga trafności": forecast["accuracy"] - forecast["baseline_accuracy"],
+                "Okres walidacji": f"{forecast['validation_start']} → {forecast['validation_end']}",
+                "Liczba obserwacji": forecast["samples"],
+            })
+        diagnostics = pd.DataFrame(diagnostic_rows)
+        st.dataframe(
+            diagnostics.style.format({
+                "AUC": "{:.3f}", "Brier": "{:.3f}", "Trafność modelu": "{:.1%}",
+                "Trafność prostego bazowego": "{:.1%}", "Przewaga trafności": "{:+.1%}",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+        st.caption("Model ma sens dopiero wtedy, gdy pokonuje prostą strategię przewidywania częstszej klasy. AUC około 0,50 oznacza brak zdolności rozróżniania kierunku.")
 
     history = result["history"].tail(500).copy()
     history["SMA 50"] = history["Close"].rolling(50).mean()
@@ -149,7 +180,8 @@ def render_analysis(result: dict, profile: dict) -> None:
     ]
     for column, (label, value) in zip(risk_cols, risk_values):
         column.metric(label, value)
-    st.caption("*Estymacja historyczna z maksymalnie 3 lat; stopa wolna od ryzyka przyjęta jako 0.")
+    calendar = "365 dni" if risk["periods_per_year"] == 365 else "252 sesje"
+    st.caption(f"*Estymacja historyczna z maksymalnie 3 lat; roczna skala: {calendar}; stopa wolna od ryzyka przyjęta jako 0.")
 
     render_profile(profile)
     with st.expander("Co najmocniej wpływa na model tygodniowy?"):
@@ -162,11 +194,11 @@ def analysis_action(symbol: str, state_key: str, button_key: str) -> None:
             with st.spinner("Pobieram dane, liczę wskaźniki i trenuję modele…"):
                 result = cached_analysis(symbol, (1, 5, 20), years)
                 profile = cached_profile(symbol)
-            st.session_state[state_key] = {"result": result, "profile": profile}
+            st.session_state[state_key] = {"result": result, "profile": profile, "years": years}
         except Exception as exc:
             st.error(str(exc))
     saved = st.session_state.get(state_key)
-    if saved and saved["result"]["symbol"] == symbol:
+    if saved and saved["result"]["symbol"] == symbol and saved.get("years") == years:
         render_analysis(saved["result"], saved["profile"])
 
 
@@ -194,23 +226,16 @@ def search_picker(prefix: str) -> str:
     return options[selected]
 
 
-with st.sidebar:
-    st.header("Ustawienia modelu")
-    years = st.slider("Historia do treningu", 3, 15, 8, help="8 lat obejmuje zwykle kilka różnych faz rynku.")
-    st.caption("Model: regresja logistyczna + gradient boosting + modele oczekiwanego zwrotu.")
-    st.divider()
-    st.warning("Prognoza jest probabilistyczna. Nie jest poradą ani gwarancją wyniku.")
-
 st.title("MarketScope PRO")
 st.caption("Analityka akcji, ETF-ów i kryptowalut · sygnały ML · ryzyko · backtest")
 
-home, stocks, etfs, crypto, radar, backtest, method = st.tabs([
-    "🏠 Start", "🏢 Spółki", "🧺 ETF-y", "₿ Krypto", "🎯 Radar", "🧪 Backtest", "ℹ️ Metodologia",
+home, stocks, etfs, crypto, radar, backtest, settings, method = st.tabs([
+    "🏠 Start", "🏢 Spółki", "🧺 ETF-y", "₿ Krypto", "🎯 Radar", "🧪 Backtest", "⚙️ Model", "ℹ️ Metodologia",
 ])
 
 with home:
     st.header("Centrum analizy rynku")
-    st.write("Wybierz u góry klasę aktywów. Każdy instrument otrzyma prognozę na 1, 5 i 20 sesji, ocenę wiarygodności, wykres, momentum i miary ryzyka.")
+    st.write("Wybierz u góry klasę aktywów. Każdy instrument otrzyma prognozę na 1, 5 i 20 dni/sesji, ocenę wiarygodności, wykres, momentum i miary ryzyka.")
     c1, c2, c3 = st.columns(3)
     c1.markdown("<div class='pro-card'><h3>🏢 Spółki</h3><p>172 pozycje w katalogu, w tym GPW, USA, sektory i mniejsze firmy. Dostępna jest też wyszukiwarka globalna.</p></div>", unsafe_allow_html=True)
     c2.markdown("<div class='pro-card'><h3>🧺 ETF-y</h3><p>Szeroki rynek, sektory, obligacje, surowce, regiony świata, fundusze tematyczne i UCITS.</p></div>", unsafe_allow_html=True)
@@ -332,6 +357,51 @@ with backtest:
         st.line_chart(curve[["Equity", "BuyHold"]])
         st.caption(f"Aktywne sygnały: {metrics['trades']}. Wyniki historyczne nie gwarantują przyszłych.")
 
+with settings:
+    st.header("Model i ustawienia")
+    st.write("Ta sekcja tłumaczy ustawienia normalnym językiem. Domyślna konfiguracja jest zalecana — więcej danych lub bardziej agresywny sygnał nie oznacza automatycznie lepszej prognozy.")
+
+    st.subheader("Ile historii wykorzystać?")
+    selected_years = st.slider(
+        "Lata danych do treningu", 3, 15, key="training_years",
+        help="Model uczy się na tej historii, a jej najnowsza część zostaje odłożona do uczciwej walidacji.",
+    )
+    if selected_years == 8:
+        st.success("**8 lat — ustawienie zalecane.** Zwykle obejmuje kilka faz rynku bez nadmiernego sięgania do bardzo starych zależności.")
+    elif selected_years < 6:
+        st.warning("Krótka historia szybciej reaguje na nowy reżim, ale daje mniej danych i bardziej niestabilną ocenę jakości.")
+    else:
+        st.info("Długa historia daje więcej przykładów, ale starsze zachowania rynku mogą być mniej przydatne dzisiaj.")
+
+    st.subheader("Co program robi po kliknięciu Analizuj?")
+    s1, s2, s3, s4 = st.columns(4)
+    s1.markdown("<div class='pro-card'><h3>1. Dane</h3><p>Pobiera ceny, wolumen i benchmark rynku. Krypto liczy w skali 365 dni, giełdy w 252 sesjach.</p></div>", unsafe_allow_html=True)
+    s2.markdown("<div class='pro-card'><h3>2. Cechy</h3><p>Buduje momentum, trend, RSI, MACD, ATR, zmienność, wolumen i relatywną siłę.</p></div>", unsafe_allow_html=True)
+    s3.markdown("<div class='pro-card'><h3>3. Walidacja</h3><p>Odkłada najnowszy fragment historii. Model nie widzi go podczas treningu oceny jakości.</p></div>", unsafe_allow_html=True)
+    s4.markdown("<div class='pro-card'><h3>4. Refit</h3><p>Po ocenie jakości finalny model uczy się ponownie na całej dostępnej historii.</p></div>", unsafe_allow_html=True)
+
+    st.subheader("Dlaczego aplikacja czasem mówi „wstrzymaj się”?")
+    st.markdown("""
+    To zabezpieczenie, nie awaria. Sygnał jest wygaszany, gdy:
+
+    - **AUC jest blisko 0,50** — model nie rozróżnia wzrostów od spadków lepiej niż przypadek;
+    - **Brier jest wysoki** — deklarowane prawdopodobieństwa nie sprawdzają się;
+    - model nie pokonuje prostej strategii przewidywania częstszego kierunku;
+    - rynek zmienił reżim i zależności z treningu nie działają w późniejszym okresie.
+
+    Profesjonalny system powinien mieć prawo odpowiedzieć „nie wiem”. Wymuszanie sygnału każdego dnia zwykle tylko zwiększa liczbę fałszywych transakcji.
+    """)
+
+    with st.expander("Znaczenie parametrów i skrótów"):
+        st.markdown("""
+        - **P(wzrost)** — skalibrowane prawdopodobieństwo dodatniego zwrotu po wybranym czasie.
+        - **AUC** — 0,50 to brak przewagi; około 0,55 może oznaczać małą przewagę; 0,60+ jest interesujące, jeśli utrzymuje się w czasie.
+        - **Brier** — błąd prognoz probabilistycznych; niżej jest lepiej, okolice 0,25 odpowiadają niepewności bliskiej 50/50.
+        - **Zakres 90%** — szeroki przedział możliwego ruchu, a nie obietnica ceny docelowej.
+        - **Benchmark** — rynek odniesienia: S&P 500, WIG20 Total Return albo Bitcoin dla altcoinów.
+        - **Purge gap** — luka między treningiem i walidacją chroniąca przed podglądaniem przyszłości.
+        """)
+
 with method:
     st.header("Metodologia i ograniczenia")
     st.markdown("""
@@ -339,7 +409,7 @@ with method:
 
 Model korzysta z ponad 30 cech: stóp zwrotu, RSI Wildera, MACD, ATR, pasm Bollingera, średnich 10–200 sesji, momentum, zmienności, luk cenowych, anomalii wolumenu oraz relatywnej siły względem rynku. Dla GPW kontekstem jest fundusz śledzący WIG20 Total Return, dla rynku amerykańskiego S&P 500, a dla altcoinów Bitcoin.
 
-Kierunek jest średnią regularizowanej regresji logistycznej i gradient boostingu. Oczekiwany ruch łączy Ridge z lasem losowym. Prawdopodobieństwo jest automatycznie ściągane do 50%, gdy AUC i Brier na późniejszym okresie nie potwierdzają jakości modelu.
+Kierunek jest średnią regularizowanej regresji logistycznej i gradient boostingu. Oczekiwany ruch łączy Ridge z lasem losowym. Prawdopodobieństwo jest automatycznie ściągane do 50%, gdy AUC i Brier na późniejszym okresie nie potwierdzają jakości modelu. Po walidacji modele produkcyjne są ponownie trenowane na całej dostępnej historii.
 
 ### Ochrona przed fałszywie dobrym wynikiem
 

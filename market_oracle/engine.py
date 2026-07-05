@@ -11,10 +11,10 @@ from .model import fit_forecast
 from .risk import risk_metrics
 
 
-def _benchmark_for(symbol: str) -> str:
+def _benchmark_for(symbol: str) -> str | None:
     symbol = symbol.upper()
     if symbol.endswith("-USD"):
-        return "BTC-USD" if symbol != "BTC-USD" else "ETH-USD"
+        return "BTC-USD" if symbol != "BTC-USD" else None
     if symbol.endswith(".WA") or symbol in {"^WIG20", "WIG20.WA"}:
         # Yahoo exposes almost no history for the raw WIG20 symbol; this liquid total-return ETF is the usable proxy.
         return "ETFBW20TR.WA"
@@ -40,11 +40,15 @@ def _technical_snapshot(data: pd.DataFrame) -> dict[str, float | bool]:
 def analyze_asset(symbol: str, horizons: tuple[int, ...] = (1, 5, 20), years: int = 8) -> dict:
     data = download_history(symbol, years)
     benchmark_symbol = _benchmark_for(symbol)
-    try:
-        context = download_history(benchmark_symbol, years)
-    except Exception:
+    if benchmark_symbol:
+        try:
+            context = download_history(benchmark_symbol, years)
+        except Exception:
+            context = None
+            benchmark_symbol = "brak"
+    else:
         context = None
-        benchmark_symbol = "brak"
+        benchmark_symbol = "brak — BTC jest benchmarkiem krypto"
     all_features = build_features(data, context).dropna()
     if all_features.empty:
         raise ValueError(f"Nie udało się zbudować cech dla {symbol}.")

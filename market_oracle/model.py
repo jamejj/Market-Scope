@@ -22,6 +22,9 @@ class Forecast:
     auc: float
     brier: float
     quality: str
+    baseline_accuracy: float
+    validation_start: str
+    validation_end: str
     samples: int
     importance: pd.Series
 
@@ -52,10 +55,10 @@ def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.D
     X_valid, y_valid = X.iloc[split:], y.iloc[split:]
     r_train, r_valid = returns.iloc[:train_end], returns.iloc[split:]
 
-    linear, tree = _models()
-    linear.fit(X_train, y_train)
-    tree.fit(X_train, y_train)
-    valid_prob = 0.55 * linear.predict_proba(X_valid)[:, 1] + 0.45 * tree.predict_proba(X_valid)[:, 1]
+    eval_linear, eval_tree = _models()
+    eval_linear.fit(X_train, y_train)
+    eval_tree.fit(X_train, y_train)
+    valid_prob = 0.55 * eval_linear.predict_proba(X_valid)[:, 1] + 0.45 * eval_tree.predict_proba(X_valid)[:, 1]
 
     # Shrink probabilities toward 0.5 when validation is weak or small.
     auc = roc_auc_score(y_valid, valid_prob) if y_valid.nunique() > 1 else 0.5
@@ -69,26 +72,42 @@ def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.D
         quality = "UMIARKOWANA"
     else:
         quality = "NISKA — BRAK PRZEWAGI"
+    # Evaluation stays untouched, while production models learn from every labeled observation.
+    linear, tree = _models()
+    linear.fit(X, y)
+    tree.fit(X, y)
     raw_prob = float(0.55 * linear.predict_proba(latest)[:, 1][0] + 0.45 * tree.predict_proba(latest)[:, 1][0])
     probability = 0.5 + skill * (raw_prob - 0.5)
+
+    eval_reg_linear = make_pipeline(SimpleImputer(strategy="median"), RobustScaler(), Ridge(alpha=18.0))
+    eval_reg_tree = make_pipeline(
+        SimpleImputer(strategy="median"),
+        RandomForestRegressor(n_estimators=180, max_depth=5, min_samples_leaf=14, max_features=0.65, n_jobs=-1, random_state=42),
+    )
+    eval_reg_linear.fit(X_train, r_train)
+    eval_reg_tree.fit(X_train, r_train)
+    residual = r_valid - (0.65 * eval_reg_linear.predict(X_valid) + 0.35 * eval_reg_tree.predict(X_valid))
 
     reg_linear = make_pipeline(SimpleImputer(strategy="median"), RobustScaler(), Ridge(alpha=18.0))
     reg_tree = make_pipeline(
         SimpleImputer(strategy="median"),
         RandomForestRegressor(n_estimators=180, max_depth=5, min_samples_leaf=14, max_features=0.65, n_jobs=-1, random_state=42),
     )
-    reg_linear.fit(X_train, r_train)
-    reg_tree.fit(X_train, r_train)
+    reg_linear.fit(X, returns)
+    reg_tree.fit(X, returns)
     expected = float(0.65 * reg_linear.predict(latest)[0] + 0.35 * reg_tree.predict(latest)[0])
     expected *= skill
-    residual = r_valid - (0.65 * reg_linear.predict(X_valid) + 0.35 * reg_tree.predict(X_valid))
     sigma = float(max(residual.std(), r_valid.std() * 0.35, 1e-4))
 
     coef = linear.named_steps["logisticregression"].coef_[0]
     importance = pd.Series(np.abs(coef), index=X.columns).sort_values(ascending=False).head(8)
+    accuracy = float(accuracy_score(y_valid, valid_prob >= 0.5))
+    positive_rate = float(y_valid.mean())
     return Forecast(
         probability_up=float(np.clip(probability, 0.02, 0.98)), expected_return=expected,
         lower_return=expected - 1.645 * sigma, upper_return=expected + 1.645 * sigma,
-        accuracy=float(accuracy_score(y_valid, valid_prob >= 0.5)), auc=float(auc),
-        brier=brier, quality=quality, samples=len(X), importance=importance,
+        accuracy=accuracy, auc=float(auc), brier=brier, quality=quality,
+        baseline_accuracy=max(positive_rate, 1 - positive_rate),
+        validation_start=str(X_valid.index[0].date()), validation_end=str(X_valid.index[-1].date()),
+        samples=len(X), importance=importance,
     )
