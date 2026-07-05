@@ -14,12 +14,14 @@ Lokalny panel badawczy analizujący akcje, ETF-y i krypto. Generuje probabilisty
 - prawidłowa annualizacja 365 dni dla krypto i 252 sesji dla giełd;
 - ranking rynku, analiza ryzyka i backtest walk-forward z kosztami transakcji;
 - zakładka **Model**, która tłumaczy ustawienia oraz neutralne sygnały.
+- automatyczny monitor rynku zapisujący gotowy ranking co 12 godzin;
+- adaptacyjny ensemble, który dobiera udział modelu liniowego i nieliniowego na osobnym okresie kalibracji.
 
 ## Uruchomienie
 
 Wymagany jest Python 3.9–3.13.
 
-Na macOS można po prostu kliknąć dwukrotnie plik `Uruchom MarketScope.command`.
+Na macOS można po prostu kliknąć dwukrotnie plik `Uruchom MarketScope.command`. Launcher uruchamia również monitor rynku pracujący w tle.
 
 ```bash
 python3 -m venv .venv

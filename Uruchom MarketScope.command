@@ -10,4 +10,7 @@ fi
 
 echo "Uruchamiam MarketScope PRO…"
 echo "Aby zakończyć aplikację, zamknij to okno albo naciśnij Control+C."
+nice -n 10 .venv/bin/python run_monitor.py &
+MONITOR_PID=$!
+trap 'kill "$MONITOR_PID" 2>/dev/null' EXIT INT TERM
 .venv/bin/python -m streamlit run app.py

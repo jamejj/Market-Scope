@@ -5,7 +5,7 @@ CATEGORIES: dict[str, dict[str, str]] = {
         "PKO BP": "PKO.WA", "Orlen": "PKN.WA", "PZU": "PZU.WA", "Bank Pekao": "PEO.WA",
         "KGHM": "KGH.WA", "Dino Polska": "DNP.WA", "LPP": "LPP.WA", "Allegro": "ALE.WA",
         "CD Projekt": "CDR.WA", "Cyfrowy Polsat": "CPS.WA", "mBank": "MBK.WA",
-        "Santander Bank Polska": "SPL.WA", "ING Bank Śląski": "ING.WA", "Kruk": "KRU.WA",
+        "Alior Bank": "ALR.WA", "ING Bank Śląski": "ING.WA", "Kruk": "KRU.WA",
         "Budimex": "BDX.WA", "Orange Polska": "OPL.WA", "Żabka Group": "ZAB.WA",
     },
     "GPW — średnie i mniejsze": {

@@ -59,6 +59,15 @@ def build_features(data: pd.DataFrame, context: pd.DataFrame | None = None) -> p
     out["obv_trend"] = obv.diff(20) / v.rolling(20).sum().replace(0, np.nan)
     out["range_pct"] = (data["High"] - data["Low"]) / c
     out["gap"] = data["Open"] / c.shift(1) - 1
+    out["momentum_acceleration"] = out["ret_5"] - out["ret_20"] / 4
+    out["volatility_ratio"] = out["vol_10"] / out["vol_60"].replace(0, np.nan)
+    out["skew_20"] = logret.rolling(20).skew()
+    out["skew_60"] = logret.rolling(60).skew()
+    out["drawdown_60"] = c / c.rolling(60).max() - 1
+    out["drawdown_252"] = c / c.rolling(min(252, annualizer)).max() - 1
+    for n in (20, 60):
+        rolling_low, rolling_high = c.rolling(n).min(), c.rolling(n).max()
+        out[f"range_position_{n}"] = (c - rolling_low) / (rolling_high - rolling_low).replace(0, np.nan)
 
     # Context makes a stock forecast relative to its broad market instead of treating it in isolation.
     if context is not None and not context.empty:

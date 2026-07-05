@@ -6,6 +6,7 @@ from market_oracle.catalog import CATEGORIES, CRYPTO, ETF_CATEGORIES
 from market_oracle.engine import observation_label, signal_label
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.model import fit_forecast
+from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan
 from market_oracle.risk import periods_per_year, risk_metrics
 
 
@@ -41,6 +42,7 @@ def test_forecast_bounds():
     assert result.samples > 250
     assert result.validation_start < result.validation_end
     assert result.baseline_accuracy >= 0.5
+    assert 0 <= result.linear_weight <= 1
 
 
 def test_risk_and_backtest():
@@ -81,3 +83,17 @@ def test_low_quality_forecast_never_becomes_buy_signal():
     assert signal_label(0.9, forecast["quality"]) == "BRAK PRZEWAGI"
     confirmed = {"quality": "UMIARKOWANA", "probability_up": 0.60, "expected_return": 0.03}
     assert observation_label(confirmed) == "KANDYDAT WZROSTOWY"
+
+
+def test_background_monitor_persists_snapshot(tmp_path, monkeypatch):
+    sample = pd.DataFrame([{
+        "Symbol": "TEST", "Ocena": "OBSERWUJ", "Score": 1.5,
+        "P(wzrost)": 0.52, "Oczekiwany ruch": 0.01,
+    }])
+    monkeypatch.setattr("market_oracle.monitor.scan_market", lambda symbols, horizon, years: (sample, {}))
+    path = tmp_path / "signals.json"
+    result = run_signal_scan(["TEST"], path=path)
+    loaded = load_snapshot(path)
+    assert result["status"] == "complete"
+    assert loaded["records"][0]["Symbol"] == "TEST"
+    assert len(default_universe()) >= 40

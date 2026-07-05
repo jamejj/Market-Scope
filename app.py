@@ -11,7 +11,8 @@ from market_oracle.catalog import (
     CATEGORIES, CRYPTO, ETF_CATEGORIES, category_options, crypto_options, etf_options,
 )
 from market_oracle.data import download_history, download_profile
-from market_oracle.engine import analyze_asset, scan_market, signal_label
+from market_oracle.engine import analyze_asset, signal_label
+from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan
 from market_oracle.search import search_assets
 
 
@@ -40,11 +41,6 @@ def cached_analysis(symbol: str, horizons: tuple[int, ...], years: int):
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_profile(symbol: str):
     return download_profile(symbol)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_scan(symbols: tuple[str, ...], horizon: int, years: int):
-    return scan_market(list(symbols), horizon=horizon, years=years)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -144,12 +140,14 @@ def render_analysis(result: dict, profile: dict) -> None:
                 "Przewaga trafności": forecast["accuracy"] - forecast["baseline_accuracy"],
                 "Okres walidacji": f"{forecast['validation_start']} → {forecast['validation_end']}",
                 "Liczba obserwacji": forecast["samples"],
+                "Udział modelu liniowego": forecast["linear_weight"],
             })
         diagnostics = pd.DataFrame(diagnostic_rows)
         st.dataframe(
             diagnostics.style.format({
                 "AUC": "{:.3f}", "Brier": "{:.3f}", "Trafność modelu": "{:.1%}",
                 "Trafność prostego bazowego": "{:.1%}", "Przewaga trafności": "{:+.1%}",
+                "Udział modelu liniowego": "{:.0%}",
             }),
             use_container_width=True, hide_index=True,
         )
@@ -235,6 +233,69 @@ def search_picker(prefix: str) -> str:
     return options[selected]
 
 
+@st.fragment(run_every="30s")
+def render_signal_dashboard() -> None:
+    snapshot = load_snapshot()
+    if not snapshot:
+        st.info("Ranking nie został jeszcze policzony. Uruchom aplikację plikiem **Uruchom MarketScope.command** albo użyj przycisku pełnego skanu poniżej.")
+        return
+
+    status = snapshot.get("status")
+    completed, total = snapshot.get("completed", 0), snapshot.get("total", 0)
+    if status == "running":
+        st.info(f"Monitor analizuje rynek w tle: **{completed}/{total}** instrumentów.")
+        st.progress(completed / total if total else 0)
+    elif status == "error":
+        st.error(f"Ostatni skan został przerwany: {snapshot.get('error', 'nieznany błąd')}")
+    else:
+        updated = pd.Timestamp(snapshot["updated_at"])
+        if updated.tzinfo is not None:
+            updated = updated.tz_convert("Europe/Warsaw")
+        st.success(f"Ranking gotowy · aktualizacja: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzont: **{snapshot.get('horizon', 20)} dni/sesji**")
+
+    frame = pd.DataFrame(snapshot.get("records", []))
+    if frame.empty:
+        st.warning("Monitor nie ma jeszcze wystarczającej liczby ukończonych analiz.")
+        return
+
+    bullish_labels = {"SILNY KANDYDAT WZROSTOWY", "KANDYDAT WZROSTOWY"}
+    bearish_labels = {"SILNE RYZYKO SPADKU", "RYZYKO SPADKU"}
+    bullish = frame[frame["Ocena"].isin(bullish_labels)]
+    bearish = frame[frame["Ocena"].isin(bearish_labels)]
+    no_edge = frame[frame["Ocena"] == "BRAK SYGNAŁU"]
+    summary = st.columns(4)
+    summary[0].metric("Przeskanowane", len(frame))
+    summary[1].metric("Kandydaci wzrostowi", len(bullish))
+    summary[2].metric("Ryzyko spadku", len(bearish))
+    summary[3].metric("Brak przewagi", len(no_edge))
+
+    formats = {
+        "Cena": "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
+        "AUC walidacji": "{:.3f}", "Pewność": "{:.1%}", "Zmienność roczna": "{:.1%}",
+        "Max drawdown": "{:.1%}", "Score": "{:.2f}",
+    }
+    st.subheader("Kandydaci wzrostowi")
+    if bullish.empty:
+        st.info("Obecnie żaden instrument nie spełnia pełnego filtra wzrostowego. Monitor nie uzupełnia listy na siłę.")
+    else:
+        columns = ["Symbol", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Jakość modelu", "Pewność", "Zmienność roczna"]
+        st.dataframe(bullish[columns].style.format(formats), use_container_width=True, hide_index=True)
+
+    if not bearish.empty:
+        with st.expander(f"Ryzyko spadku ({len(bearish)})"):
+            columns = ["Symbol", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Jakość modelu"]
+            st.dataframe(bearish[columns].style.format(formats), use_container_width=True, hide_index=True)
+
+    with st.expander(f"Pełny ranking ({len(frame)} instrumentów)"):
+        columns = ["Symbol", "Cena", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Jakość modelu", "Pewność", "Zmienność roczna", "Max drawdown", "Score"]
+        st.dataframe(frame[columns].style.format(formats), use_container_width=True, hide_index=True)
+        st.download_button("Pobierz ranking CSV", frame.to_csv(index=False).encode(), "marketscope_signals.csv", "text/csv")
+
+    errors = snapshot.get("errors", {})
+    if errors:
+        st.caption(f"Pominięte instrumenty: {len(errors)}")
+
+
 st.title("MarketScope PRO")
 st.caption("Analityka akcji, ETF-ów i kryptowalut · sygnały ML · ryzyko · backtest")
 
@@ -294,66 +355,14 @@ with crypto:
     analysis_action(crypto_symbol, "crypto_analysis", "crypto_analyze")
 
 with radar:
-    st.header("Najmocniejsze sygnały do obserwacji")
-    st.write("Skanuje do 30 instrumentów i pokazuje kandydatów dopiero wtedy, gdy kierunek, oczekiwany ruch oraz walidacja wzajemnie się potwierdzają.")
+    st.header("Automatyczny ranking rynku")
+    st.write(f"Monitor śledzi **{len(default_universe())}** instrumentów z GPW, USA, ETF-ów i krypto. Po uruchomieniu aplikacji skanuje je w tle, a ranking odświeża co 12 godzin.")
     st.caption("To lista badawcza, nie automatyczna rekomendacja zakupu ani sprzedaży.")
-    radar_presets = {
-        "GPW — największe": ", ".join(list(CATEGORIES["GPW — największe spółki"].values())),
-        "GPW — mniejsze (pierwsze 25)": ", ".join(list(CATEGORIES["GPW — średnie i mniejsze"].values())[:25]),
-        "USA — technologia (pierwsze 25)": ", ".join(list(CATEGORIES["USA — technologia i półprzewodniki"].values())[:25]),
-        "USA — mniejsze i spekulacyjne": ", ".join(CATEGORIES["USA — mniejsze i spekulacyjne"].values()),
-        "ETF — szeroki rynek": ", ".join(ETF_CATEGORIES["Szeroki rynek USA"].values()),
-        "Krypto — główne": ", ".join(list(CRYPTO.values())[:15]),
-        "Własna lista": "AAPL, CDR.WA, SPY, BTC-USD",
-    }
-    preset_name = st.selectbox("Gotowy zestaw", list(radar_presets), key="radar_preset")
-    if st.session_state.get("last_radar_preset") != preset_name:
-        st.session_state["radar_symbols"] = radar_presets[preset_name]
-        st.session_state["last_radar_preset"] = preset_name
-    symbols_text = st.text_area("Symbole — możesz je zmienić", key="radar_symbols", height=100)
-    horizon_map = {"1 sesja": 1, "5 sesji / tydzień": 5, "20 sesji / miesiąc": 20}
-    horizon_label = st.selectbox("Horyzont", list(horizon_map), index=1, key="radar_horizon")
-    if st.button("Uruchom radar", type="primary", key="radar_run", use_container_width=True):
-        symbols = tuple(s.strip().upper() for s in symbols_text.replace("\n", ",").split(",") if s.strip())
-        if len(symbols) > 30:
-            st.error("Maksymalnie 30 instrumentów w jednym skanowaniu.")
-        else:
-            with st.spinner("Analizuję instrumenty. Większy zestaw może potrwać kilka minut…"):
-                frame, errors = cached_scan(symbols, horizon_map[horizon_label], years)
-            st.session_state["radar_result"] = (frame, errors)
-    if "radar_result" in st.session_state:
-        frame, errors = st.session_state["radar_result"]
-        if not frame.empty:
-            bullish_labels = {"SILNY KANDYDAT WZROSTOWY", "KANDYDAT WZROSTOWY"}
-            bearish_labels = {"SILNE RYZYKO SPADKU", "RYZYKO SPADKU"}
-            bullish = frame[frame["Ocena"].isin(bullish_labels)]
-            bearish = frame[frame["Ocena"].isin(bearish_labels)]
-            if not bullish.empty:
-                st.success(f"Znaleziono {len(bullish)} potwierdzonych kandydatów wzrostowych.")
-                st.dataframe(
-                    bullish[["Symbol", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Pewność"]].style.format({
-                        "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}", "AUC walidacji": "{:.3f}", "Pewność": "{:.1%}",
-                    }), use_container_width=True, hide_index=True,
-                )
-            else:
-                st.info("W tym zestawie nie ma obecnie potwierdzonego kandydata wzrostowego. To poprawny wynik skanowania — lista nie jest wypełniana na siłę.")
-            if not bearish.empty:
-                with st.expander(f"Ostrzeżenia spadkowe ({len(bearish)})"):
-                    st.dataframe(bearish[["Symbol", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji"]], use_container_width=True, hide_index=True)
-
-            st.subheader("Pełny ranking")
-            display_columns = ["Symbol", "Cena", "Ocena", "Sygnał", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Jakość modelu", "Pewność", "Zmienność roczna", "Max drawdown", "Score"]
-            formats = {
-                "Cena": "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
-                "AUC walidacji": "{:.3f}", "Pewność": "{:.1%}", "Zmienność roczna": "{:.1%}",
-                "Max drawdown": "{:.1%}", "Score": "{:.2f}",
-            }
-            st.dataframe(frame[display_columns].style.format(formats), use_container_width=True, hide_index=True)
-            st.download_button("Pobierz pełny ranking CSV", frame.to_csv(index=False).encode(), "market_oracle_ranking.csv", "text/csv")
-        if errors:
-            with st.expander(f"Pominięte instrumenty: {len(errors)}"):
-                for failed_symbol, error in errors.items():
-                    st.write(f"**{failed_symbol}:** {error}")
+    render_signal_dashboard()
+    if st.button("Przelicz cały ranking teraz", key="signals_refresh", help="Pełny skan może potrwać kilka minut."):
+        with st.spinner("Analizuję cały monitorowany rynek. Możesz pozostawić tę kartę otwartą…"):
+            run_signal_scan(years=years)
+        st.rerun()
 
 with backtest:
     st.header("Backtest walk-forward")
@@ -419,6 +428,9 @@ with settings:
     Profesjonalny system powinien mieć prawo odpowiedzieć „nie wiem”. Wymuszanie sygnału każdego dnia zwykle tylko zwiększa liczbę fałszywych transakcji.
     """)
 
+    st.subheader("Automatyczny monitor rynku")
+    st.write("Launcher uruchamia obok aplikacji lekki proces o obniżonym priorytecie. Co 12 godzin sprawdza reprezentatywne spółki GPW i USA, ETF-y oraz krypto. Wynik zapisuje lokalnie, dlatego zakładka **Sygnały** pokazuje od razu ostatni gotowy ranking i odświeża postęp bez przeładowywania całej aplikacji.")
+
     with st.expander("Znaczenie parametrów i skrótów"):
         st.markdown("""
         - **P(wzrost)** — skalibrowane prawdopodobieństwo dodatniego zwrotu po wybranym czasie.
@@ -436,7 +448,7 @@ with method:
 
 Model korzysta z ponad 30 cech: stóp zwrotu, RSI Wildera, MACD, ATR, pasm Bollingera, średnich 10–200 sesji, momentum, zmienności, luk cenowych, anomalii wolumenu oraz relatywnej siły względem rynku. Dla GPW kontekstem jest fundusz śledzący WIG20 Total Return, dla rynku amerykańskiego S&P 500, a dla altcoinów Bitcoin.
 
-Kierunek jest średnią regularizowanej regresji logistycznej i gradient boostingu. Oczekiwany ruch łączy Ridge z lasem losowym. Prawdopodobieństwo jest automatycznie ściągane do 50%, gdy AUC i Brier na późniejszym okresie nie potwierdzają jakości modelu. Po walidacji modele produkcyjne są ponownie trenowane na całej dostępnej historii.
+Kierunek łączy regularizowaną regresję logistyczną i gradient boosting. Ich proporcja jest dobierana osobno dla każdego instrumentu i horyzontu na wydzielonym okresie kalibracji. Oczekiwany ruch łączy Ridge z lasem losowym. Prawdopodobieństwo jest automatycznie ściągane do 50%, gdy AUC i Brier na późniejszym okresie nie potwierdzają jakości modelu. Po walidacji modele produkcyjne są ponownie trenowane na całej dostępnej historii.
 
 ### Ochrona przed fałszywie dobrym wynikiem
 

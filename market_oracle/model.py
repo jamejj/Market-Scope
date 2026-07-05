@@ -25,6 +25,7 @@ class Forecast:
     baseline_accuracy: float
     validation_start: str
     validation_end: str
+    linear_weight: float
     samples: int
     importance: pd.Series
 
@@ -73,11 +74,19 @@ def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.D
     eval_linear.fit(X_train, y_train)
     eval_tree.fit(X_train, y_train)
     calibrator = None
+    linear_weight = 0.55
     if use_calibration and y_cal is not None and y_cal.nunique() > 1:
-        calibration_raw = 0.55 * eval_linear.predict_proba(X_cal)[:, 1] + 0.45 * eval_tree.predict_proba(X_cal)[:, 1]
+        cal_linear = eval_linear.predict_proba(X_cal)[:, 1]
+        cal_tree = eval_tree.predict_proba(X_cal)[:, 1]
+        candidate_weights = np.linspace(0.0, 1.0, 21)
+        linear_weight = float(min(
+            candidate_weights,
+            key=lambda weight: brier_score_loss(y_cal, weight * cal_linear + (1 - weight) * cal_tree),
+        ))
+        calibration_raw = linear_weight * cal_linear + (1 - linear_weight) * cal_tree
         calibrator = LogisticRegression(C=0.5, max_iter=1000)
         calibrator.fit(calibration_raw.reshape(-1, 1), y_cal)
-    valid_raw = 0.55 * eval_linear.predict_proba(X_valid)[:, 1] + 0.45 * eval_tree.predict_proba(X_valid)[:, 1]
+    valid_raw = linear_weight * eval_linear.predict_proba(X_valid)[:, 1] + (1 - linear_weight) * eval_tree.predict_proba(X_valid)[:, 1]
     valid_prob = calibrator.predict_proba(valid_raw.reshape(-1, 1))[:, 1] if calibrator is not None else valid_raw
 
     # Shrink probabilities toward 0.5 when validation is weak or small.
@@ -96,7 +105,7 @@ def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.D
     linear, tree = _models()
     linear.fit(X, y)
     tree.fit(X, y)
-    raw_prob = float(0.55 * linear.predict_proba(latest)[:, 1][0] + 0.45 * tree.predict_proba(latest)[:, 1][0])
+    raw_prob = float(linear_weight * linear.predict_proba(latest)[:, 1][0] + (1 - linear_weight) * tree.predict_proba(latest)[:, 1][0])
     if calibrator is not None:
         raw_prob = float(calibrator.predict_proba(np.array([[raw_prob]]))[:, 1][0])
     probability = 0.5 + skill * (raw_prob - 0.5)
@@ -104,7 +113,7 @@ def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.D
     eval_reg_linear = make_pipeline(SimpleImputer(strategy="median"), RobustScaler(), Ridge(alpha=18.0))
     eval_reg_tree = make_pipeline(
         SimpleImputer(strategy="median"),
-        RandomForestRegressor(n_estimators=180, max_depth=5, min_samples_leaf=14, max_features=0.65, n_jobs=-1, random_state=42),
+        RandomForestRegressor(n_estimators=100, max_depth=5, min_samples_leaf=14, max_features=0.65, n_jobs=-1, random_state=42),
     )
     eval_reg_linear.fit(X_train, r_train)
     eval_reg_tree.fit(X_train, r_train)
@@ -113,7 +122,7 @@ def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.D
     reg_linear = make_pipeline(SimpleImputer(strategy="median"), RobustScaler(), Ridge(alpha=18.0))
     reg_tree = make_pipeline(
         SimpleImputer(strategy="median"),
-        RandomForestRegressor(n_estimators=180, max_depth=5, min_samples_leaf=14, max_features=0.65, n_jobs=-1, random_state=42),
+        RandomForestRegressor(n_estimators=100, max_depth=5, min_samples_leaf=14, max_features=0.65, n_jobs=-1, random_state=42),
     )
     reg_linear.fit(X, returns)
     reg_tree.fit(X, returns)
@@ -131,5 +140,6 @@ def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.D
         accuracy=accuracy, auc=float(auc), brier=brier, quality=quality,
         baseline_accuracy=max(positive_rate, 1 - positive_rate),
         validation_start=str(X_valid.index[0].date()), validation_end=str(X_valid.index[-1].date()),
+        linear_weight=linear_weight,
         samples=len(X), importance=importance,
     )
