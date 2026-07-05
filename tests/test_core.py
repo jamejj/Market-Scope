@@ -3,6 +3,7 @@ import pandas as pd
 
 from market_oracle.backtest import walk_forward_backtest
 from market_oracle.catalog import CATEGORIES, CRYPTO, ETF_CATEGORIES
+from market_oracle.engine import observation_label, signal_label
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.model import fit_forecast
 from market_oracle.risk import periods_per_year, risk_metrics
@@ -72,3 +73,11 @@ def test_market_context_features_are_added():
     assert "market_beta_60" in features
     assert "relative_strength_20" in features
     assert np.isfinite(features["market_corr_60"]).all()
+
+
+def test_low_quality_forecast_never_becomes_buy_signal():
+    forecast = {"quality": "NISKA — BRAK PRZEWAGI", "probability_up": 0.9, "expected_return": 0.1}
+    assert observation_label(forecast) == "BRAK SYGNAŁU"
+    assert signal_label(0.9, forecast["quality"]) == "BRAK PRZEWAGI"
+    confirmed = {"quality": "UMIARKOWANA", "probability_up": 0.60, "expected_return": 0.03}
+    assert observation_label(confirmed) == "KANDYDAT WZROSTOWY"

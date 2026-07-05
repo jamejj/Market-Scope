@@ -52,13 +52,33 @@ def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.D
     # Purge observations whose label reaches into the validation interval.
     train_end = max(100, split - horizon)
     X_train, y_train = X.iloc[:train_end], y.iloc[:train_end]
-    X_valid, y_valid = X.iloc[split:], y.iloc[split:]
-    r_train, r_valid = returns.iloc[:train_end], returns.iloc[split:]
+    r_train = returns.iloc[:train_end]
+
+    # When history allows it, probability calibration and final assessment use separate time blocks.
+    validation_size = len(X) - split
+    use_calibration = validation_size >= max(120, 4 * horizon + 40)
+    if use_calibration:
+        calibration_size = validation_size // 2
+        calibration_end = split + calibration_size
+        assessment_start = min(calibration_end + horizon, len(X) - 30)
+        X_cal, y_cal = X.iloc[split:calibration_end], y.iloc[split:calibration_end]
+        X_valid, y_valid = X.iloc[assessment_start:], y.iloc[assessment_start:]
+        r_valid = returns.iloc[assessment_start:]
+    else:
+        X_cal = y_cal = None
+        X_valid, y_valid = X.iloc[split:], y.iloc[split:]
+        r_valid = returns.iloc[split:]
 
     eval_linear, eval_tree = _models()
     eval_linear.fit(X_train, y_train)
     eval_tree.fit(X_train, y_train)
-    valid_prob = 0.55 * eval_linear.predict_proba(X_valid)[:, 1] + 0.45 * eval_tree.predict_proba(X_valid)[:, 1]
+    calibrator = None
+    if use_calibration and y_cal is not None and y_cal.nunique() > 1:
+        calibration_raw = 0.55 * eval_linear.predict_proba(X_cal)[:, 1] + 0.45 * eval_tree.predict_proba(X_cal)[:, 1]
+        calibrator = LogisticRegression(C=0.5, max_iter=1000)
+        calibrator.fit(calibration_raw.reshape(-1, 1), y_cal)
+    valid_raw = 0.55 * eval_linear.predict_proba(X_valid)[:, 1] + 0.45 * eval_tree.predict_proba(X_valid)[:, 1]
+    valid_prob = calibrator.predict_proba(valid_raw.reshape(-1, 1))[:, 1] if calibrator is not None else valid_raw
 
     # Shrink probabilities toward 0.5 when validation is weak or small.
     auc = roc_auc_score(y_valid, valid_prob) if y_valid.nunique() > 1 else 0.5
@@ -68,7 +88,7 @@ def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.D
     skill = float(discrimination * calibration)
     if auc >= 0.60 and brier <= 0.24:
         quality = "WYSOKA"
-    elif auc >= 0.55 and brier <= 0.255:
+    elif auc >= 0.55 and brier <= 0.26:
         quality = "UMIARKOWANA"
     else:
         quality = "NISKA — BRAK PRZEWAGI"
@@ -77,6 +97,8 @@ def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.D
     linear.fit(X, y)
     tree.fit(X, y)
     raw_prob = float(0.55 * linear.predict_proba(latest)[:, 1][0] + 0.45 * tree.predict_proba(latest)[:, 1][0])
+    if calibrator is not None:
+        raw_prob = float(calibrator.predict_proba(np.array([[raw_prob]]))[:, 1][0])
     probability = 0.5 + skill * (raw_prob - 0.5)
 
     eval_reg_linear = make_pipeline(SimpleImputer(strategy="median"), RobustScaler(), Ridge(alpha=18.0))

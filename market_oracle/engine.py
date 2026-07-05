@@ -64,7 +64,9 @@ def analyze_asset(symbol: str, horizons: tuple[int, ...] = (1, 5, 20), years: in
     }
 
 
-def signal_label(probability: float) -> str:
+def signal_label(probability: float, quality: str | None = None) -> str:
+    if quality and quality.startswith("NISKA"):
+        return "BRAK PRZEWAGI"
     if probability >= 0.62:
         return "SILNY WZROSTOWY"
     if probability >= 0.54:
@@ -74,6 +76,22 @@ def signal_label(probability: float) -> str:
     if probability <= 0.46:
         return "SPADKOWY"
     return "NEUTRALNY"
+
+
+def observation_label(forecast: dict) -> str:
+    if forecast["quality"].startswith("NISKA"):
+        return "BRAK SYGNAŁU"
+    probability = forecast["probability_up"]
+    expected = forecast["expected_return"]
+    if probability >= 0.62 and expected > 0:
+        return "SILNY KANDYDAT WZROSTOWY"
+    if probability >= 0.55 and expected > 0:
+        return "KANDYDAT WZROSTOWY"
+    if probability <= 0.38 and expected < 0:
+        return "SILNE RYZYKO SPADKU"
+    if probability <= 0.45 and expected < 0:
+        return "RYZYKO SPADKU"
+    return "OBSERWUJ"
 
 
 def scan_market(symbols: list[str], horizon: int = 5, years: int = 8) -> tuple[pd.DataFrame, dict[str, str]]:
@@ -86,10 +104,11 @@ def scan_market(symbols: list[str], horizon: int = 5, years: int = 8) -> tuple[p
             quality = max(0.0, min(1.0, (f["auc"] - 0.45) / 0.20))
             score = (f["probability_up"] - 0.5) * 200 * quality - r["annual_volatility"] * 10
             rows.append({
-                "Symbol": symbol, "Cena": result["last_price"], "Sygnał": signal_label(f["probability_up"]),
+                "Symbol": symbol, "Cena": result["last_price"],
+                "Ocena": observation_label(f), "Sygnał": signal_label(f["probability_up"], f["quality"]),
                 "P(wzrost)": f["probability_up"], "Oczekiwany ruch": f["expected_return"],
                 "Dolna granica 90%": f["lower_return"], "Górna granica 90%": f["upper_return"],
-                "AUC walidacji": f["auc"], "Pewność": confidence * quality,
+                "AUC walidacji": f["auc"], "Jakość modelu": f["quality"], "Pewność": confidence * quality,
                 "Zmienność roczna": r["annual_volatility"], "Max drawdown": r["max_drawdown"], "Score": score,
             })
         except Exception as exc:

@@ -92,9 +92,19 @@ def render_analysis(result: dict, profile: dict) -> None:
     title_col, date_col = st.columns([3, 1])
     title_col.subheader(f"{profile_name(profile, symbol)} · {symbol}")
     date_col.caption(f"Dane do {result['last_date'].date()} · benchmark: {result['benchmark']}")
-    st.metric("Ostatnia cena", f"{result['last_price']:,.2f} {profile.get('currency', '')}".strip())
 
     five_day = result["forecasts"].get(5) or next(iter(result["forecasts"].values()))
+    technical = result["technical"]
+    trend_points = sum([
+        technical["return_20d"] > 0, technical["rsi_14"] >= 50,
+        technical["above_sma_50"], technical["above_sma_200"],
+    ])
+    trend_label = "POZYTYWNY" if trend_points >= 3 else ("NEGATYWNY" if trend_points <= 1 else "MIESZANY")
+    summary_cols = st.columns(3)
+    summary_cols[0].metric("Ostatnia cena", f"{result['last_price']:,.2f} {profile.get('currency', '')}".strip())
+    summary_cols[1].metric("Trend techniczny", trend_label, help="Opis bieżącego trendu, nie prognoza przyszłej ceny.")
+    summary_cols[2].metric("Jakość modelu 5-dniowego", five_day["quality"])
+
     if five_day["quality"] == "NISKA — BRAK PRZEWAGI":
         st.warning(
             f"**Brak potwierdzonej przewagi modelu.** W walidacji tygodniowej AUC wyniosło "
@@ -114,7 +124,7 @@ def render_analysis(result: dict, profile: dict) -> None:
     for column, (horizon, forecast) in zip(columns, result["forecasts"].items()):
         with column:
             st.metric(
-                f"{horizon_names.get(horizon, str(horizon))} · {signal_label(forecast['probability_up'])}",
+                f"{horizon_names.get(horizon, str(horizon))} · {signal_label(forecast['probability_up'], forecast['quality'])}",
                 f"P(wzrost): {pct(forecast['probability_up'])}",
                 f"oczekiwany ruch {pct(forecast['expected_return'])}",
             )
@@ -158,7 +168,6 @@ def render_analysis(result: dict, profile: dict) -> None:
     figure.update_layout(height=520, xaxis_rangeslider_visible=False, margin=dict(l=20, r=20, t=25, b=20), legend=dict(orientation="h"))
     st.plotly_chart(figure, use_container_width=True)
 
-    technical = result["technical"]
     st.subheader("Momentum i trend")
     tech_cols = st.columns(6)
     values = [
@@ -230,7 +239,7 @@ st.title("MarketScope PRO")
 st.caption("Analityka akcji, ETF-ów i kryptowalut · sygnały ML · ryzyko · backtest")
 
 home, stocks, etfs, crypto, radar, backtest, settings, method = st.tabs([
-    "🏠 Start", "🏢 Spółki", "🧺 ETF-y", "₿ Krypto", "🎯 Radar", "🧪 Backtest", "⚙️ Model", "ℹ️ Metodologia",
+    "🏠 Start", "🏢 Spółki", "🧺 ETF-y", "₿ Krypto", "⭐ Sygnały", "🧪 Backtest", "⚙️ Model", "ℹ️ Metodologia",
 ])
 
 with home:
@@ -250,7 +259,6 @@ with home:
 
 with stocks:
     st.header("Analiza spółek")
-    st.success("Tak — polskie spółki są dostępne. Wybierz grupę **GPW** poniżej.")
     stock_mode = st.radio("Sposób wyboru", ["Katalog", "Wyszukiwarka globalna", "Wpisz symbol"], horizontal=True, key="stock_mode")
     stock_symbol = ""
     if stock_mode == "Katalog":
@@ -286,8 +294,9 @@ with crypto:
     analysis_action(crypto_symbol, "crypto_analysis", "crypto_analyze")
 
 with radar:
-    st.header("Radar wielu instrumentów")
-    st.write("Porównuje do 30 instrumentów i szereguje je według sygnału, jakości walidacji oraz ryzyka.")
+    st.header("Najmocniejsze sygnały do obserwacji")
+    st.write("Skanuje do 30 instrumentów i pokazuje kandydatów dopiero wtedy, gdy kierunek, oczekiwany ruch oraz walidacja wzajemnie się potwierdzają.")
+    st.caption("To lista badawcza, nie automatyczna rekomendacja zakupu ani sprzedaży.")
     radar_presets = {
         "GPW — największe": ", ".join(list(CATEGORIES["GPW — największe spółki"].values())),
         "GPW — mniejsze (pierwsze 25)": ", ".join(list(CATEGORIES["GPW — średnie i mniejsze"].values())[:25]),
@@ -315,7 +324,25 @@ with radar:
     if "radar_result" in st.session_state:
         frame, errors = st.session_state["radar_result"]
         if not frame.empty:
-            display_columns = ["Symbol", "Cena", "Sygnał", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Pewność", "Zmienność roczna", "Max drawdown", "Score"]
+            bullish_labels = {"SILNY KANDYDAT WZROSTOWY", "KANDYDAT WZROSTOWY"}
+            bearish_labels = {"SILNE RYZYKO SPADKU", "RYZYKO SPADKU"}
+            bullish = frame[frame["Ocena"].isin(bullish_labels)]
+            bearish = frame[frame["Ocena"].isin(bearish_labels)]
+            if not bullish.empty:
+                st.success(f"Znaleziono {len(bullish)} potwierdzonych kandydatów wzrostowych.")
+                st.dataframe(
+                    bullish[["Symbol", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Pewność"]].style.format({
+                        "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}", "AUC walidacji": "{:.3f}", "Pewność": "{:.1%}",
+                    }), use_container_width=True, hide_index=True,
+                )
+            else:
+                st.info("W tym zestawie nie ma obecnie potwierdzonego kandydata wzrostowego. To poprawny wynik skanowania — lista nie jest wypełniana na siłę.")
+            if not bearish.empty:
+                with st.expander(f"Ostrzeżenia spadkowe ({len(bearish)})"):
+                    st.dataframe(bearish[["Symbol", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji"]], use_container_width=True, hide_index=True)
+
+            st.subheader("Pełny ranking")
+            display_columns = ["Symbol", "Cena", "Ocena", "Sygnał", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Jakość modelu", "Pewność", "Zmienność roczna", "Max drawdown", "Score"]
             formats = {
                 "Cena": "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
                 "AUC walidacji": "{:.3f}", "Pewność": "{:.1%}", "Zmienność roczna": "{:.1%}",
