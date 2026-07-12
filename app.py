@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import math
+import subprocess
+import sys
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -13,7 +16,7 @@ from market_oracle.catalog import (
 )
 from market_oracle.data import download_history, download_profile
 from market_oracle.engine import analyze_asset, scan_market_multi, signal_label
-from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, snapshot_is_stale
+from market_oracle.monitor import default_universe, load_snapshot, snapshot_is_stale
 from market_oracle.search import search_assets
 
 
@@ -32,6 +35,7 @@ st.markdown("""
 if "training_years" not in st.session_state:
     st.session_state["training_years"] = 8
 years = int(st.session_state["training_years"])
+APP_DIR = Path(__file__).resolve().parent
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -47,6 +51,16 @@ def cached_profile(symbol: str):
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_search(query: str):
     return search_assets(query)
+
+
+def start_signal_scan_background() -> None:
+    subprocess.Popen(
+        [sys.executable, str(APP_DIR / "run_scan_once.py")],
+        cwd=str(APP_DIR),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def pct(value: float) -> str:
@@ -332,6 +346,10 @@ def _render_ranking_table(frame: pd.DataFrame, title: str, empty_text: str) -> N
     st.dataframe(frame[present].style.format(formats), use_container_width=True, hide_index=True)
 
 
+def _unique_symbols(frame: pd.DataFrame) -> int:
+    return int(frame["Symbol"].nunique()) if "Symbol" in frame and not frame.empty else 0
+
+
 @st.fragment(run_every="30s")
 def render_signal_dashboard() -> None:
     snapshot = load_snapshot()
@@ -343,7 +361,10 @@ def render_signal_dashboard() -> None:
     status = snapshot.get("status")
     completed, total = snapshot.get("completed", 0), snapshot.get("total", 0)
     if status == "running":
-        st.info(f"Monitor analizuje rynek w tle: **{completed}/{total}** instrumentów.")
+        st.info(
+            f"Monitor analizuje rynek w tle: **{completed}/{total}** instrumentów. "
+            "Poniżej widzisz ranking częściowy — pełny obraz pojawi się po zakończeniu skanu."
+        )
         st.progress(completed / total if total else 0)
     elif status == "error":
         st.error(f"Ostatni skan został przerwany: {snapshot.get('error', 'nieznany błąd')}")
@@ -377,12 +398,14 @@ def render_signal_dashboard() -> None:
     bearish_labels = {"SILNE RYZYKO SPADKU", "RYZYKO SPADKU"}
     bullish = frame[frame["Ocena"].isin(bullish_labels)]
     bearish = frame[frame["Ocena"].isin(bearish_labels)]
-    no_edge = frame[frame["Ocena"] == "BRAK SYGNAŁU"]
-    summary = st.columns(4)
-    summary[0].metric("Przeskanowane", len(frame))
-    summary[1].metric("Kandydaci wzrostowi", len(bullish))
-    summary[2].metric("Ryzyko spadku", len(bearish))
-    summary[3].metric("Brak przewagi", len(no_edge))
+    errors = snapshot.get("errors", {})
+    visible_symbols = _unique_symbols(frame)
+    summary = st.columns(5)
+    summary[0].metric("Instrumenty", f"{completed or visible_symbols}/{total or visible_symbols}")
+    summary[1].metric("Wiersze sygnałów", len(frame), help="Każdy instrument ma osobne wiersze dla horyzontów 1d/5d/20d.")
+    summary[2].metric("Kandydaci wzrostowi", _unique_symbols(bullish), help="Liczba unikalnych symboli z co najmniej jednym sygnałem wzrostowym.")
+    summary[3].metric("Ryzyko spadku", _unique_symbols(bearish), help="Liczba unikalnych symboli z co najmniej jednym sygnałem spadkowym.")
+    summary[4].metric("Pominięte", len(errors), help="Symbole bez danych lub z błędem pobierania.")
 
     formats = {
         "Cena": "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
@@ -452,7 +475,6 @@ def render_signal_dashboard() -> None:
             columns = ["Symbol", "Klasa", "Horyzont", "Setup", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Jakość modelu"]
             st.dataframe(bearish[columns].style.format(formats), use_container_width=True, hide_index=True)
 
-    errors = snapshot.get("errors", {})
     if errors:
         st.caption(f"Pominięte instrumenty: {len(errors)}")
 
@@ -536,9 +558,18 @@ with radar:
     st.write(f"Monitor śledzi **{len(default_universe())}** instrumentów z GPW, USA, ETF-ów i krypto oraz liczy kilka horyzontów: szybki ruch, swing i trend.")
     st.caption("To lista badawcza, nie automatyczna rekomendacja zakupu ani sprzedaży.")
     render_signal_dashboard()
-    if st.button("Przelicz cały ranking teraz", key="signals_refresh", help="Pełny skan może potrwać kilka minut."):
-        with st.spinner("Analizuję cały monitorowany rynek. Możesz pozostawić tę kartę otwartą…"):
-            run_signal_scan(years=years)
+    radar_snapshot = load_snapshot()
+    scan_running = bool(radar_snapshot and radar_snapshot.get("status") == "running")
+    if scan_running:
+        st.caption("Pełny skan już trwa. Przycisk przeliczenia jest zablokowany, żeby nie startować drugiego procesu na tych samych danych.")
+    if st.button(
+        "Przelicz cały ranking teraz",
+        key="signals_refresh",
+        help="Startuje jednorazowy skan w tle. Dashboard będzie pokazywał postęp.",
+        disabled=scan_running,
+    ):
+        start_signal_scan_background()
+        st.toast("Startuję przeliczenie rankingu w tle. Postęp pojawi się za chwilę.", icon="📡")
         st.rerun()
     with st.expander("Szybki skan własnych symboli"):
         st.write("Tu możesz sprawdzić instrumenty spoza głównego radaru, np. świeże krypto albo małe spółki.")
