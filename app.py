@@ -16,6 +16,7 @@ from market_oracle.catalog import (
 )
 from market_oracle.data import download_history, download_profile
 from market_oracle.engine import analyze_asset, scan_market_multi, signal_label
+from market_oracle.journal import journal_summary, load_journal, record_snapshot_signals, refresh_journal_results
 from market_oracle.monitor import default_universe, load_snapshot, snapshot_is_stale
 from market_oracle.search import search_assets
 
@@ -350,6 +351,99 @@ def _unique_symbols(frame: pd.DataFrame) -> int:
     return int(frame["Symbol"].nunique()) if "Symbol" in frame and not frame.empty else 0
 
 
+def _journal_dataframe(entries: list[dict]) -> pd.DataFrame:
+    frame = pd.DataFrame(entries)
+    if frame.empty:
+        return frame
+    frame["Wynik kierunkowy"] = frame["strategy_return"]
+    frame["Zwrot instrumentu"] = frame["underlying_return"]
+    frame["Trafiony"] = frame["hit"].map({True: "TAK", False: "NIE"}).fillna("—")
+    frame["Status"] = frame["status"].map({"open": "otwarty", "closed": "zamknięty"}).fillna(frame["status"])
+    frame["Kierunek"] = frame["direction"].map({"LONG": "wzrost", "SHORT": "spadek"}).fillna(frame["direction"])
+    return frame.rename(columns={
+        "signal_date": "Data sygnału", "symbol": "Symbol", "asset_class": "Klasa",
+        "horizon": "Horyzont", "setup": "Setup", "label": "Ocena",
+        "probability_up": "P(wzrost)", "expected_return": "Oczekiwany ruch",
+        "quality": "Jakość", "entry_price": "Cena start", "target_date": "Data oceny",
+        "target_price": "Cena oceny", "bars_elapsed": "Upłynęło", "bars_remaining": "Pozostało",
+        "score": "Score",
+    })
+
+
+def render_signal_journal() -> None:
+    st.header("Signal Journal")
+    st.write("To dziennik skuteczności. MarketScope zapisuje directional signals z pełnych skanów i później sprawdza, czy po zadanym horyzoncie kierunek faktycznie zadziałał.")
+    st.caption("To nadal paper-performance, nie historia realnych transakcji. Nie uwzględnia poślizgu, podatków ani wielkości pozycji.")
+
+    actions = st.columns([1, 1, 2])
+    if actions[0].button("Zapisz sygnały z ostatniego rankingu", key="journal_record", use_container_width=True):
+        added = record_snapshot_signals(load_snapshot() or {})
+        st.toast(f"Dodano nowych sygnałów: {added}", icon="📒")
+        st.rerun()
+    if actions[1].button("Aktualizuj wyniki", key="journal_refresh", use_container_width=True):
+        with st.spinner("Sprawdzam, które sygnały dojrzały do oceny…"):
+            _, errors = refresh_journal_results()
+        if errors:
+            st.warning(f"Nie udało się odświeżyć części symboli: {len(errors)}")
+        st.toast("Journal odświeżony", icon="✅")
+        st.rerun()
+    actions[2].info("Pełny skan zapisuje sygnały automatycznie. Ten przycisk jest przydatny, gdy masz już ranking z poprzedniego uruchomienia.")
+
+    entries = load_journal()
+    summary = journal_summary(entries)
+    metrics = st.columns(6)
+    metrics[0].metric("Wszystkie sygnały", summary["total"])
+    metrics[1].metric("Zamknięte", summary["closed"])
+    metrics[2].metric("Otwarte", summary["open"])
+    metrics[3].metric("Trafność", "—" if summary["hit_rate"] is None else pct(summary["hit_rate"]))
+    metrics[4].metric("Śr. wynik", "—" if summary["average_return"] is None else pct(summary["average_return"]))
+    metrics[5].metric("Mediana", "—" if summary["median_return"] is None else pct(summary["median_return"]))
+
+    if not entries:
+        st.info("Journal jest pusty. Uruchom pełny skan w zakładce **Sygnały**, a po zakończeniu directional signals zapiszą się automatycznie.")
+        return
+
+    frame = _journal_dataframe(entries)
+    formats = {
+        "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:+.1%}", "Cena start": "{:.2f}",
+        "Cena oceny": "{:.2f}", "Zwrot instrumentu": "{:+.1%}", "Wynik kierunkowy": "{:+.1%}",
+        "Score": "{:.2f}",
+    }
+    closed = frame[frame["Status"] == "zamknięty"].sort_values("Data sygnału", ascending=False)
+    open_entries = frame[frame["Status"] != "zamknięty"].sort_values(["Data sygnału", "Pozostało"], ascending=[False, True])
+
+    tabs = st.tabs(["Otwarte sygnały", "Zamknięte wyniki", "Statystyki"])
+    with tabs[0]:
+        columns = [
+            "Data sygnału", "Symbol", "Klasa", "Horyzont", "Kierunek", "Setup", "Ocena",
+            "P(wzrost)", "Cena start", "Upłynęło", "Pozostało", "Jakość", "Score",
+        ]
+        st.dataframe(open_entries[[c for c in columns if c in open_entries]].style.format(formats), use_container_width=True, hide_index=True)
+    with tabs[1]:
+        columns = [
+            "Data sygnału", "Data oceny", "Symbol", "Horyzont", "Kierunek", "Trafiony",
+            "Cena start", "Cena oceny", "Zwrot instrumentu", "Wynik kierunkowy", "Jakość", "Setup",
+        ]
+        if closed.empty:
+            st.info("Jeszcze żaden sygnał nie dojrzał do oceny. Wróć po upływie horyzontu 1/5/20 dni lub sesji.")
+        else:
+            st.dataframe(closed[[c for c in columns if c in closed]].style.format(formats), use_container_width=True, hide_index=True)
+    with tabs[2]:
+        if closed.empty:
+            st.info("Statystyki pojawią się po zamknięciu pierwszych sygnałów.")
+        else:
+            by_horizon = closed.groupby("Horyzont").agg(
+                Liczba=("Symbol", "count"),
+                Trafność=("hit", "mean"),
+                Średni_wynik=("strategy_return", "mean"),
+                Mediana=("strategy_return", "median"),
+            ).reset_index()
+            st.dataframe(
+                by_horizon.style.format({"Trafność": "{:.1%}", "Średni_wynik": "{:+.1%}", "Mediana": "{:+.1%}"}),
+                use_container_width=True, hide_index=True,
+            )
+
+
 @st.fragment(run_every="30s")
 def render_signal_dashboard() -> None:
     snapshot = load_snapshot()
@@ -482,8 +576,8 @@ def render_signal_dashboard() -> None:
 st.title("MarketScope PRO")
 st.caption("Analityka akcji, ETF-ów i kryptowalut · sygnały ML · ryzyko · backtest")
 
-home, stocks, etfs, crypto, radar, backtest, settings, method = st.tabs([
-    "🏠 Start", "🏢 Spółki", "🧺 ETF-y", "₿ Krypto", "⭐ Sygnały", "🧪 Backtest", "⚙️ Model", "ℹ️ Metodologia",
+home, stocks, etfs, crypto, radar, journal, backtest, settings, method = st.tabs([
+    "🏠 Start", "🏢 Spółki", "🧺 ETF-y", "₿ Krypto", "⭐ Sygnały", "📒 Journal", "🧪 Backtest", "⚙️ Model", "ℹ️ Metodologia",
 ])
 
 with home:
@@ -493,6 +587,9 @@ with home:
     c1.markdown("<div class='pro-card'><h3>🏢 Spółki</h3><p>172 pozycje w katalogu, w tym GPW, USA, sektory i mniejsze firmy. Dostępna jest też wyszukiwarka globalna.</p></div>", unsafe_allow_html=True)
     c2.markdown("<div class='pro-card'><h3>🧺 ETF-y</h3><p>Szeroki rynek, sektory, obligacje, surowce, regiony świata, fundusze tematyczne i UCITS.</p></div>", unsafe_allow_html=True)
     c3.markdown("<div class='pro-card'><h3>₿ Krypto</h3><p>Najważniejsze kryptowaluty z osobną informacją o podwyższonym ryzyku i zmienności.</p></div>", unsafe_allow_html=True)
+    c4, c5 = st.columns(2)
+    c4.markdown("<div class='pro-card'><h3>⭐ Radar</h3><p>Automatyczny skaner rynku liczy hot movers, setupy swingowe i trendowe na kilku horyzontach.</p></div>", unsafe_allow_html=True)
+    c5.markdown("<div class='pro-card'><h3>📒 Journal</h3><p>Directional signals są zapisywane i później rozliczane, żeby sprawdzić realną skuteczność modelu.</p></div>", unsafe_allow_html=True)
     st.subheader("Jak czytać prognozę?")
     st.markdown("""
     - **P(wzrost)** mówi, jak często model oczekuje ceny wyższej po danym horyzoncie.
@@ -592,6 +689,9 @@ with radar:
             _render_ranking_table(custom_frame.sort_values("Score", ascending=False), "Wynik szybkiego skanu", "Brak danych do pokazania.")
             if custom_errors:
                 st.caption(f"Pominięte / bez danych: {', '.join(custom_errors)}")
+
+with journal:
+    render_signal_journal()
 
 with backtest:
     st.header("Backtest walk-forward")

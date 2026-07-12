@@ -5,6 +5,7 @@ from market_oracle.backtest import walk_forward_backtest
 from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES
 from market_oracle.engine import observation_label, signal_label
 from market_oracle.features import build_features, supervised_frame
+from market_oracle.journal import load_journal, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, snapshot_is_stale
 from market_oracle.risk import periods_per_year, risk_metrics
@@ -109,3 +110,38 @@ def test_old_signal_snapshot_is_considered_stale():
         "errors": {},
     }
     assert snapshot_is_stale(old_snapshot)
+
+
+def test_signal_journal_records_and_evaluates(tmp_path, monkeypatch):
+    snapshot = {
+        "status": "complete", "updated_at": "2026-01-10T12:00:00+00:00",
+        "records": [
+            {
+                "Symbol": "TEST", "Klasa": "USA", "Horyzont": 5, "Data": "2026-01-10",
+                "Cena": 100.0, "Setup": "Breakout / momentum",
+                "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
+                "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62,
+                "Brier": 0.22, "Jakość modelu": "WYSOKA", "Score": 4.2,
+            },
+            {"Symbol": "SKIP", "Horyzont": 5, "Cena": 10.0, "Ocena": "BRAK SYGNAŁU"},
+        ],
+    }
+    path = tmp_path / "journal.json"
+    assert record_snapshot_signals(snapshot, path=path) == 1
+    assert record_snapshot_signals(snapshot, path=path) == 0
+    entries = load_journal(path)
+    assert len(entries) == 1
+    assert entries[0]["direction"] == "LONG"
+
+    dates = pd.bdate_range("2026-01-09", periods=12)
+    prices = np.linspace(99, 111, len(dates))
+    history = pd.DataFrame({
+        "Open": prices, "High": prices + 1, "Low": prices - 1,
+        "Close": prices, "Volume": 1_000_000,
+    }, index=dates)
+    monkeypatch.setattr("market_oracle.journal.download_history", lambda symbol, years=3: history)
+    refreshed, errors = refresh_journal_results(path=path)
+    assert errors == {}
+    assert refreshed[0]["status"] == "closed"
+    assert refreshed[0]["hit"] is True
+    assert refreshed[0]["strategy_return"] > 0

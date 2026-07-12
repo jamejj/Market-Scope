@@ -138,7 +138,7 @@ def _row_from_result(symbol: str, result: dict, horizon: int) -> dict:
     score = (f["probability_up"] - 0.5) * 210 * quality + f["expected_return"] * 90 + momentum_bonus - risk_penalty
     return {
         "Symbol": symbol, "Klasa": _asset_class(symbol), "Horyzont": horizon,
-        "Setup": _setup_label(technical, horizon), "Cena": result["last_price"],
+        "Data": str(result["last_date"].date()), "Setup": _setup_label(technical, horizon), "Cena": result["last_price"],
         "Ocena": observation_label(f), "Sygnał": signal_label(f["probability_up"], f["quality"]),
         "P(wzrost)": f["probability_up"], "Oczekiwany ruch": f["expected_return"],
         "Dolna granica 90%": f["lower_return"], "Górna granica 90%": f["upper_return"],

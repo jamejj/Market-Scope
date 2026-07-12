@@ -116,6 +116,14 @@ def run_signal_scan(
             "completed": len(universe), "records": rows, "errors": errors,
         })
         save_snapshot(payload, path)
+        if path == SNAPSHOT_PATH:
+            try:
+                from .journal import record_snapshot_signals
+
+                record_snapshot_signals(payload)
+            except Exception:
+                # Journal is diagnostic; a write/evaluation issue should never destroy the market scan.
+                pass
         return payload
     finally:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
