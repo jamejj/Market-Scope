@@ -25,75 +25,84 @@ st.set_page_config(page_title="MarketScope PRO", page_icon="📈", layout="wide"
 st.markdown("""
 <style>
     :root {
-        --bg-0: #060713;
-        --bg-1: #0b1020;
-        --bg-2: rgba(18, 24, 46, .82);
-        --panel: rgba(18, 24, 46, .68);
-        --panel-strong: rgba(24, 32, 59, .88);
-        --line: rgba(166, 125, 255, .22);
-        --line-strong: rgba(34, 211, 238, .34);
+        --bg-0: #050816;
+        --bg-1: #08111f;
+        --bg-2: rgba(13, 21, 38, .88);
+        --panel: rgba(13, 21, 38, .72);
+        --panel-strong: rgba(15, 25, 45, .92);
+        --line: rgba(148, 163, 184, .18);
+        --line-strong: rgba(56, 189, 248, .34);
         --text: #f5f7ff;
-        --muted: #aab4d6;
-        --cyan: #22d3ee;
-        --violet: #8b5cf6;
-        --violet-2: #c084fc;
+        --muted: #9aa8c7;
+        --cyan: #38bdf8;
+        --blue: #2563eb;
+        --violet: #6366f1;
         --green: #22c55e;
         --red: #fb7185;
         --amber: #fbbf24;
     }
 
+    header[data-testid="stHeader"],
+    [data-testid="stToolbar"],
+    [data-testid="stDecoration"],
+    #MainMenu,
+    footer {
+        display: none !important;
+    }
+
     .stApp {
         background:
-            radial-gradient(circle at 88% 0%, rgba(37, 99, 235, .12), transparent 28rem),
-            radial-gradient(circle at 0% 18%, rgba(99, 102, 241, .10), transparent 24rem),
-            linear-gradient(180deg, #080b13 0%, #080d19 48%, #050711 100%);
+            radial-gradient(circle at 85% 0%, rgba(14, 165, 233, .10), transparent 30rem),
+            radial-gradient(circle at 0% 12%, rgba(99, 102, 241, .06), transparent 25rem),
+            linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 54%, #050711 100%);
         color: var(--text);
     }
 
-    .block-container {padding-top: .55rem; padding-bottom: 2.4rem; max-width: 1480px;}
+    .block-container {padding-top: 1.15rem; padding-bottom: 2.4rem; max-width: 1480px;}
     h1, h2, h3 {letter-spacing: -.04em; color: var(--text);}
     p, li, label, span {color: inherit;}
-    hr {border-color: rgba(166, 125, 255, .16);}
+    hr {border-color: rgba(148, 163, 184, .14);}
 
     .ms-topbar {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 14px;
+        display: flex;
         align-items: center;
-        padding: 12px 14px;
-        margin: 0 0 8px;
-        border: 1px solid rgba(148, 163, 184, .16);
-        border-radius: 16px;
-        background: rgba(10, 15, 28, .76);
-        box-shadow: 0 10px 34px rgba(0,0,0,.20), inset 0 1px 0 rgba(255,255,255,.04);
+        justify-content: space-between;
+        gap: 18px;
+        padding: 2px 0 16px;
+        margin: 0 0 2px;
+        border-bottom: 1px solid rgba(148, 163, 184, .16);
+        background: transparent;
+        box-shadow: none;
     }
     .ms-brand {
         display:flex;
-        gap: 12px;
+        gap: 11px;
         align-items:center;
         min-width: 0;
     }
     .ms-logo {
-        width: 38px;
-        height: 38px;
+        width: 34px;
+        height: 34px;
         display:grid;
         place-items:center;
-        border-radius: 12px;
-        color: #dff7ff;
-        background: linear-gradient(135deg, rgba(37, 99, 235, .42), rgba(14, 165, 233, .24));
+        border-radius: 10px;
+        color: #e0f2fe;
+        background: rgba(14, 165, 233, .12);
         border: 1px solid rgba(56, 189, 248, .26);
-        font-weight: 950;
+        font-size: .84rem;
+        font-weight: 900;
+        letter-spacing: .02em;
     }
     .ms-brand h1 {
         margin: 0;
-        font-size: 1.35rem;
+        font-size: 1.34rem;
         line-height: 1;
         letter-spacing: -.045em;
     }
     .ms-brand p {
-        margin: 3px 0 0;
+        margin: 5px 0 0;
         color: var(--muted);
-        font-size: .82rem;
+        font-size: .78rem;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -101,7 +110,7 @@ st.markdown("""
     .ms-status-strip {
         display:flex;
         align-items:center;
-        gap: 8px;
+        gap: 7px;
         flex-wrap: wrap;
         justify-content:flex-end;
     }
@@ -109,44 +118,44 @@ st.markdown("""
         display:inline-flex;
         align-items:center;
         gap: 7px;
-        padding: 7px 9px;
+        padding: 7px 10px;
         border-radius: 999px;
         border: 1px solid rgba(148, 163, 184, .18);
-        background: rgba(15, 23, 42, .58);
-        color: #dbeafe;
-        font-size: .76rem;
+        background: rgba(15, 23, 42, .48);
+        color: #d7e2f7;
+        font-size: .74rem;
         font-weight: 850;
-        letter-spacing: .02em;
+        letter-spacing: .01em;
     }
     .ms-led {
         display:inline-block;
-        width: 8px;
-        height: 8px;
+        width: 7px;
+        height: 7px;
         border-radius:999px;
         background: var(--green);
-        box-shadow: 0 0 14px rgba(34,197,94,.75);
+        box-shadow: 0 0 10px rgba(34,197,94,.65);
     }
     @media (max-width: 920px) {
-        .ms-topbar {grid-template-columns: 1fr;}
+        .ms-topbar {align-items:flex-start; flex-direction:column;}
         .ms-status-strip {justify-content:flex-start;}
     }
 
     [data-testid="stMetric"] {
         position: relative;
         overflow: hidden;
-        background: linear-gradient(145deg, rgba(23, 30, 57, .86), rgba(9, 12, 26, .76));
+        background: linear-gradient(145deg, rgba(15, 23, 42, .90), rgba(8, 13, 25, .78));
         border: 1px solid var(--line);
         padding: 14px 15px;
-        border-radius: 18px;
-        box-shadow: 0 16px 50px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.05);
+        border-radius: 14px;
+        box-shadow: 0 10px 30px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.035);
     }
     [data-testid="stMetric"]::before {
         content: "";
         position: absolute;
         inset: 0 0 auto 0;
         height: 2px;
-        background: linear-gradient(90deg, var(--violet), var(--cyan), transparent);
-        opacity: .72;
+        background: linear-gradient(90deg, var(--cyan), transparent);
+        opacity: .55;
     }
     [data-testid="stMetricLabel"] p {
         color: var(--muted);
@@ -159,28 +168,33 @@ st.markdown("""
     [data-testid="stMetricDelta"] svg {filter: drop-shadow(0 0 8px rgba(34,211,238,.35));}
 
     .pro-card {
-        min-height: 126px;
-        padding: 17px 18px;
-        border: 1px solid rgba(148, 163, 184, .18);
-        border-radius: 20px;
-        background:
-            linear-gradient(145deg, rgba(17, 24, 39, .88), rgba(8, 13, 25, .72)),
-            rgba(12, 16, 32, .7);
-        box-shadow: 0 14px 38px rgba(0, 0, 0, .20);
+        min-height: 132px;
+        padding: 18px 19px;
+        border: 1px solid rgba(148, 163, 184, .16);
+        border-radius: 16px;
+        background: linear-gradient(145deg, rgba(15, 23, 42, .76), rgba(8, 13, 25, .70));
+        box-shadow: 0 12px 32px rgba(0, 0, 0, .18);
         transform: translateY(0) scale(1);
         transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease, background .18s ease;
         will-change: transform;
     }
     .pro-card:hover {
-        transform: translateY(-3px) scale(1.012);
-        border-color: rgba(34, 211, 238, .34);
-        background:
-            linear-gradient(145deg, rgba(21, 31, 49, .92), rgba(9, 15, 29, .76)),
-            rgba(12, 16, 32, .78);
-        box-shadow: 0 18px 48px rgba(0, 0, 0, .28), 0 0 22px rgba(34,211,238,.08);
+        transform: translateY(-3px) scale(1.015);
+        border-color: rgba(56, 189, 248, .38);
+        background: linear-gradient(145deg, rgba(17, 28, 50, .84), rgba(8, 13, 25, .76));
+        box-shadow: 0 18px 44px rgba(0, 0, 0, .26), 0 0 0 1px rgba(56,189,248,.06) inset;
     }
-    .pro-card h3 {margin: 0 0 7px; color: #f8fbff; font-size: 1.35rem;}
-    .pro-card p {margin: 0; color: var(--muted); line-height: 1.42; font-size: .92rem;}
+    .pro-card small {
+        display:block;
+        margin: 0 0 12px;
+        color: var(--cyan);
+        font-size: .70rem;
+        font-weight: 900;
+        letter-spacing: .12em;
+        text-transform: uppercase;
+    }
+    .pro-card h3 {margin: 0 0 9px; color: #f8fbff; font-size: 1.28rem;}
+    .pro-card p {margin: 0; color: var(--muted); line-height: 1.45; font-size: .90rem;}
     .feature-grid {
         display: grid;
         grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -208,57 +222,58 @@ st.markdown("""
     .muted {opacity: .74;}
 
     div[data-testid="stTabs"] [role="tablist"] {
-        gap: 2px;
+        gap: 18px;
         padding: 0;
-        margin-top: 4px;
+        margin-top: 8px;
         border: 0;
-        border-bottom: 1px solid rgba(166, 125, 255, .18);
+        border-bottom: 1px solid rgba(148, 163, 184, .16);
         border-radius: 0;
         background: transparent;
-        backdrop-filter: blur(10px);
+        backdrop-filter: none;
     }
-    div[data-testid="stTabs"] button {
-        border-radius: 10px 10px 0 0;
-        font-weight: 800;
+    div[data-testid="stTabs"] [role="tablist"] button {
+        padding: 11px 0 12px;
+        border-radius: 0;
+        font-weight: 750;
         color: var(--muted);
-        border: 1px solid transparent;
+        background: transparent !important;
+        border: 0 !important;
         border-bottom: 2px solid transparent;
-        transition: all .18s ease;
+        box-shadow: none !important;
+        transition: color .16s ease, border-color .16s ease;
     }
-    div[data-testid="stTabs"] button:hover {
+    div[data-testid="stTabs"] [role="tablist"] button:hover {
         color: #e0f2fe;
-        background: rgba(34, 211, 238, .07);
-        border-color: rgba(34, 211, 238, .20);
+        background: transparent !important;
     }
-    div[data-testid="stTabs"] button[aria-selected="true"] {
+    div[data-testid="stTabs"] [role="tablist"] button[aria-selected="true"] {
         color: #ffffff;
-        background: rgba(34, 211, 238, .08);
-        border-color: rgba(34, 211, 238, .18);
-        border-bottom-color: var(--cyan);
-        box-shadow: 0 12px 26px rgba(34,211,238,.08);
+        background: transparent !important;
+        border-bottom: 2px solid var(--cyan) !important;
+        box-shadow: none !important;
     }
 
     .stButton > button, .stDownloadButton > button {
         min-height: 2.45rem;
-        border: 1px solid rgba(34, 211, 238, .26);
+        border: 1px solid rgba(148, 163, 184, .22);
         border-radius: 12px;
-        color: #e0f2fe;
+        color: #e5eefc;
         background: rgba(15, 23, 42, .58);
-        box-shadow: 0 8px 22px rgba(0, 0, 0, .14), inset 0 1px 0 rgba(255,255,255,.04);
+        box-shadow: 0 8px 22px rgba(0, 0, 0, .12), inset 0 1px 0 rgba(255,255,255,.035);
         font-weight: 800;
         letter-spacing: .005em;
     }
     .stButton > button:hover, .stDownloadButton > button:hover {
         transform: translateY(-1px);
-        border-color: rgba(34, 211, 238, .58);
-        background: rgba(34, 211, 238, .09);
-        box-shadow: 0 12px 28px rgba(34,211,238,.10);
+        border-color: rgba(56, 189, 248, .46);
+        background: rgba(14, 165, 233, .10);
+        box-shadow: 0 12px 26px rgba(14,165,233,.09);
     }
     button[kind="primary"] {
-        color: #fff !important;
-        background: linear-gradient(135deg, #7c3aed 0%, #2563eb 52%, #06b6d4 100%) !important;
-        border-color: rgba(34, 211, 238, .46) !important;
-        box-shadow: 0 12px 30px rgba(37, 99, 235, .22), 0 0 0 1px rgba(255,255,255,.03) inset !important;
+        color: #ecfeff !important;
+        background: linear-gradient(180deg, rgba(14, 116, 144, .96) 0%, rgba(8, 83, 116, .96) 100%) !important;
+        border-color: rgba(56, 189, 248, .48) !important;
+        box-shadow: 0 12px 26px rgba(14, 165, 233, .12), 0 0 0 1px rgba(255,255,255,.06) inset !important;
     }
     .stButton > button:disabled {
         opacity: .45;
@@ -268,32 +283,32 @@ st.markdown("""
     }
 
     [data-testid="stAlert"] {
-        border-radius: 16px;
-        border: 1px solid rgba(166, 125, 255, .20);
+        border-radius: 14px;
+        border: 1px solid rgba(148, 163, 184, .18);
         background: rgba(15, 23, 42, .72);
         box-shadow: 0 12px 35px rgba(0,0,0,.18);
     }
     [data-testid="stDataFrame"] {
-        border: 1px solid rgba(166, 125, 255, .18);
-        border-radius: 16px;
+        border: 1px solid rgba(148, 163, 184, .16);
+        border-radius: 14px;
         overflow: hidden;
         box-shadow: 0 18px 50px rgba(0,0,0,.20);
     }
     [data-testid="stExpander"] {
-        border: 1px solid rgba(166, 125, 255, .18);
-        border-radius: 16px;
+        border: 1px solid rgba(148, 163, 184, .16);
+        border-radius: 14px;
         background: rgba(10, 14, 30, .52);
     }
     input, textarea, [data-baseweb="select"] > div {
-        border-radius: 14px !important;
-        border-color: rgba(166, 125, 255, .25) !important;
+        border-radius: 12px !important;
+        border-color: rgba(148, 163, 184, .22) !important;
         background-color: rgba(10, 14, 30, .72) !important;
     }
     input:focus, textarea:focus {
-        box-shadow: 0 0 0 1px rgba(34, 211, 238, .55), 0 0 24px rgba(139,92,246,.16) !important;
+        box-shadow: 0 0 0 1px rgba(56, 189, 248, .50), 0 0 20px rgba(14,165,233,.10) !important;
     }
     .stProgress > div > div > div > div {
-        background: linear-gradient(90deg, var(--violet), var(--cyan));
+        background: linear-gradient(90deg, var(--blue), var(--cyan));
     }
 </style>
 """, unsafe_allow_html=True)
@@ -783,7 +798,7 @@ def render_signal_dashboard() -> None:
         "Max drawdown": "{:.1%}", "Score": "{:.2f}",
     }
 
-    horizon_tabs = st.tabs(["🔥 Hot movers", "⚡ Szybki ruch 1d", "🎯 Swing 5d", "📈 Trend 20d", "🧭 Wszystko"])
+    horizon_tabs = st.tabs(["Hot movers", "Szybki ruch 1d", "Swing 5d", "Trend 20d", "Wszystko"])
     with horizon_tabs[0]:
         base = frame[frame["Horyzont"] == frame["Horyzont"].min()].copy()
         if base.empty:
@@ -874,19 +889,19 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 home, stocks, etfs, crypto, radar, journal, backtest, settings, method = st.tabs([
-    "🏠 Start", "🏢 Spółki", "🧺 ETF-y", "₿ Krypto", "⭐ Sygnały", "📒 Journal", "🧪 Backtest", "⚙️ Model", "ℹ️ Metodologia",
+    "Start", "Spółki", "ETF-y", "Krypto", "Sygnały", "Journal", "Backtest", "Model", "Metodologia",
 ])
 
 with home:
-    st.header("Start")
+    st.header("Panel główny")
     st.write("Wybierz moduł i przejdź od szerokiego radaru rynku do konkretnej analizy instrumentu. Każdy symbol dostaje prognozę 1/5/20/60, jakość walidacji, momentum, ryzyko i miejsce w dzienniku skuteczności.")
     st.markdown("""
     <div class="feature-grid">
-        <div class="pro-card"><h3>🏢 Spółki</h3><p>GPW, USA, sektory, mniejsze firmy i wyszukiwarka globalna.</p></div>
-        <div class="pro-card"><h3>🧺 ETF-y</h3><p>Szeroki rynek, sektory, obligacje, surowce, regiony i UCITS.</p></div>
-        <div class="pro-card"><h3>₿ Krypto</h3><p>Najważniejsze kryptowaluty, segmenty rynku i ręczne symbole.</p></div>
-        <div class="pro-card"><h3>⭐ Radar</h3><p>Hot movers, swing, trend i multi-horyzontowy ranking rynku.</p></div>
-        <div class="pro-card"><h3>📒 Journal</h3><p>Automatyczne rozliczanie sygnałów i skuteczności modelu.</p></div>
+        <div class="pro-card"><small>Universe</small><h3>Spółki</h3><p>GPW, USA, sektory, mniejsze firmy i wyszukiwarka globalna.</p></div>
+        <div class="pro-card"><small>Markets</small><h3>ETF-y</h3><p>Szeroki rynek, sektory, obligacje, surowce, regiony i UCITS.</p></div>
+        <div class="pro-card"><small>24/7 risk</small><h3>Krypto</h3><p>Najważniejsze kryptowaluty, segmenty rynku i ręczne symbole.</p></div>
+        <div class="pro-card"><small>Scanner</small><h3>Sygnały</h3><p>Hot movers, swing, trend i multi-horyzontowy ranking rynku.</p></div>
+        <div class="pro-card"><small>Performance</small><h3>Journal</h3><p>Automatyczne rozliczanie sygnałów i skuteczności modelu.</p></div>
     </div>
     """, unsafe_allow_html=True)
     st.subheader("Jak czytać prognozę?")
