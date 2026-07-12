@@ -51,7 +51,7 @@ st.markdown("""
         color: var(--text);
     }
 
-    .block-container {padding-top: 1.0rem; padding-bottom: 3rem; max-width: 1540px;}
+    .block-container {padding-top: .65rem; padding-bottom: 2.4rem; max-width: 1480px;}
     h1, h2, h3 {letter-spacing: -.04em; color: var(--text);}
     p, li, label, span {color: inherit;}
     hr {border-color: rgba(166, 125, 255, .16);}
@@ -60,17 +60,17 @@ st.markdown("""
         position: relative;
         overflow: hidden;
         display: grid;
-        grid-template-columns: minmax(0, 1.45fr) minmax(310px, .55fr);
-        gap: 22px;
+        grid-template-columns: minmax(0, 1.5fr) minmax(280px, .48fr);
+        gap: 18px;
         align-items: stretch;
-        padding: 20px 22px;
-        margin: 2px 0 18px;
+        padding: 16px 18px;
+        margin: 0 0 10px;
         border: 1px solid rgba(166, 125, 255, .20);
         border-radius: 22px;
         background:
             linear-gradient(135deg, rgba(139, 92, 246, .18), rgba(34, 211, 238, .08) 46%, rgba(10, 14, 30, .82)),
             rgba(12, 16, 32, .86);
-        box-shadow: 0 18px 58px rgba(0, 0, 0, .30), inset 0 1px 0 rgba(255,255,255,.06);
+        box-shadow: 0 14px 42px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255,255,255,.06);
     }
     .ms-hero::after {
         content: "";
@@ -85,30 +85,30 @@ st.markdown("""
         display: inline-flex;
         gap: 8px;
         align-items: center;
-        padding: 5px 9px;
+        padding: 4px 8px;
         border: 1px solid rgba(34, 211, 238, .30);
         border-radius: 999px;
         color: #cffafe;
         background: rgba(34, 211, 238, .08);
-        font-size: .72rem;
+        font-size: .68rem;
         font-weight: 800;
         letter-spacing: .08em;
         text-transform: uppercase;
     }
-    .ms-hero h1 {font-size: clamp(1.85rem, 2.65vw, 3.0rem); margin: 10px 0 6px; line-height: 1.02;}
-    .ms-hero p {max-width: 820px; color: var(--muted); font-size: .98rem; margin: 0;}
-    .ms-pills {display:flex; flex-wrap:wrap; gap: 8px; margin-top: 14px;}
+    .ms-hero h1 {font-size: clamp(1.55rem, 2.15vw, 2.45rem); margin: 8px 0 5px; line-height: 1.03;}
+    .ms-hero p {max-width: 760px; color: var(--muted); font-size: .90rem; margin: 0;}
+    .ms-pills {display:flex; flex-wrap:wrap; gap: 7px; margin-top: 11px;}
     .ms-pill {
-        padding: 7px 10px;
+        padding: 5px 9px;
         border-radius: 999px;
         border: 1px solid rgba(166, 125, 255, .20);
         background: rgba(255,255,255,.045);
         color: #dbeafe;
-        font-size: .80rem;
+        font-size: .76rem;
         font-weight: 700;
     }
     .ms-hero-panel {
-        padding: 14px;
+        padding: 12px;
         border: 1px solid rgba(34, 211, 238, .20);
         border-radius: 18px;
         background: rgba(3, 7, 18, .42);
@@ -118,7 +118,7 @@ st.markdown("""
         display:flex;
         justify-content:space-between;
         align-items:center;
-        margin-bottom: 10px;
+        margin-bottom: 8px;
         color: #e0f2fe;
         font-size: .78rem;
         font-weight: 850;
@@ -139,7 +139,7 @@ st.markdown("""
         gap: 10px;
     }
     .ms-stat {
-        padding: 10px;
+        padding: 8px 9px;
         border-radius: 14px;
         border: 1px solid rgba(166,125,255,.14);
         background: rgba(15,23,42,.52);
@@ -156,7 +156,7 @@ st.markdown("""
         display:block;
         margin-top: 3px;
         color: #fff;
-        font-size: 1.12rem;
+        font-size: .98rem;
         letter-spacing: -.03em;
     }
     @media (max-width: 920px) {
@@ -192,22 +192,58 @@ st.markdown("""
     [data-testid="stMetricDelta"] svg {filter: drop-shadow(0 0 8px rgba(34,211,238,.35));}
 
     .pro-card {
-        min-height: 150px;
-        padding: 20px;
+        min-height: 126px;
+        padding: 17px 18px;
         border: 1px solid rgba(166, 125, 255, .22);
         border-radius: 20px;
         background:
             linear-gradient(145deg, rgba(22, 28, 54, .82), rgba(9, 12, 26, .68)),
             rgba(12, 16, 32, .7);
-        box-shadow: 0 18px 55px rgba(0, 0, 0, .24);
+        box-shadow: 0 14px 38px rgba(0, 0, 0, .20);
+        transform: translateY(0) scale(1);
+        transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease, background .18s ease;
+        will-change: transform;
     }
-    .pro-card h3 {margin: 0 0 8px; color: #f8fbff;}
-    .pro-card p {margin: 0; color: var(--muted); line-height: 1.45;}
+    .pro-card:hover {
+        transform: translateY(-3px) scale(1.012);
+        border-color: rgba(34, 211, 238, .38);
+        background:
+            linear-gradient(145deg, rgba(35, 42, 76, .88), rgba(11, 16, 34, .72)),
+            rgba(12, 16, 32, .78);
+        box-shadow: 0 20px 54px rgba(0, 0, 0, .28), 0 0 26px rgba(139,92,246,.10);
+    }
+    .pro-card h3 {margin: 0 0 7px; color: #f8fbff; font-size: 1.35rem;}
+    .pro-card p {margin: 0; color: var(--muted); line-height: 1.42; font-size: .92rem;}
+    .feature-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 14px;
+        margin: 16px 0 18px;
+    }
+    @media (max-width: 1200px) {
+        .feature-grid {grid-template-columns: repeat(3, minmax(0, 1fr));}
+    }
+    @media (max-width: 760px) {
+        .feature-grid {grid-template-columns: 1fr;}
+    }
+    .ms-note {
+        min-height: 2.45rem;
+        display: flex;
+        align-items: center;
+        padding: 8px 11px;
+        border-radius: 12px;
+        border: 1px solid rgba(34, 211, 238, .18);
+        background: rgba(15, 23, 42, .40);
+        color: var(--muted);
+        font-size: .84rem;
+        line-height: 1.32;
+    }
     .muted {opacity: .74;}
 
     div[data-testid="stTabs"] [role="tablist"] {
-        gap: 4px;
-        padding: 4px 0 0;
+        gap: 2px;
+        padding: 0;
+        margin-top: 4px;
         border: 0;
         border-bottom: 1px solid rgba(166, 125, 255, .18);
         border-radius: 0;
@@ -215,7 +251,7 @@ st.markdown("""
         backdrop-filter: blur(10px);
     }
     div[data-testid="stTabs"] button {
-        border-radius: 11px 11px 0 0;
+        border-radius: 10px 10px 0 0;
         font-weight: 800;
         color: var(--muted);
         border: 1px solid transparent;
@@ -235,19 +271,27 @@ st.markdown("""
         box-shadow: 0 12px 26px rgba(34,211,238,.08);
     }
 
-    .stButton > button, .stDownloadButton > button, button[kind="primary"] {
-        border: 1px solid rgba(34, 211, 238, .35);
-        border-radius: 14px;
-        color: #fff;
-        background: linear-gradient(135deg, #7c3aed 0%, #2563eb 46%, #06b6d4 100%);
-        box-shadow: 0 12px 30px rgba(37, 99, 235, .22), 0 0 0 1px rgba(255,255,255,.03) inset;
-        font-weight: 850;
-        letter-spacing: .01em;
+    .stButton > button, .stDownloadButton > button {
+        min-height: 2.45rem;
+        border: 1px solid rgba(34, 211, 238, .26);
+        border-radius: 12px;
+        color: #e0f2fe;
+        background: rgba(15, 23, 42, .58);
+        box-shadow: 0 8px 22px rgba(0, 0, 0, .14), inset 0 1px 0 rgba(255,255,255,.04);
+        font-weight: 800;
+        letter-spacing: .005em;
     }
     .stButton > button:hover, .stDownloadButton > button:hover {
         transform: translateY(-1px);
-        border-color: rgba(192, 132, 252, .72);
-        box-shadow: 0 18px 42px rgba(124, 58, 237, .28), 0 0 26px rgba(34,211,238,.14);
+        border-color: rgba(34, 211, 238, .58);
+        background: rgba(34, 211, 238, .09);
+        box-shadow: 0 12px 28px rgba(34,211,238,.10);
+    }
+    button[kind="primary"] {
+        color: #fff !important;
+        background: linear-gradient(135deg, #7c3aed 0%, #2563eb 52%, #06b6d4 100%) !important;
+        border-color: rgba(34, 211, 238, .46) !important;
+        box-shadow: 0 12px 30px rgba(37, 99, 235, .22), 0 0 0 1px rgba(255,255,255,.03) inset !important;
     }
     .stButton > button:disabled {
         opacity: .45;
@@ -636,7 +680,7 @@ def render_signal_journal() -> None:
     st.write("To dziennik skuteczności. MarketScope zapisuje directional signals z pełnych skanów i później sprawdza, czy po zadanym horyzoncie kierunek faktycznie zadziałał.")
     st.caption("To nadal paper-performance, nie historia realnych transakcji. Nie uwzględnia poślizgu, podatków ani wielkości pozycji.")
 
-    actions = st.columns([1, 1, 2])
+    actions = st.columns([1, 1, 1.35])
     if actions[0].button("Zapisz sygnały z ostatniego rankingu", key="journal_record", use_container_width=True):
         added = record_snapshot_signals(load_snapshot() or {})
         st.toast(f"Dodano nowych sygnałów: {added}", icon="📒")
@@ -648,7 +692,10 @@ def render_signal_journal() -> None:
             st.warning(f"Nie udało się odświeżyć części symboli: {len(errors)}")
         st.toast("Journal odświeżony", icon="✅")
         st.rerun()
-    actions[2].info("Pełny skan zapisuje sygnały automatycznie. Ten przycisk jest przydatny, gdy masz już ranking z poprzedniego uruchomienia.")
+    actions[2].markdown(
+        "<div class='ms-note'>Pełny skan zapisuje sygnały automatycznie. Ręczny zapis jest przydatny dla gotowego rankingu z poprzedniego uruchomienia.</div>",
+        unsafe_allow_html=True,
+    )
 
     entries = load_journal()
     summary = journal_summary(entries)
@@ -872,13 +919,15 @@ home, stocks, etfs, crypto, radar, journal, backtest, settings, method = st.tabs
 with home:
     st.header("Command Center")
     st.write("Wybierz moduł i przejdź od szerokiego radaru rynku do konkretnej analizy instrumentu. Każdy symbol dostaje prognozę 1/5/20/60, jakość walidacji, momentum, ryzyko i miejsce w dzienniku skuteczności.")
-    c1, c2, c3 = st.columns(3)
-    c1.markdown("<div class='pro-card'><h3>🏢 Spółki</h3><p>172 pozycje w katalogu, w tym GPW, USA, sektory i mniejsze firmy. Dostępna jest też wyszukiwarka globalna.</p></div>", unsafe_allow_html=True)
-    c2.markdown("<div class='pro-card'><h3>🧺 ETF-y</h3><p>Szeroki rynek, sektory, obligacje, surowce, regiony świata, fundusze tematyczne i UCITS.</p></div>", unsafe_allow_html=True)
-    c3.markdown("<div class='pro-card'><h3>₿ Krypto</h3><p>Najważniejsze kryptowaluty z osobną informacją o podwyższonym ryzyku i zmienności.</p></div>", unsafe_allow_html=True)
-    c4, c5 = st.columns(2)
-    c4.markdown("<div class='pro-card'><h3>⭐ Radar</h3><p>Automatyczny skaner rynku liczy hot movers, setupy swingowe i trendowe na kilku horyzontach.</p></div>", unsafe_allow_html=True)
-    c5.markdown("<div class='pro-card'><h3>📒 Journal</h3><p>Directional signals są zapisywane i później rozliczane, żeby sprawdzić realną skuteczność modelu.</p></div>", unsafe_allow_html=True)
+    st.markdown("""
+    <div class="feature-grid">
+        <div class="pro-card"><h3>🏢 Spółki</h3><p>GPW, USA, sektory, mniejsze firmy i wyszukiwarka globalna.</p></div>
+        <div class="pro-card"><h3>🧺 ETF-y</h3><p>Szeroki rynek, sektory, obligacje, surowce, regiony i UCITS.</p></div>
+        <div class="pro-card"><h3>₿ Krypto</h3><p>Najważniejsze kryptowaluty, segmenty rynku i ręczne symbole.</p></div>
+        <div class="pro-card"><h3>⭐ Radar</h3><p>Hot movers, swing, trend i multi-horyzontowy ranking rynku.</p></div>
+        <div class="pro-card"><h3>📒 Journal</h3><p>Automatyczne rozliczanie sygnałów i skuteczności modelu.</p></div>
+    </div>
+    """, unsafe_allow_html=True)
     st.subheader("Jak czytać prognozę?")
     st.markdown("""
     - **P(wzrost)** mówi, jak często model oczekuje ceny wyższej po danym horyzoncie.
