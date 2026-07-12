@@ -51,7 +51,7 @@ st.markdown("""
         color: var(--text);
     }
 
-    .block-container {padding-top: 1.25rem; padding-bottom: 3rem; max-width: 1540px;}
+    .block-container {padding-top: 1.0rem; padding-bottom: 3rem; max-width: 1540px;}
     h1, h2, h3 {letter-spacing: -.04em; color: var(--text);}
     p, li, label, span {color: inherit;}
     hr {border-color: rgba(166, 125, 255, .16);}
@@ -59,48 +59,109 @@ st.markdown("""
     .ms-hero {
         position: relative;
         overflow: hidden;
-        padding: 26px 28px;
-        margin: 4px 0 22px;
-        border: 1px solid rgba(166, 125, 255, .24);
-        border-radius: 24px;
+        display: grid;
+        grid-template-columns: minmax(0, 1.45fr) minmax(310px, .55fr);
+        gap: 22px;
+        align-items: stretch;
+        padding: 20px 22px;
+        margin: 2px 0 18px;
+        border: 1px solid rgba(166, 125, 255, .20);
+        border-radius: 22px;
         background:
-            linear-gradient(135deg, rgba(139, 92, 246, .22), rgba(34, 211, 238, .10) 48%, rgba(10, 14, 30, .88)),
+            linear-gradient(135deg, rgba(139, 92, 246, .18), rgba(34, 211, 238, .08) 46%, rgba(10, 14, 30, .82)),
             rgba(12, 16, 32, .86);
-        box-shadow: 0 24px 80px rgba(0, 0, 0, .35), inset 0 1px 0 rgba(255,255,255,.07);
+        box-shadow: 0 18px 58px rgba(0, 0, 0, .30), inset 0 1px 0 rgba(255,255,255,.06);
     }
     .ms-hero::after {
         content: "";
         position: absolute;
-        inset: auto -10% -45% 40%;
-        height: 160px;
-        background: radial-gradient(circle, rgba(34, 211, 238, .24), transparent 68%);
+        inset: 0 auto 0 54%;
+        width: 1px;
+        background: linear-gradient(180deg, transparent, rgba(34,211,238,.45), transparent);
         filter: blur(8px);
     }
+    .ms-hero-copy, .ms-hero-panel {position: relative; z-index: 1;}
     .ms-kicker {
         display: inline-flex;
         gap: 8px;
         align-items: center;
-        padding: 6px 10px;
+        padding: 5px 9px;
         border: 1px solid rgba(34, 211, 238, .30);
         border-radius: 999px;
         color: #cffafe;
         background: rgba(34, 211, 238, .08);
-        font-size: .82rem;
+        font-size: .72rem;
         font-weight: 800;
         letter-spacing: .08em;
         text-transform: uppercase;
     }
-    .ms-hero h1 {font-size: clamp(2.2rem, 4vw, 4.2rem); margin: 12px 0 6px; line-height: .96;}
-    .ms-hero p {max-width: 920px; color: var(--muted); font-size: 1.05rem; margin: 0;}
-    .ms-pills {display:flex; flex-wrap:wrap; gap: 10px; margin-top: 18px;}
+    .ms-hero h1 {font-size: clamp(1.85rem, 2.65vw, 3.0rem); margin: 10px 0 6px; line-height: 1.02;}
+    .ms-hero p {max-width: 820px; color: var(--muted); font-size: .98rem; margin: 0;}
+    .ms-pills {display:flex; flex-wrap:wrap; gap: 8px; margin-top: 14px;}
     .ms-pill {
-        padding: 8px 11px;
+        padding: 7px 10px;
         border-radius: 999px;
         border: 1px solid rgba(166, 125, 255, .20);
         background: rgba(255,255,255,.045);
         color: #dbeafe;
-        font-size: .88rem;
+        font-size: .80rem;
         font-weight: 700;
+    }
+    .ms-hero-panel {
+        padding: 14px;
+        border: 1px solid rgba(34, 211, 238, .20);
+        border-radius: 18px;
+        background: rgba(3, 7, 18, .42);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+    }
+    .ms-panel-title {
+        display:flex;
+        justify-content:space-between;
+        align-items:center;
+        margin-bottom: 10px;
+        color: #e0f2fe;
+        font-size: .78rem;
+        font-weight: 850;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+    }
+    .ms-led {
+        display:inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius:999px;
+        background: var(--green);
+        box-shadow: 0 0 14px rgba(34,197,94,.75);
+    }
+    .ms-stat-grid {
+        display:grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+    }
+    .ms-stat {
+        padding: 10px;
+        border-radius: 14px;
+        border: 1px solid rgba(166,125,255,.14);
+        background: rgba(15,23,42,.52);
+    }
+    .ms-stat small {
+        display:block;
+        color: var(--muted);
+        font-size: .68rem;
+        text-transform: uppercase;
+        letter-spacing: .06em;
+        font-weight: 800;
+    }
+    .ms-stat strong {
+        display:block;
+        margin-top: 3px;
+        color: #fff;
+        font-size: 1.12rem;
+        letter-spacing: -.03em;
+    }
+    @media (max-width: 920px) {
+        .ms-hero {grid-template-columns: 1fr;}
+        .ms-hero::after {display:none;}
     }
 
     [data-testid="stMetric"] {
@@ -145,18 +206,20 @@ st.markdown("""
     .muted {opacity: .74;}
 
     div[data-testid="stTabs"] [role="tablist"] {
-        gap: 8px;
-        padding: 7px;
-        border: 1px solid rgba(166, 125, 255, .18);
-        border-radius: 18px;
-        background: rgba(8, 11, 25, .58);
+        gap: 4px;
+        padding: 4px 0 0;
+        border: 0;
+        border-bottom: 1px solid rgba(166, 125, 255, .18);
+        border-radius: 0;
+        background: transparent;
         backdrop-filter: blur(10px);
     }
     div[data-testid="stTabs"] button {
-        border-radius: 13px;
+        border-radius: 11px 11px 0 0;
         font-weight: 800;
         color: var(--muted);
         border: 1px solid transparent;
+        border-bottom: 2px solid transparent;
         transition: all .18s ease;
     }
     div[data-testid="stTabs"] button:hover {
@@ -166,9 +229,10 @@ st.markdown("""
     }
     div[data-testid="stTabs"] button[aria-selected="true"] {
         color: #ffffff;
-        background: linear-gradient(135deg, rgba(139, 92, 246, .34), rgba(34, 211, 238, .16));
-        border-color: rgba(34, 211, 238, .35);
-        box-shadow: 0 0 24px rgba(139,92,246,.16);
+        background: rgba(34, 211, 238, .08);
+        border-color: rgba(34, 211, 238, .18);
+        border-bottom-color: var(--cyan);
+        box-shadow: 0 12px 26px rgba(34,211,238,.08);
     }
 
     .stButton > button, .stDownloadButton > button, button[kind="primary"] {
@@ -770,16 +834,33 @@ def render_signal_dashboard() -> None:
         st.caption(f"Pominięte instrumenty: {len(errors)}")
 
 
-st.markdown("""
+_hero_snapshot = load_snapshot() or {}
+_hero_journal = journal_summary(load_journal())
+_hero_universe = len(default_universe())
+_hero_status = "Skan trwa" if _hero_snapshot.get("status") == "running" else ("Gotowy" if _hero_snapshot.get("status") == "complete" else "Offline")
+_hero_completed = _hero_snapshot.get("completed", 0)
+_hero_total = _hero_snapshot.get("total", _hero_universe)
+st.markdown(f"""
 <div class="ms-hero">
-    <div class="ms-kicker">MarketScope PRO · quant radar</div>
-    <h1>Market intelligence<br/>dla akcji, ETF-ów i krypto.</h1>
-    <p>Multi-horyzontowy radar, adaptive model zoo, hot movers, backtest i journal skuteczności — w jednej lokalnej aplikacji badawczej.</p>
-    <div class="ms-pills">
-        <span class="ms-pill">⚡ Hot movers</span>
-        <span class="ms-pill">🧠 Adaptive ML</span>
-        <span class="ms-pill">📒 Signal Journal</span>
-        <span class="ms-pill">🛡️ Risk first</span>
+    <div class="ms-hero-copy">
+        <div class="ms-kicker">MarketScope PRO · quant radar</div>
+        <h1>Command center dla rynku.</h1>
+        <p>Radar 1d/5d/20d, adaptive model zoo, hot movers, risk analytics i journal skuteczności — bez udawania rekomendacji.</p>
+        <div class="ms-pills">
+            <span class="ms-pill">⚡ Hot movers</span>
+            <span class="ms-pill">🧠 Adaptive ML</span>
+            <span class="ms-pill">📒 Signal Journal</span>
+            <span class="ms-pill">🛡️ Risk first</span>
+        </div>
+    </div>
+    <div class="ms-hero-panel">
+        <div class="ms-panel-title"><span>System status</span><span><i class="ms-led"></i> {_hero_status}</span></div>
+        <div class="ms-stat-grid">
+            <div class="ms-stat"><small>Radar</small><strong>{_hero_completed}/{_hero_total}</strong></div>
+            <div class="ms-stat"><small>Universe</small><strong>{_hero_universe}</strong></div>
+            <div class="ms-stat"><small>Journal</small><strong>{_hero_journal["total"]}</strong></div>
+            <div class="ms-stat"><small>Engine</small><strong>3×ML</strong></div>
+        </div>
     </div>
 </div>
 """, unsafe_allow_html=True)
