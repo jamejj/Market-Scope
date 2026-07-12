@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 from market_oracle.backtest import walk_forward_backtest
-from market_oracle.catalog import CATEGORIES, CRYPTO, ETF_CATEGORIES
+from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES
 from market_oracle.engine import observation_label, signal_label
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.model import fit_forecast
@@ -63,6 +63,8 @@ def test_catalog_is_broad_and_symbols_are_present():
     assert sum(len(group) for group in CATEGORIES.values()) >= 150
     assert sum(len(group) for group in ETF_CATEGORIES.values()) >= 50
     assert len(CRYPTO) >= 25
+    assert "DeFi / giełdy / tokeny protokołów" in CRYPTO_CATEGORIES
+    assert CRYPTO["DeXe"] == "DEXE-USD"
     assert CATEGORIES["GPW — największe spółki"]["CD Projekt"] == "CDR.WA"
     assert CATEGORIES["USA — mniejsze i spekulacyjne"]["Rocket Lab"] == "RKLB"
 
@@ -90,10 +92,10 @@ def test_background_monitor_persists_snapshot(tmp_path, monkeypatch):
         "Symbol": "TEST", "Ocena": "OBSERWUJ", "Score": 1.5,
         "P(wzrost)": 0.52, "Oczekiwany ruch": 0.01,
     }])
-    monkeypatch.setattr("market_oracle.monitor.scan_market", lambda symbols, horizon, years: (sample, {}))
+    monkeypatch.setattr("market_oracle.monitor.scan_market_multi", lambda symbols, horizons, years: (sample, {}))
     path = tmp_path / "signals.json"
     result = run_signal_scan(["TEST"], path=path)
     loaded = load_snapshot(path)
     assert result["status"] == "complete"
     assert loaded["records"][0]["Symbol"] == "TEST"
-    assert len(default_universe()) >= 40
+    assert len(default_universe()) >= 100

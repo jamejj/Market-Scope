@@ -8,10 +8,11 @@ import streamlit as st
 
 from market_oracle.backtest import walk_forward_backtest
 from market_oracle.catalog import (
-    CATEGORIES, CRYPTO, ETF_CATEGORIES, category_options, crypto_options, etf_options,
+    CATEGORIES, CRYPTO_CATEGORIES, ETF_CATEGORIES, category_options,
+    crypto_category_options, etf_options,
 )
 from market_oracle.data import download_history, download_profile
-from market_oracle.engine import analyze_asset, signal_label
+from market_oracle.engine import analyze_asset, scan_market_multi, signal_label
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan
 from market_oracle.search import search_assets
 
@@ -115,7 +116,7 @@ def render_analysis(result: dict, profile: dict) -> None:
         st.info(f"Sygnał neutralny. Jakość walidacji: **{five_day['quality'].lower()}**.")
 
     unit = "dzień" if symbol.endswith("-USD") else "sesja"
-    horizon_names = {1: f"Następny {unit}", 5: "Najbliższy tydzień", 20: "Około miesiąca"}
+    horizon_names = {1: f"Następny {unit}", 5: "Najbliższy tydzień", 20: "Około miesiąca", 60: "Około kwartału"}
     columns = st.columns(len(result["forecasts"]))
     for column, (horizon, forecast) in zip(columns, result["forecasts"].items()):
         with column:
@@ -199,7 +200,7 @@ def analysis_action(symbol: str, state_key: str, button_key: str) -> None:
     if st.button("Uruchom pełną analizę", type="primary", key=button_key, disabled=not symbol, use_container_width=True):
         try:
             with st.spinner("Pobieram dane, liczę wskaźniki i trenuję modele…"):
-                result = cached_analysis(symbol, (1, 5, 20), years)
+                result = cached_analysis(symbol, (1, 5, 20, 60), years)
                 profile = cached_profile(symbol)
             st.session_state[state_key] = {"result": result, "profile": profile, "years": years}
         except Exception as exc:
@@ -233,6 +234,25 @@ def search_picker(prefix: str) -> str:
     return options[selected]
 
 
+def _render_ranking_table(frame: pd.DataFrame, title: str, empty_text: str) -> None:
+    st.subheader(title)
+    if frame.empty:
+        st.info(empty_text)
+        return
+    formats = {
+        "Cena": "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
+        "Zwrot 1d": "{:+.1%}", "Zwrot 5d": "{:+.1%}", "Zwrot 20d": "{:+.1%}", "RSI 14": "{:.1f}",
+        "AUC walidacji": "{:.3f}", "Brier": "{:.3f}", "Pewność": "{:.1%}",
+        "Zmienność roczna": "{:.1%}", "Max drawdown": "{:.1%}", "Score": "{:.2f}",
+    }
+    columns = [
+        "Symbol", "Klasa", "Setup", "Ocena", "P(wzrost)", "Oczekiwany ruch",
+        "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Jakość modelu", "Score",
+    ]
+    present = [column for column in columns if column in frame.columns]
+    st.dataframe(frame[present].style.format(formats), use_container_width=True, hide_index=True)
+
+
 @st.fragment(run_every="30s")
 def render_signal_dashboard() -> None:
     snapshot = load_snapshot()
@@ -251,12 +271,20 @@ def render_signal_dashboard() -> None:
         updated = pd.Timestamp(snapshot["updated_at"])
         if updated.tzinfo is not None:
             updated = updated.tz_convert("Europe/Warsaw")
-        st.success(f"Ranking gotowy · aktualizacja: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzont: **{snapshot.get('horizon', 20)} dni/sesji**")
+        horizons = snapshot.get("horizons") or [snapshot.get("horizon", 20)]
+        horizon_text = ", ".join(f"{h}d" for h in horizons)
+        st.success(f"Ranking gotowy · aktualizacja: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzonty: **{horizon_text}**")
 
     frame = pd.DataFrame(snapshot.get("records", []))
     if frame.empty:
         st.warning("Monitor nie ma jeszcze wystarczającej liczby ukończonych analiz.")
         return
+    if "Horyzont" not in frame:
+        frame["Horyzont"] = snapshot.get("horizon", 20)
+    if "Klasa" not in frame:
+        frame["Klasa"] = "Rynek"
+    if "Setup" not in frame:
+        frame["Setup"] = "—"
 
     bullish_labels = {"SILNY KANDYDAT WZROSTOWY", "KANDYDAT WZROSTOWY"}
     bearish_labels = {"SILNE RYZYKO SPADKU", "RYZYKO SPADKU"}
@@ -271,25 +299,71 @@ def render_signal_dashboard() -> None:
 
     formats = {
         "Cena": "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
-        "AUC walidacji": "{:.3f}", "Pewność": "{:.1%}", "Zmienność roczna": "{:.1%}",
+        "Zwrot 1d": "{:+.1%}", "Zwrot 5d": "{:+.1%}", "Zwrot 20d": "{:+.1%}", "RSI 14": "{:.1f}",
+        "AUC walidacji": "{:.3f}", "Brier": "{:.3f}", "Pewność": "{:.1%}", "Zmienność roczna": "{:.1%}",
         "Max drawdown": "{:.1%}", "Score": "{:.2f}",
     }
-    st.subheader("Kandydaci wzrostowi")
-    if bullish.empty:
-        st.info("Obecnie żaden instrument nie spełnia pełnego filtra wzrostowego. Monitor nie uzupełnia listy na siłę.")
-    else:
-        columns = ["Symbol", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Jakość modelu", "Pewność", "Zmienność roczna"]
-        st.dataframe(bullish[columns].style.format(formats), use_container_width=True, hide_index=True)
+
+    horizon_tabs = st.tabs(["🔥 Hot movers", "⚡ Szybki ruch 1d", "🎯 Swing 5d", "📈 Trend 20d", "🧭 Wszystko"])
+    with horizon_tabs[0]:
+        base = frame[frame["Horyzont"] == frame["Horyzont"].min()].copy()
+        if base.empty:
+            base = frame.copy()
+        base["Momentum score"] = (
+            base.get("Zwrot 1d", 0) * 3
+            + base.get("Zwrot 5d", 0) * 2
+            + base.get("Zwrot 20d", 0)
+            - base.get("Zmienność roczna", 0) * 0.08
+        )
+        hot = base.sort_values("Momentum score", ascending=False).head(15)
+        st.subheader("Najmocniejsze aktualne ruchy")
+        st.caption("Ten widok nie wymaga potwierdzenia ML — to radar momentum do szybkiego sprawdzenia, szczególnie przy krypto.")
+        hot_columns = [
+            "Symbol", "Klasa", "Setup", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d",
+            "RSI 14", "Ocena", "P(wzrost)", "AUC walidacji", "Jakość modelu",
+        ]
+        present = [column for column in hot_columns if column in hot.columns]
+        st.dataframe(hot[present].style.format(formats), use_container_width=True, hide_index=True)
+    for tab, horizon, title in [
+        (horizon_tabs[1], 1, "Najciekawsze setupy krótkoterminowe"),
+        (horizon_tabs[2], 5, "Najciekawsze setupy swingowe"),
+        (horizon_tabs[3], 20, "Najciekawsze setupy trendowe"),
+    ]:
+        with tab:
+            scoped = frame[frame["Horyzont"] == horizon].sort_values("Score", ascending=False)
+            candidates = scoped[scoped["Ocena"].isin(bullish_labels)]
+            if candidates.empty:
+                _render_ranking_table(scoped.head(12), title, "Brak potwierdzonych kandydatów; pokazuję najwyżej oceniane obserwacje.")
+            else:
+                _render_ranking_table(candidates.head(12), title, "Brak potwierdzonych kandydatów.")
+            st.caption("To shortlist do dalszej analizy. Nie jest rekomendacją kupna ani gwarancją ruchu.")
+
+    with horizon_tabs[4]:
+        filters = st.columns(3)
+        selected_horizon = filters[0].selectbox("Horyzont", ["Wszystkie", 1, 5, 20, 60], key="radar_horizon_filter")
+        selected_class = filters[1].selectbox("Klasa", ["Wszystkie"] + sorted(frame["Klasa"].dropna().unique().tolist()), key="radar_class_filter")
+        only_candidates = filters[2].checkbox("Tylko kandydaci wzrostowi", value=False, key="radar_candidates_only")
+        filtered = frame.copy()
+        if selected_horizon != "Wszystkie":
+            filtered = filtered[filtered["Horyzont"] == selected_horizon]
+        if selected_class != "Wszystkie":
+            filtered = filtered[filtered["Klasa"] == selected_class]
+        if only_candidates:
+            filtered = filtered[filtered["Ocena"].isin(bullish_labels)]
+        filtered = filtered.sort_values("Score", ascending=False)
+        columns = [
+            "Symbol", "Klasa", "Horyzont", "Setup", "Cena", "Ocena", "P(wzrost)", "Oczekiwany ruch",
+            "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Brier", "Jakość modelu",
+            "Pewność", "Zmienność roczna", "Max drawdown", "Score",
+        ]
+        present = [column for column in columns if column in filtered.columns]
+        st.dataframe(filtered[present].style.format(formats), use_container_width=True, hide_index=True)
+        st.download_button("Pobierz ranking CSV", filtered.to_csv(index=False).encode(), "marketscope_signals.csv", "text/csv")
 
     if not bearish.empty:
         with st.expander(f"Ryzyko spadku ({len(bearish)})"):
-            columns = ["Symbol", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Jakość modelu"]
+            columns = ["Symbol", "Klasa", "Horyzont", "Setup", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Jakość modelu"]
             st.dataframe(bearish[columns].style.format(formats), use_container_width=True, hide_index=True)
-
-    with st.expander(f"Pełny ranking ({len(frame)} instrumentów)"):
-        columns = ["Symbol", "Cena", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Jakość modelu", "Pewność", "Zmienność roczna", "Max drawdown", "Score"]
-        st.dataframe(frame[columns].style.format(formats), use_container_width=True, hide_index=True)
-        st.download_button("Pobierz ranking CSV", frame.to_csv(index=False).encode(), "marketscope_signals.csv", "text/csv")
 
     errors = snapshot.get("errors", {})
     if errors:
@@ -348,7 +422,8 @@ with etfs:
 with crypto:
     st.header("Analiza kryptowalut")
     st.warning("Krypto może poruszać się gwałtownie 24/7. Przedziały niepewności i ryzyko są tu szczególnie ważne.")
-    crypto_available = crypto_options()
+    crypto_category = st.selectbox("Segment krypto", list(CRYPTO_CATEGORIES), key="crypto_category")
+    crypto_available = crypto_category_options(crypto_category)
     crypto_choice = st.selectbox("Kryptowaluta", list(crypto_available), key="crypto_choice")
     crypto_symbol = crypto_available[crypto_choice]
     st.caption(f"Wybrana para: `{crypto_symbol}`")
@@ -356,20 +431,41 @@ with crypto:
 
 with radar:
     st.header("Automatyczny ranking rynku")
-    st.write(f"Monitor śledzi **{len(default_universe())}** instrumentów z GPW, USA, ETF-ów i krypto. Po uruchomieniu aplikacji skanuje je w tle, a ranking odświeża co 12 godzin.")
+    st.write(f"Monitor śledzi **{len(default_universe())}** instrumentów z GPW, USA, ETF-ów i krypto oraz liczy kilka horyzontów: szybki ruch, swing i trend.")
     st.caption("To lista badawcza, nie automatyczna rekomendacja zakupu ani sprzedaży.")
     render_signal_dashboard()
     if st.button("Przelicz cały ranking teraz", key="signals_refresh", help="Pełny skan może potrwać kilka minut."):
         with st.spinner("Analizuję cały monitorowany rynek. Możesz pozostawić tę kartę otwartą…"):
             run_signal_scan(years=years)
         st.rerun()
+    with st.expander("Szybki skan własnych symboli"):
+        st.write("Tu możesz sprawdzić instrumenty spoza głównego radaru, np. świeże krypto albo małe spółki.")
+        custom_symbols = st.text_area(
+            "Symbole oddzielone przecinkami",
+            "DEXE-USD, BTC-USD, ETH-USD, AAPL, NVO, PKO.WA",
+            key="custom_scan_symbols",
+        )
+        custom_horizons = st.multiselect("Horyzonty", [1, 5, 20, 60], default=[1, 5, 20], key="custom_scan_horizons")
+        if st.button("Skanuj tę listę", key="custom_scan_button"):
+            symbols = [part.strip().upper() for part in custom_symbols.replace("\n", ",").split(",") if part.strip()]
+            try:
+                with st.spinner("Liczenie prywatnego skanu…"):
+                    custom_frame, custom_errors = scan_market_multi(symbols, tuple(custom_horizons or [5]), years)
+                st.session_state["custom_scan"] = (custom_frame, custom_errors)
+            except Exception as exc:
+                st.error(str(exc))
+        if "custom_scan" in st.session_state:
+            custom_frame, custom_errors = st.session_state["custom_scan"]
+            _render_ranking_table(custom_frame.sort_values("Score", ascending=False), "Wynik szybkiego skanu", "Brak danych do pokazania.")
+            if custom_errors:
+                st.caption(f"Pominięte / bez danych: {', '.join(custom_errors)}")
 
 with backtest:
     st.header("Backtest walk-forward")
     st.write("Model jest wielokrotnie trenowany wyłącznie na przeszłości, a następnie testowany na kolejnych, niewidzianych danych.")
     bt_symbol = st.text_input("Symbol", "SPY", help="Np. AAPL, CDR.WA, SPY, BTC-USD", key="bt_symbol").strip().upper()
     b1, b2, b3 = st.columns(3)
-    bt_horizon = b1.selectbox("Horyzont", [1, 5, 20], index=1, key="bt_horizon")
+    bt_horizon = b1.selectbox("Horyzont", [1, 5, 20, 60], index=1, key="bt_horizon")
     threshold = b2.slider("Minimalna pewność wejścia", 0.51, 0.70, 0.56, 0.01, key="bt_threshold")
     cost_bps = b3.number_input("Koszt transakcji (punkty bazowe)", 0.0, 100.0, 10.0, 1.0, key="bt_cost")
     if st.button("Uruchom test historyczny", type="primary", key="bt_run", use_container_width=True):

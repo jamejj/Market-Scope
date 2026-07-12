@@ -113,14 +113,47 @@ ETF_CATEGORIES: dict[str, dict[str, str]] = {
 }
 
 
+CRYPTO_CATEGORIES: dict[str, dict[str, str]] = {
+    "Największe i płynne": {
+        "Bitcoin": "BTC-USD", "Ethereum": "ETH-USD", "Solana": "SOL-USD", "BNB": "BNB-USD",
+        "XRP": "XRP-USD", "Cardano": "ADA-USD", "Dogecoin": "DOGE-USD", "Tron": "TRX-USD",
+        "Toncoin": "TON11419-USD", "Avalanche": "AVAX-USD", "Chainlink": "LINK-USD",
+        "Litecoin": "LTC-USD", "Bitcoin Cash": "BCH-USD", "Stellar": "XLM-USD",
+        "Hedera": "HBAR-USD", "Polkadot": "DOT-USD",
+    },
+    "Layer 1 / infrastruktura": {
+        "NEAR Protocol": "NEAR-USD", "Internet Computer": "ICP-USD", "Aptos": "APT-USD",
+        "Sui": "SUI20947-USD", "Algorand": "ALGO-USD", "Cosmos": "ATOM-USD",
+        "Kaspa": "KAS-USD", "Sei": "SEI-USD", "Celestia": "TIA22861-USD",
+        "Immutable": "IMX10603-USD", "Filecoin": "FIL-USD", "Arweave": "AR-USD",
+    },
+    "DeFi / giełdy / tokeny protokołów": {
+        "Uniswap": "UNI-USD", "Aave": "AAVE-USD", "Maker": "MKR-USD",
+        "Lido DAO": "LDO-USD", "Curve DAO": "CRV-USD", "PancakeSwap": "CAKE-USD",
+        "dYdX": "DYDX-USD", "Synthetix": "SNX-USD", "Compound": "COMP5692-USD",
+        "DeXe": "DEXE-USD", "Jupiter": "JUP29210-USD", "Raydium": "RAY-USD",
+    },
+    "AI / gaming / narracje": {
+        "Render": "RENDER-USD", "The Graph": "GRT6719-USD", "Fetch.ai": "FET-USD",
+        "Bittensor": "TAO22974-USD", "Akash Network": "AKT-USD",
+        "Injective": "INJ-USD", "Theta Network": "THETA-USD", "Gala": "GALA-USD",
+        "Axie Infinity": "AXS-USD", "Decentraland": "MANA-USD", "Sandbox": "SAND-USD",
+    },
+    "Memy i wysokie ryzyko": {
+        "Shiba Inu": "SHIB-USD", "Pepe": "PEPE24478-USD", "Bonk": "BONK-USD",
+        "Dogwifhat": "WIF-USD", "Floki": "FLOKI-USD", "Brett": "BRETT29743-USD",
+    },
+    "Layer 2": {
+        "Arbitrum": "ARB11841-USD", "Optimism": "OP-USD", "Polygon": "POL-USD",
+        "Starknet": "STRK22691-USD",
+    },
+}
+
+
 CRYPTO: dict[str, str] = {
-    "Bitcoin": "BTC-USD", "Ethereum": "ETH-USD", "Solana": "SOL-USD", "BNB": "BNB-USD",
-    "XRP": "XRP-USD", "Cardano": "ADA-USD", "Dogecoin": "DOGE-USD", "Avalanche": "AVAX-USD",
-    "Chainlink": "LINK-USD", "Polkadot": "DOT-USD", "Litecoin": "LTC-USD", "Bitcoin Cash": "BCH-USD",
-    "Uniswap": "UNI-USD", "Aave": "AAVE-USD", "Cosmos": "ATOM-USD", "NEAR Protocol": "NEAR-USD",
-    "Internet Computer": "ICP-USD", "Aptos": "APT-USD", "Sui": "SUI20947-USD",
-    "Injective": "INJ-USD", "Arbitrum": "ARB11841-USD", "Optimism": "OP-USD",
-    "Stellar": "XLM-USD", "Hedera": "HBAR-USD", "Filecoin": "FIL-USD", "Shiba Inu": "SHIB-USD",
+    name: symbol
+    for category in CRYPTO_CATEGORIES.values()
+    for name, symbol in category.items()
 }
 
 
@@ -130,3 +163,7 @@ def etf_options(category: str) -> dict[str, str]:
 
 def crypto_options() -> dict[str, str]:
     return {f"{name}  ·  {symbol}": symbol for name, symbol in CRYPTO.items()}
+
+
+def crypto_category_options(category: str) -> dict[str, str]:
+    return {f"{name}  ·  {symbol}": symbol for name, symbol in CRYPTO_CATEGORIES[category].items()}

@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from .catalog import CATEGORIES, CRYPTO, ETF_CATEGORIES
-from .engine import scan_market
+from .engine import scan_market, scan_market_multi
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -19,13 +19,21 @@ LOCK_PATH = DATA_DIR / "signals.lock"
 
 def default_universe() -> list[str]:
     groups = [
-        list(CATEGORIES["GPW — największe spółki"].values())[:10],
-        list(CATEGORIES["USA — technologia i półprzewodniki"].values())[:12],
-        list(CATEGORIES["USA — banki i finanse"].values())[:3],
-        list(CATEGORIES["USA — zdrowie i biotechnologia"].values())[:3],
-        list(ETF_CATEGORIES["Szeroki rynek USA"].values())[:5],
-        list(ETF_CATEGORIES["Surowce"].values())[:2],
-        list(CRYPTO.values())[:6],
+        list(CATEGORIES["GPW — największe spółki"].values())[:14],
+        list(CATEGORIES["GPW — średnie i mniejsze"].values())[:12],
+        list(CATEGORIES["USA — technologia i półprzewodniki"].values())[:16],
+        list(CATEGORIES["USA — banki i finanse"].values())[:6],
+        list(CATEGORIES["USA — zdrowie i biotechnologia"].values())[:6],
+        list(CATEGORIES["USA — przemysł i energia"].values())[:5],
+        list(CATEGORIES["USA — handel, media i usługi"].values())[:6],
+        list(CATEGORIES["USA — mniejsze i spekulacyjne"].values())[:8],
+        list(CATEGORIES["Świat — spółki notowane w USA"].values())[:4],
+        list(ETF_CATEGORIES["Szeroki rynek USA"].values())[:7],
+        list(ETF_CATEGORIES["Sektory i technologia"].values())[:6],
+        list(ETF_CATEGORIES["Świat i regiony"].values())[:4],
+        list(ETF_CATEGORIES["Surowce"].values())[:4],
+        list(ETF_CATEGORIES["Tematyczne i wzrostowe"].values())[:4],
+        list(CRYPTO.values()),
     ]
     return list(dict.fromkeys(symbol for group in groups for symbol in group))
 
@@ -61,6 +69,7 @@ def load_snapshot(path: Path = SNAPSHOT_PATH) -> dict | None:
 def run_signal_scan(
     symbols: list[str] | None = None,
     horizon: int = 20,
+    horizons: tuple[int, ...] | None = (1, 5, 20),
     years: int = 8,
     path: Path = SNAPSHOT_PATH,
 ) -> dict:
@@ -78,17 +87,20 @@ def run_signal_scan(
     errors: dict[str, str] = {}
     payload = {
         "status": "running", "started_at": started.isoformat(), "updated_at": None,
-        "horizon": horizon, "years": years, "completed": 0, "total": len(universe),
+        "horizon": horizon, "horizons": list(horizons or (horizon,)), "years": years, "completed": 0, "total": len(universe),
         "records": rows, "errors": errors,
     }
     save_snapshot(payload, path)
 
     try:
         for completed, symbol in enumerate(universe, start=1):
-            frame, failure = scan_market([symbol], horizon=horizon, years=years)
+            if horizons:
+                frame, failure = scan_market_multi([symbol], horizons=horizons, years=years)
+            else:
+                frame, failure = scan_market([symbol], horizon=horizon, years=years)
             if not frame.empty:
                 rows.extend(_records(frame))
-                rows.sort(key=lambda row: row.get("Score") or float("-inf"), reverse=True)
+                rows.sort(key=lambda row: (row.get("Horyzont") or horizon, -(row.get("Score") or float("-inf"))))
             errors.update(failure)
             payload.update({"completed": completed, "records": rows, "errors": errors})
             save_snapshot(payload, path)

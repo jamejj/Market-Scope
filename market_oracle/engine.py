@@ -31,9 +31,12 @@ def _technical_snapshot(data: pd.DataFrame) -> dict[str, float | bool]:
         "return_1d": float(close.pct_change(1).iloc[-1]),
         "return_5d": float(close.pct_change(5).iloc[-1]),
         "return_20d": float(close.pct_change(20).iloc[-1]),
+        "return_60d": float(close.pct_change(60).iloc[-1]),
         "rsi_14": float(rsi.iloc[-1]),
         "above_sma_50": bool(close.iloc[-1] > close.rolling(50).mean().iloc[-1]),
         "above_sma_200": bool(close.iloc[-1] > close.rolling(200).mean().iloc[-1]),
+        "near_20d_high": bool(close.iloc[-1] >= close.rolling(20).max().iloc[-1] * 0.98),
+        "near_60d_high": bool(close.iloc[-1] >= close.rolling(60).max().iloc[-1] * 0.98),
     }
 
 
@@ -94,26 +97,83 @@ def observation_label(forecast: dict) -> str:
     return "OBSERWUJ"
 
 
+def _asset_class(symbol: str) -> str:
+    if symbol.endswith("-USD"):
+        return "Krypto"
+    if symbol.endswith(".WA"):
+        return "GPW"
+    if "." in symbol:
+        return "ETF / Europa"
+    if symbol.startswith("^"):
+        return "Indeks"
+    return "USA / ETF"
+
+
+def _setup_label(technical: dict, horizon: int) -> str:
+    rsi = technical["rsi_14"]
+    if technical.get("near_20d_high") and technical["return_20d"] > 0 and 45 <= rsi <= 78:
+        return "Breakout / momentum"
+    if technical["above_sma_50"] and technical["above_sma_200"] and technical["return_20d"] > 0:
+        return "Trend continuation"
+    if technical["return_5d"] > 0 and technical["return_20d"] < 0 and horizon <= 5:
+        return "Odbicie krótkoterminowe"
+    if rsi >= 78:
+        return "Mocne momentum, ryzyko przegrzania"
+    if rsi <= 32:
+        return "Wyprzedanie / wysokie ryzyko"
+    return "Neutralny setup"
+
+
+def _row_from_result(symbol: str, result: dict, horizon: int) -> dict:
+    f, r = result["forecasts"][horizon], result["risk"]
+    technical = result["technical"]
+    confidence = abs(f["probability_up"] - 0.5) * 2
+    quality = max(0.0, min(1.0, (f["auc"] - 0.45) / 0.20))
+    risk_penalty = min(1.5, r["annual_volatility"]) * (8 if symbol.endswith("-USD") else 10)
+    momentum_bonus = (
+        max(-0.08, min(0.12, technical["return_20d"])) * 25
+        + (0.75 if technical["above_sma_50"] else -0.35)
+        + (0.55 if technical["near_20d_high"] else 0.0)
+    )
+    score = (f["probability_up"] - 0.5) * 210 * quality + f["expected_return"] * 90 + momentum_bonus - risk_penalty
+    return {
+        "Symbol": symbol, "Klasa": _asset_class(symbol), "Horyzont": horizon,
+        "Setup": _setup_label(technical, horizon), "Cena": result["last_price"],
+        "Ocena": observation_label(f), "Sygnał": signal_label(f["probability_up"], f["quality"]),
+        "P(wzrost)": f["probability_up"], "Oczekiwany ruch": f["expected_return"],
+        "Dolna granica 90%": f["lower_return"], "Górna granica 90%": f["upper_return"],
+        "Zwrot 1d": technical["return_1d"], "Zwrot 5d": technical["return_5d"], "Zwrot 20d": technical["return_20d"],
+        "RSI 14": technical["rsi_14"], "AUC walidacji": f["auc"], "Brier": f["brier"],
+        "Jakość modelu": f["quality"], "Pewność": confidence * quality,
+        "Zmienność roczna": r["annual_volatility"], "Max drawdown": r["max_drawdown"], "Score": score,
+    }
+
+
 def scan_market(symbols: list[str], horizon: int = 5, years: int = 8) -> tuple[pd.DataFrame, dict[str, str]]:
     rows, errors = [], {}
     for symbol in dict.fromkeys(s.strip().upper() for s in symbols if s.strip()):
         try:
             result = analyze_asset(symbol, horizons=(horizon,), years=years)
-            f, r = result["forecasts"][horizon], result["risk"]
-            confidence = abs(f["probability_up"] - 0.5) * 2
-            quality = max(0.0, min(1.0, (f["auc"] - 0.45) / 0.20))
-            score = (f["probability_up"] - 0.5) * 200 * quality - r["annual_volatility"] * 10
-            rows.append({
-                "Symbol": symbol, "Cena": result["last_price"],
-                "Ocena": observation_label(f), "Sygnał": signal_label(f["probability_up"], f["quality"]),
-                "P(wzrost)": f["probability_up"], "Oczekiwany ruch": f["expected_return"],
-                "Dolna granica 90%": f["lower_return"], "Górna granica 90%": f["upper_return"],
-                "AUC walidacji": f["auc"], "Jakość modelu": f["quality"], "Pewność": confidence * quality,
-                "Zmienność roczna": r["annual_volatility"], "Max drawdown": r["max_drawdown"], "Score": score,
-            })
+            rows.append(_row_from_result(symbol, result, horizon))
         except Exception as exc:
             errors[symbol] = str(exc)
     frame = pd.DataFrame(rows)
     if not frame.empty:
         frame = frame.sort_values("Score", ascending=False).reset_index(drop=True)
+    return frame, errors
+
+
+def scan_market_multi(symbols: list[str], horizons: tuple[int, ...] = (1, 5, 20), years: int = 8) -> tuple[pd.DataFrame, dict[str, str]]:
+    rows, errors = [], {}
+    clean_symbols = dict.fromkeys(s.strip().upper() for s in symbols if s.strip())
+    for symbol in clean_symbols:
+        try:
+            result = analyze_asset(symbol, horizons=horizons, years=years)
+            for horizon in horizons:
+                rows.append(_row_from_result(symbol, result, horizon))
+        except Exception as exc:
+            errors[symbol] = str(exc)
+    frame = pd.DataFrame(rows)
+    if not frame.empty:
+        frame = frame.sort_values(["Horyzont", "Score"], ascending=[True, False]).reset_index(drop=True)
     return frame, errors
