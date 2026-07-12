@@ -66,6 +66,14 @@ def profile_name(profile: dict, fallback: str) -> str:
     return profile.get("longName") or profile.get("shortName") or fallback
 
 
+def model_mix(weights: dict | None) -> str:
+    if not weights:
+        return "—"
+    names = {"linear": "linear", "boosting": "boosting", "extra_trees": "ExtraTrees"}
+    ordered = sorted(weights.items(), key=lambda item: item[1], reverse=True)
+    return " · ".join(f"{names.get(name, name)} {weight:.0%}" for name, weight in ordered)
+
+
 def render_profile(profile: dict) -> None:
     if not profile:
         return
@@ -142,6 +150,8 @@ def render_analysis(result: dict, profile: dict) -> None:
                 "Okres walidacji": f"{forecast['validation_start']} → {forecast['validation_end']}",
                 "Liczba obserwacji": forecast["samples"],
                 "Udział modelu liniowego": forecast["linear_weight"],
+                "Folds walk-forward": forecast.get("validation_folds", 0),
+                "Skład ensemble": model_mix(forecast.get("model_weights")),
             })
         diagnostics = pd.DataFrame(diagnostic_rows)
         st.dataframe(
@@ -508,9 +518,9 @@ with settings:
     st.subheader("Co program robi po kliknięciu Analizuj?")
     s1, s2, s3, s4 = st.columns(4)
     s1.markdown("<div class='pro-card'><h3>1. Dane</h3><p>Pobiera ceny, wolumen i benchmark rynku. Krypto liczy w skali 365 dni, giełdy w 252 sesjach.</p></div>", unsafe_allow_html=True)
-    s2.markdown("<div class='pro-card'><h3>2. Cechy</h3><p>Buduje momentum, trend, RSI, MACD, ATR, zmienność, wolumen i relatywną siłę.</p></div>", unsafe_allow_html=True)
-    s3.markdown("<div class='pro-card'><h3>3. Walidacja</h3><p>Odkłada najnowszy fragment historii. Model nie widzi go podczas treningu oceny jakości.</p></div>", unsafe_allow_html=True)
-    s4.markdown("<div class='pro-card'><h3>4. Refit</h3><p>Po ocenie jakości finalny model uczy się ponownie na całej dostępnej historii.</p></div>", unsafe_allow_html=True)
+    s2.markdown("<div class='pro-card'><h3>2. Cechy</h3><p>Buduje momentum, trend, RSI, MACD, ATR, tail ratio, presję ceny/wolumenu i relatywną siłę.</p></div>", unsafe_allow_html=True)
+    s3.markdown("<div class='pro-card'><h3>3. Model zoo</h3><p>Porównuje regresję logistyczną, gradient boosting i ExtraTrees, a wagi dobiera przez walk-forward.</p></div>", unsafe_allow_html=True)
+    s4.markdown("<div class='pro-card'><h3>4. Refit</h3><p>Po ocenie jakości finalny ensemble uczy się ponownie na całej dostępnej historii.</p></div>", unsafe_allow_html=True)
 
     st.subheader("Dlaczego aplikacja czasem mówi „wstrzymaj się”?")
     st.markdown("""
@@ -542,15 +552,16 @@ with method:
     st.markdown("""
 ### Silnik prognostyczny
 
-Model korzysta z ponad 30 cech: stóp zwrotu, RSI Wildera, MACD, ATR, pasm Bollingera, średnich 10–200 sesji, momentum, zmienności, luk cenowych, anomalii wolumenu oraz relatywnej siły względem rynku. Dla GPW kontekstem jest fundusz śledzący WIG20 Total Return, dla rynku amerykańskiego S&P 500, a dla altcoinów Bitcoin.
+Model korzysta z kilkudziesięciu cech: stóp zwrotu, RSI Wildera, MACD, ATR, pasm Bollingera, średnich 10–200 sesji, momentum, realized Sharpe, downside volatility, tail ratio, presji ceny/wolumenu, luk cenowych, anomalii wolumenu, odległości od wybicia/paniki oraz relatywnej siły względem rynku. Dla GPW kontekstem jest fundusz śledzący WIG20 Total Return, dla rynku amerykańskiego S&P 500, a dla altcoinów Bitcoin.
 
-Kierunek łączy regularizowaną regresję logistyczną i gradient boosting. Ich proporcja jest dobierana osobno dla każdego instrumentu i horyzontu na wydzielonym okresie kalibracji. Oczekiwany ruch łączy Ridge z lasem losowym. Prawdopodobieństwo jest automatycznie ściągane do 50%, gdy AUC i Brier na późniejszym okresie nie potwierdzają jakości modelu. Po walidacji modele produkcyjne są ponownie trenowane na całej dostępnej historii.
+Kierunek liczy adaptacyjny ensemble: regularizowana regresja logistyczna, histogram gradient boosting i ExtraTrees. Wagi modeli są dobierane osobno dla każdego instrumentu i horyzontu na walk-forward validation z luką chroniącą przed podglądaniem przyszłości. Oczekiwany ruch liczy osobny ensemble regresyjny: Ridge, Random Forest, histogram gradient boosting i ExtraTrees. Prawdopodobieństwo jest kalibrowane i automatycznie ściągane do 50%, gdy AUC i Brier na późniejszym okresie nie potwierdzają jakości modelu. Po walidacji modele produkcyjne są ponownie trenowane na całej dostępnej historii.
 
 ### Ochrona przed fałszywie dobrym wynikiem
 
 - cechy nie korzystają z przyszłych danych;
 - trening zawsze poprzedza walidację;
 - między treningiem i walidacją jest luka równa horyzontowi prognozy;
+- dobór wag modeli korzysta z expanding walk-forward validation;
 - backtest jest chronologiczny walk-forward i uwzględnia koszt transakcji;
 - aplikacja pokazuje przedział niepewności oraz jakość poza próbką;
 - skaner nie składa zleceń, nie korzysta z dźwigni i nie obiecuje zysku.

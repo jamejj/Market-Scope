@@ -74,7 +74,9 @@ def run_signal_scan(
     path: Path = SNAPSHOT_PATH,
 ) -> dict:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    lock_file = LOCK_PATH.open("w")
+    lock_path = LOCK_PATH if path == SNAPSHOT_PATH else path.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_path.open("w")
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:

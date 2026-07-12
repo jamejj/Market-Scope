@@ -31,14 +31,20 @@ def build_features(data: pd.DataFrame, context: pd.DataFrame | None = None) -> p
     annualizer = periods_per_year(data.index)
     out = pd.DataFrame(index=data.index)
 
-    for n in (1, 2, 5, 10, 20, 60):
+    for n in (1, 2, 5, 10, 20, 60, 120):
         out[f"ret_{n}"] = np.log(c / c.shift(n))
-    for n in (5, 10, 20, 60):
-        out[f"vol_{n}"] = logret.rolling(n).std() * np.sqrt(annualizer)
+    for n in (5, 10, 20, 60, 120):
+        volatility = logret.rolling(n).std() * np.sqrt(annualizer)
+        downside = logret.clip(upper=0).rolling(n).std() * np.sqrt(annualizer)
+        out[f"vol_{n}"] = volatility
+        out[f"downside_vol_{n}"] = downside
+        out[f"realized_sharpe_{n}"] = logret.rolling(n).mean() / logret.rolling(n).std().replace(0, np.nan) * np.sqrt(annualizer)
+        out[f"tail_ratio_{n}"] = logret.rolling(n).quantile(0.95) / (-logret.rolling(n).quantile(0.05)).replace(0, np.nan)
     for n in (10, 20, 50, 100, 200):
         ma = c.rolling(n).mean()
         out[f"ma_dist_{n}"] = c / ma - 1
     out["rsi_14"] = (_rsi(c, 14) - 50) / 50
+    out["rsi_velocity"] = out["rsi_14"].diff(5)
 
     ema12, ema26 = c.ewm(span=12, adjust=False).mean(), c.ewm(span=26, adjust=False).mean()
     macd = (ema12 - ema26) / c
@@ -54,26 +60,31 @@ def build_features(data: pd.DataFrame, context: pd.DataFrame | None = None) -> p
     logv = np.log1p(v)
     out["volume_z20"] = (logv - logv.rolling(20).mean()) / logv.rolling(20).std()
     out["volume_change"] = logv.diff(5)
+    out["volume_trend_20"] = logv.rolling(5).mean() / logv.rolling(20).mean().replace(0, np.nan) - 1
     signed_volume = np.sign(c.diff()).fillna(0) * v
     obv = signed_volume.cumsum()
     out["obv_trend"] = obv.diff(20) / v.rolling(20).sum().replace(0, np.nan)
     out["range_pct"] = (data["High"] - data["Low"]) / c
     out["gap"] = data["Open"] / c.shift(1) - 1
     out["momentum_acceleration"] = out["ret_5"] - out["ret_20"] / 4
+    out["trend_strength_50_200"] = out["ma_dist_50"] - out["ma_dist_200"]
+    out["price_volume_pressure"] = out["ret_5"] * out["volume_z20"]
     out["volatility_ratio"] = out["vol_10"] / out["vol_60"].replace(0, np.nan)
     out["skew_20"] = logret.rolling(20).skew()
     out["skew_60"] = logret.rolling(60).skew()
     out["drawdown_60"] = c / c.rolling(60).max() - 1
     out["drawdown_252"] = c / c.rolling(min(252, annualizer)).max() - 1
-    for n in (20, 60):
+    for n in (20, 60, 120):
         rolling_low, rolling_high = c.rolling(n).min(), c.rolling(n).max()
         out[f"range_position_{n}"] = (c - rolling_low) / (rolling_high - rolling_low).replace(0, np.nan)
+        out[f"breakout_distance_{n}"] = c / rolling_high - 1
+        out[f"panic_distance_{n}"] = c / rolling_low - 1
 
     # Context makes a stock forecast relative to its broad market instead of treating it in isolation.
     if context is not None and not context.empty:
         market_close = context["Close"].reindex(out.index).ffill()
         market_ret = np.log(market_close).diff()
-        for n in (1, 5, 20, 60):
+        for n in (1, 5, 20, 60, 120):
             out[f"market_ret_{n}"] = np.log(market_close / market_close.shift(n))
             out[f"relative_strength_{n}"] = out[f"ret_{n}"] - out[f"market_ret_{n}"]
         out["market_vol_20"] = market_ret.rolling(20).std() * np.sqrt(annualizer)
