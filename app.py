@@ -44,86 +44,79 @@ st.markdown("""
 
     .stApp {
         background:
-            radial-gradient(circle at 12% 8%, rgba(139, 92, 246, .24), transparent 30rem),
-            radial-gradient(circle at 88% 12%, rgba(34, 211, 238, .18), transparent 34rem),
-            radial-gradient(circle at 50% 100%, rgba(16, 185, 129, .08), transparent 28rem),
-            linear-gradient(180deg, var(--bg-0) 0%, #080a18 44%, #050711 100%);
+            radial-gradient(circle at 88% 0%, rgba(37, 99, 235, .12), transparent 28rem),
+            radial-gradient(circle at 0% 18%, rgba(99, 102, 241, .10), transparent 24rem),
+            linear-gradient(180deg, #080b13 0%, #080d19 48%, #050711 100%);
         color: var(--text);
     }
 
-    .block-container {padding-top: .65rem; padding-bottom: 2.4rem; max-width: 1480px;}
+    .block-container {padding-top: .55rem; padding-bottom: 2.4rem; max-width: 1480px;}
     h1, h2, h3 {letter-spacing: -.04em; color: var(--text);}
     p, li, label, span {color: inherit;}
     hr {border-color: rgba(166, 125, 255, .16);}
 
-    .ms-hero {
-        position: relative;
-        overflow: hidden;
+    .ms-topbar {
         display: grid;
-        grid-template-columns: minmax(0, 1.5fr) minmax(280px, .48fr);
-        gap: 18px;
-        align-items: stretch;
-        padding: 16px 18px;
-        margin: 0 0 10px;
-        border: 1px solid rgba(166, 125, 255, .20);
-        border-radius: 22px;
-        background:
-            linear-gradient(135deg, rgba(139, 92, 246, .18), rgba(34, 211, 238, .08) 46%, rgba(10, 14, 30, .82)),
-            rgba(12, 16, 32, .86);
-        box-shadow: 0 14px 42px rgba(0, 0, 0, .26), inset 0 1px 0 rgba(255,255,255,.06);
-    }
-    .ms-hero::after {
-        content: "";
-        position: absolute;
-        inset: 0 auto 0 54%;
-        width: 1px;
-        background: linear-gradient(180deg, transparent, rgba(34,211,238,.45), transparent);
-        filter: blur(8px);
-    }
-    .ms-hero-copy, .ms-hero-panel {position: relative; z-index: 1;}
-    .ms-kicker {
-        display: inline-flex;
-        gap: 8px;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 14px;
         align-items: center;
-        padding: 4px 8px;
-        border: 1px solid rgba(34, 211, 238, .30);
-        border-radius: 999px;
-        color: #cffafe;
-        background: rgba(34, 211, 238, .08);
-        font-size: .68rem;
-        font-weight: 800;
-        letter-spacing: .08em;
-        text-transform: uppercase;
+        padding: 12px 14px;
+        margin: 0 0 8px;
+        border: 1px solid rgba(148, 163, 184, .16);
+        border-radius: 16px;
+        background: rgba(10, 15, 28, .76);
+        box-shadow: 0 10px 34px rgba(0,0,0,.20), inset 0 1px 0 rgba(255,255,255,.04);
     }
-    .ms-hero h1 {font-size: clamp(1.55rem, 2.15vw, 2.45rem); margin: 8px 0 5px; line-height: 1.03;}
-    .ms-hero p {max-width: 760px; color: var(--muted); font-size: .90rem; margin: 0;}
-    .ms-pills {display:flex; flex-wrap:wrap; gap: 7px; margin-top: 11px;}
-    .ms-pill {
-        padding: 5px 9px;
+    .ms-brand {
+        display:flex;
+        gap: 12px;
+        align-items:center;
+        min-width: 0;
+    }
+    .ms-logo {
+        width: 38px;
+        height: 38px;
+        display:grid;
+        place-items:center;
+        border-radius: 12px;
+        color: #dff7ff;
+        background: linear-gradient(135deg, rgba(37, 99, 235, .42), rgba(14, 165, 233, .24));
+        border: 1px solid rgba(56, 189, 248, .26);
+        font-weight: 950;
+    }
+    .ms-brand h1 {
+        margin: 0;
+        font-size: 1.35rem;
+        line-height: 1;
+        letter-spacing: -.045em;
+    }
+    .ms-brand p {
+        margin: 3px 0 0;
+        color: var(--muted);
+        font-size: .82rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .ms-status-strip {
+        display:flex;
+        align-items:center;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content:flex-end;
+    }
+    .ms-chip {
+        display:inline-flex;
+        align-items:center;
+        gap: 7px;
+        padding: 7px 9px;
         border-radius: 999px;
-        border: 1px solid rgba(166, 125, 255, .20);
-        background: rgba(255,255,255,.045);
+        border: 1px solid rgba(148, 163, 184, .18);
+        background: rgba(15, 23, 42, .58);
         color: #dbeafe;
         font-size: .76rem;
-        font-weight: 700;
-    }
-    .ms-hero-panel {
-        padding: 12px;
-        border: 1px solid rgba(34, 211, 238, .20);
-        border-radius: 18px;
-        background: rgba(3, 7, 18, .42);
-        box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
-    }
-    .ms-panel-title {
-        display:flex;
-        justify-content:space-between;
-        align-items:center;
-        margin-bottom: 8px;
-        color: #e0f2fe;
-        font-size: .78rem;
         font-weight: 850;
-        letter-spacing: .08em;
-        text-transform: uppercase;
+        letter-spacing: .02em;
     }
     .ms-led {
         display:inline-block;
@@ -133,35 +126,9 @@ st.markdown("""
         background: var(--green);
         box-shadow: 0 0 14px rgba(34,197,94,.75);
     }
-    .ms-stat-grid {
-        display:grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 10px;
-    }
-    .ms-stat {
-        padding: 8px 9px;
-        border-radius: 14px;
-        border: 1px solid rgba(166,125,255,.14);
-        background: rgba(15,23,42,.52);
-    }
-    .ms-stat small {
-        display:block;
-        color: var(--muted);
-        font-size: .68rem;
-        text-transform: uppercase;
-        letter-spacing: .06em;
-        font-weight: 800;
-    }
-    .ms-stat strong {
-        display:block;
-        margin-top: 3px;
-        color: #fff;
-        font-size: .98rem;
-        letter-spacing: -.03em;
-    }
     @media (max-width: 920px) {
-        .ms-hero {grid-template-columns: 1fr;}
-        .ms-hero::after {display:none;}
+        .ms-topbar {grid-template-columns: 1fr;}
+        .ms-status-strip {justify-content:flex-start;}
     }
 
     [data-testid="stMetric"] {
@@ -194,10 +161,10 @@ st.markdown("""
     .pro-card {
         min-height: 126px;
         padding: 17px 18px;
-        border: 1px solid rgba(166, 125, 255, .22);
+        border: 1px solid rgba(148, 163, 184, .18);
         border-radius: 20px;
         background:
-            linear-gradient(145deg, rgba(22, 28, 54, .82), rgba(9, 12, 26, .68)),
+            linear-gradient(145deg, rgba(17, 24, 39, .88), rgba(8, 13, 25, .72)),
             rgba(12, 16, 32, .7);
         box-shadow: 0 14px 38px rgba(0, 0, 0, .20);
         transform: translateY(0) scale(1);
@@ -206,11 +173,11 @@ st.markdown("""
     }
     .pro-card:hover {
         transform: translateY(-3px) scale(1.012);
-        border-color: rgba(34, 211, 238, .38);
+        border-color: rgba(34, 211, 238, .34);
         background:
-            linear-gradient(145deg, rgba(35, 42, 76, .88), rgba(11, 16, 34, .72)),
+            linear-gradient(145deg, rgba(21, 31, 49, .92), rgba(9, 15, 29, .76)),
             rgba(12, 16, 32, .78);
-        box-shadow: 0 20px 54px rgba(0, 0, 0, .28), 0 0 26px rgba(139,92,246,.10);
+        box-shadow: 0 18px 48px rgba(0, 0, 0, .28), 0 0 22px rgba(34,211,238,.08);
     }
     .pro-card h3 {margin: 0 0 7px; color: #f8fbff; font-size: 1.35rem;}
     .pro-card p {margin: 0; color: var(--muted); line-height: 1.42; font-size: .92rem;}
@@ -888,26 +855,20 @@ _hero_status = "Skan trwa" if _hero_snapshot.get("status") == "running" else ("G
 _hero_completed = _hero_snapshot.get("completed", 0)
 _hero_total = _hero_snapshot.get("total", _hero_universe)
 st.markdown(f"""
-<div class="ms-hero">
-    <div class="ms-hero-copy">
-        <div class="ms-kicker">MarketScope PRO · quant radar</div>
-        <h1>Command center dla rynku.</h1>
-        <p>Radar 1d/5d/20d, adaptive model zoo, hot movers, risk analytics i journal skuteczności — bez udawania rekomendacji.</p>
-        <div class="ms-pills">
-            <span class="ms-pill">⚡ Hot movers</span>
-            <span class="ms-pill">🧠 Adaptive ML</span>
-            <span class="ms-pill">📒 Signal Journal</span>
-            <span class="ms-pill">🛡️ Risk first</span>
+<div class="ms-topbar">
+    <div class="ms-brand">
+        <div class="ms-logo">MS</div>
+        <div>
+            <h1>MarketScope PRO</h1>
+            <p>Quant radar · akcje · ETF-y · krypto · risk & performance</p>
         </div>
     </div>
-    <div class="ms-hero-panel">
-        <div class="ms-panel-title"><span>System status</span><span><i class="ms-led"></i> {_hero_status}</span></div>
-        <div class="ms-stat-grid">
-            <div class="ms-stat"><small>Radar</small><strong>{_hero_completed}/{_hero_total}</strong></div>
-            <div class="ms-stat"><small>Universe</small><strong>{_hero_universe}</strong></div>
-            <div class="ms-stat"><small>Journal</small><strong>{_hero_journal["total"]}</strong></div>
-            <div class="ms-stat"><small>Engine</small><strong>3×ML</strong></div>
-        </div>
+    <div class="ms-status-strip">
+        <span class="ms-chip"><i class="ms-led"></i>{_hero_status}</span>
+        <span class="ms-chip">Radar {_hero_completed}/{_hero_total}</span>
+        <span class="ms-chip">Universe {_hero_universe}</span>
+        <span class="ms-chip">Journal {_hero_journal["total"]}</span>
+        <span class="ms-chip">Engine 3×ML</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -917,7 +878,7 @@ home, stocks, etfs, crypto, radar, journal, backtest, settings, method = st.tabs
 ])
 
 with home:
-    st.header("Command Center")
+    st.header("Start")
     st.write("Wybierz moduł i przejdź od szerokiego radaru rynku do konkretnej analizy instrumentu. Każdy symbol dostaje prognozę 1/5/20/60, jakość walidacji, momentum, ryzyko i miejsce w dzienniku skuteczności.")
     st.markdown("""
     <div class="feature-grid">
