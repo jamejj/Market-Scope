@@ -6,7 +6,7 @@ from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CAT
 from market_oracle.engine import observation_label, signal_label
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.model import fit_forecast
-from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan
+from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, snapshot_is_stale
 from market_oracle.risk import periods_per_year, risk_metrics
 
 
@@ -99,3 +99,13 @@ def test_background_monitor_persists_snapshot(tmp_path, monkeypatch):
     assert result["status"] == "complete"
     assert loaded["records"][0]["Symbol"] == "TEST"
     assert len(default_universe()) >= 100
+
+
+def test_old_signal_snapshot_is_considered_stale():
+    old_snapshot = {
+        "status": "complete", "updated_at": "2026-07-12T12:00:00+00:00",
+        "horizon": 20, "completed": 41, "total": 41,
+        "records": [{"Symbol": "SPY", "Ocena": "OBSERWUJ"}],
+        "errors": {},
+    }
+    assert snapshot_is_stale(old_snapshot)

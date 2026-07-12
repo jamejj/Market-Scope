@@ -8,12 +8,12 @@ import streamlit as st
 
 from market_oracle.backtest import walk_forward_backtest
 from market_oracle.catalog import (
-    CATEGORIES, CRYPTO_CATEGORIES, ETF_CATEGORIES, category_options,
-    crypto_category_options, etf_options,
+    CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES, category_options,
+    crypto_category_options, crypto_options, etf_options,
 )
 from market_oracle.data import download_history, download_profile
 from market_oracle.engine import analyze_asset, scan_market_multi, signal_label
-from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan
+from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, snapshot_is_stale
 from market_oracle.search import search_assets
 
 
@@ -74,6 +74,83 @@ def model_mix(weights: dict | None) -> str:
     return " · ".join(f"{names.get(name, name)} {weight:.0%}" for name, weight in ordered)
 
 
+def horizon_text(horizon: int, crypto: bool) -> str:
+    unit = "dni" if crypto else "sesji"
+    names = {1: "1 dzień" if crypto else "1 sesja", 5: "5 dni" if crypto else "5 sesji", 20: f"20 {unit}", 60: f"60 {unit}"}
+    return names.get(horizon, f"{horizon} {unit}")
+
+
+def best_confirmed_forecast(forecasts: dict[int, dict]) -> tuple[int, dict] | tuple[None, None]:
+    confirmed = [
+        (horizon, forecast) for horizon, forecast in forecasts.items()
+        if not forecast["quality"].startswith("NISKA")
+    ]
+    if not confirmed:
+        return None, None
+    return max(
+        confirmed,
+        key=lambda item: (
+            item[1]["quality"] == "WYSOKA",
+            abs(item[1]["probability_up"] - 0.5),
+            item[0],
+        ),
+    )
+
+
+def aggregate_model_view(result: dict) -> dict:
+    forecasts = result["forecasts"]
+    best_horizon, best = best_confirmed_forecast(forecasts)
+    five_day = forecasts.get(5) or next(iter(forecasts.values()))
+    technical = result["technical"]
+    trend_points = sum([
+        technical["return_20d"] > 0, technical["rsi_14"] >= 50,
+        technical["above_sma_50"], technical["above_sma_200"],
+    ])
+    trend_label = "POZYTYWNY" if trend_points >= 3 else ("NEGATYWNY" if trend_points <= 1 else "MIESZANY")
+    if best is None:
+        if trend_label == "POZYTYWNY":
+            verdict = "Trend pozytywny, model ostrożny"
+            tone = "info"
+            detail = (
+                f"Technicznie instrument wygląda pozytywnie, ale modele kierunkowe nie potwierdziły jeszcze "
+                f"stabilnej przewagi poza próbką. Model 5d: AUC {five_day['auc']:.3f}, Brier {five_day['brier']:.3f}."
+            )
+        elif trend_label == "NEGATYWNY":
+            verdict = "Słaby trend, brak przewagi modelu"
+            tone = "warning"
+            detail = (
+                f"Trend i walidacja modelu są słabe. Model 5d: AUC {five_day['auc']:.3f}, "
+                f"Brier {five_day['brier']:.3f}. To raczej kandydat do obserwacji niż do pochopnej decyzji."
+            )
+        else:
+            verdict = "Brak czytelnej przewagi"
+            tone = "warning"
+            detail = (
+                f"Rynek jest mieszany, a model 5d nie ma przewagi: AUC {five_day['auc']:.3f}, "
+                f"Brier {five_day['brier']:.3f}. Warto patrzeć na hot movers, trend i dłuższe horyzonty."
+            )
+        best_label = "Brak potwierdzonego horyzontu"
+    else:
+        direction = signal_label(best["probability_up"], best["quality"]).lower()
+        best_label = f"{horizon_text(best_horizon, result['symbol'].endswith('-USD'))} · {best['quality']}"
+        if best["probability_up"] >= 0.54:
+            verdict = f"Potwierdzony sygnał wzrostowy na {horizon_text(best_horizon, result['symbol'].endswith('-USD'))}"
+            tone = "success"
+        elif best["probability_up"] <= 0.46:
+            verdict = f"Potwierdzone ryzyko spadku na {horizon_text(best_horizon, result['symbol'].endswith('-USD'))}"
+            tone = "error"
+        else:
+            verdict = f"Potwierdzony model, ale sygnał neutralny na {horizon_text(best_horizon, result['symbol'].endswith('-USD'))}"
+            tone = "info"
+        detail = (
+            f"Najlepszy potwierdzony horyzont: **{best_label}**. "
+            f"Sygnał: **{direction}**, P(wzrost) {pct(best['probability_up'])}, "
+            f"AUC {best['auc']:.3f}, Brier {best['brier']:.3f}. "
+            f"Model 5d może być neutralny/słaby, ale to nie przekreśla dłuższego horyzontu."
+        )
+    return {"trend_label": trend_label, "best_label": best_label, "verdict": verdict, "tone": tone, "detail": detail}
+
+
 def render_profile(profile: dict) -> None:
     if not profile:
         return
@@ -98,30 +175,22 @@ def render_analysis(result: dict, profile: dict) -> None:
     title_col.subheader(f"{profile_name(profile, symbol)} · {symbol}")
     date_col.caption(f"Dane do {result['last_date'].date()} · benchmark: {result['benchmark']}")
 
-    five_day = result["forecasts"].get(5) or next(iter(result["forecasts"].values()))
     technical = result["technical"]
-    trend_points = sum([
-        technical["return_20d"] > 0, technical["rsi_14"] >= 50,
-        technical["above_sma_50"], technical["above_sma_200"],
-    ])
-    trend_label = "POZYTYWNY" if trend_points >= 3 else ("NEGATYWNY" if trend_points <= 1 else "MIESZANY")
+    view = aggregate_model_view(result)
     summary_cols = st.columns(3)
     summary_cols[0].metric("Ostatnia cena", f"{result['last_price']:,.2f} {profile.get('currency', '')}".strip())
-    summary_cols[1].metric("Trend techniczny", trend_label, help="Opis bieżącego trendu, nie prognoza przyszłej ceny.")
-    summary_cols[2].metric("Jakość modelu 5-dniowego", five_day["quality"])
+    summary_cols[1].metric("Trend techniczny", view["trend_label"], help="Opis bieżącego trendu, nie prognoza przyszłej ceny.")
+    summary_cols[2].metric("Najlepszy horyzont modelu", view["best_label"])
 
-    if five_day["quality"] == "NISKA — BRAK PRZEWAGI":
-        st.warning(
-            f"**Brak potwierdzonej przewagi modelu.** W walidacji tygodniowej AUC wyniosło "
-            f"{five_day['auc']:.3f}, a Brier {five_day['brier']:.3f}. Prognoza została celowo "
-            "ściągnięta w stronę 50%. Najrozsądniejszy sygnał: obserwuj / brak pozycji."
-        )
-    elif five_day["probability_up"] >= 0.54:
-        st.success(f"Model wykrywa przewagę wzrostową, a jakość walidacji jest: **{five_day['quality'].lower()}**.")
-    elif five_day["probability_up"] <= 0.46:
-        st.error(f"Model wykrywa przewagę spadkową, a jakość walidacji jest: **{five_day['quality'].lower()}**.")
+    message = f"**{view['verdict']}.** {view['detail']}"
+    if view["tone"] == "success":
+        st.success(message)
+    elif view["tone"] == "error":
+        st.error(message)
+    elif view["tone"] == "warning":
+        st.warning(message)
     else:
-        st.info(f"Sygnał neutralny. Jakość walidacji: **{five_day['quality'].lower()}**.")
+        st.info(message)
 
     unit = "dzień" if symbol.endswith("-USD") else "sesja"
     horizon_names = {1: f"Następny {unit}", 5: "Najbliższy tydzień", 20: "Około miesiąca", 60: "Około kwartału"}
@@ -270,6 +339,7 @@ def render_signal_dashboard() -> None:
         st.info("Ranking nie został jeszcze policzony. Uruchom aplikację plikiem **Uruchom MarketScope.command** albo użyj przycisku pełnego skanu poniżej.")
         return
 
+    stale_snapshot = snapshot_is_stale(snapshot)
     status = snapshot.get("status")
     completed, total = snapshot.get("completed", 0), snapshot.get("total", 0)
     if status == "running":
@@ -283,7 +353,14 @@ def render_signal_dashboard() -> None:
             updated = updated.tz_convert("Europe/Warsaw")
         horizons = snapshot.get("horizons") or [snapshot.get("horizon", 20)]
         horizon_text = ", ".join(f"{h}d" for h in horizons)
-        st.success(f"Ranking gotowy · aktualizacja: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzonty: **{horizon_text}**")
+        if stale_snapshot:
+            st.warning(
+                f"Ten ranking jest ze starego formatu albo ma niepełny zakres (**{horizon_text}**, "
+                f"{snapshot.get('total', 0)} instrumentów). Uruchom ponownie aplikację albo kliknij **Przelicz cały ranking teraz**, "
+                "żeby dostać radar 1d/5d/20d z hot movers."
+            )
+        else:
+            st.success(f"Ranking gotowy · aktualizacja: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzonty: **{horizon_text}**")
 
     frame = pd.DataFrame(snapshot.get("records", []))
     if frame.empty:
@@ -389,7 +466,7 @@ home, stocks, etfs, crypto, radar, backtest, settings, method = st.tabs([
 
 with home:
     st.header("Centrum analizy rynku")
-    st.write("Wybierz u góry klasę aktywów. Każdy instrument otrzyma prognozę na 1, 5 i 20 dni/sesji, ocenę wiarygodności, wykres, momentum i miary ryzyka.")
+    st.write("Wybierz u góry klasę aktywów. Każdy instrument otrzyma prognozę na 1, 5, 20 i 60 dni/sesji, ocenę wiarygodności, wykres, momentum i miary ryzyka.")
     c1, c2, c3 = st.columns(3)
     c1.markdown("<div class='pro-card'><h3>🏢 Spółki</h3><p>172 pozycje w katalogu, w tym GPW, USA, sektory i mniejsze firmy. Dostępna jest też wyszukiwarka globalna.</p></div>", unsafe_allow_html=True)
     c2.markdown("<div class='pro-card'><h3>🧺 ETF-y</h3><p>Szeroki rynek, sektory, obligacje, surowce, regiony świata, fundusze tematyczne i UCITS.</p></div>", unsafe_allow_html=True)
@@ -432,11 +509,26 @@ with etfs:
 with crypto:
     st.header("Analiza kryptowalut")
     st.warning("Krypto może poruszać się gwałtownie 24/7. Przedziały niepewności i ryzyko są tu szczególnie ważne.")
-    crypto_category = st.selectbox("Segment krypto", list(CRYPTO_CATEGORIES), key="crypto_category")
-    crypto_available = crypto_category_options(crypto_category)
-    crypto_choice = st.selectbox("Kryptowaluta", list(crypto_available), key="crypto_choice")
-    crypto_symbol = crypto_available[crypto_choice]
-    st.caption(f"Wybrana para: `{crypto_symbol}`")
+    crypto_mode = st.radio("Sposób wyboru", ["Szukaj w całym krypto", "Segmenty", "Wpisz symbol"], horizontal=True, key="crypto_mode")
+    crypto_symbol = ""
+    if crypto_mode == "Szukaj w całym krypto":
+        crypto_available = crypto_options()
+        crypto_choice = st.selectbox(
+            "Kryptowaluta",
+            list(crypto_available),
+            key="crypto_global_choice",
+            help="To pole przeszukuje cały katalog krypto, więc znajdziesz tu np. DeXe, Uniswap, Render albo Bitcoin.",
+        )
+        crypto_symbol = crypto_available[crypto_choice]
+    elif crypto_mode == "Segmenty":
+        crypto_category = st.selectbox("Segment krypto", list(CRYPTO_CATEGORIES), key="crypto_category")
+        crypto_available = crypto_category_options(crypto_category)
+        crypto_choice = st.selectbox("Kryptowaluta", list(crypto_available), key="crypto_choice")
+        crypto_symbol = crypto_available[crypto_choice]
+    else:
+        crypto_symbol = st.text_input("Symbol", "DEXE-USD", help="Yahoo/yfinance format, np. BTC-USD, ETH-USD, DEXE-USD, UNI-USD.", key="crypto_manual").strip().upper()
+    if crypto_symbol:
+        st.caption(f"Wybrana para: `{crypto_symbol}`")
     analysis_action(crypto_symbol, "crypto_analysis", "crypto_analyze")
 
 with radar:

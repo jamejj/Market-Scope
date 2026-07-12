@@ -15,6 +15,9 @@ from .engine import scan_market, scan_market_multi
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SNAPSHOT_PATH = DATA_DIR / "signals.json"
 LOCK_PATH = DATA_DIR / "signals.lock"
+SCAN_SCHEMA_VERSION = 2
+EXPECTED_HORIZONS = {1, 5, 20}
+EXPECTED_RECORD_FIELDS = {"Symbol", "Klasa", "Horyzont", "Setup", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d"}
 
 
 def default_universe() -> list[str]:
@@ -89,6 +92,7 @@ def run_signal_scan(
     errors: dict[str, str] = {}
     payload = {
         "status": "running", "started_at": started.isoformat(), "updated_at": None,
+        "schema_version": SCAN_SCHEMA_VERSION,
         "horizon": horizon, "horizons": list(horizons or (horizon,)), "years": years, "completed": 0, "total": len(universe),
         "records": rows, "errors": errors,
     }
@@ -120,6 +124,16 @@ def run_signal_scan(
 
 def snapshot_is_stale(snapshot: dict | None, max_age_hours: int = 12) -> bool:
     if not snapshot or snapshot.get("status") != "complete" or not snapshot.get("updated_at"):
+        return True
+    if int(snapshot.get("schema_version") or 0) < SCAN_SCHEMA_VERSION:
+        return True
+    horizons = set(snapshot.get("horizons") or [snapshot.get("horizon")])
+    if not EXPECTED_HORIZONS.issubset(horizons):
+        return True
+    records = snapshot.get("records") or []
+    if records and not EXPECTED_RECORD_FIELDS.issubset(records[0]):
+        return True
+    if snapshot.get("total", 0) < min(100, len(default_universe())):
         return True
     try:
         updated = datetime.fromisoformat(snapshot["updated_at"])
