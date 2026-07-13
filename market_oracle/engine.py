@@ -97,6 +97,49 @@ def observation_label(forecast: dict) -> str:
     return "OBSERWUJ"
 
 
+def momentum_radar_label(symbol: str, technical: dict) -> str:
+    """Fast discovery layer: flags unusual moves even when ML has no confirmed edge."""
+    r1 = technical.get("return_1d", 0.0)
+    r5 = technical.get("return_5d", 0.0)
+    r20 = technical.get("return_20d", 0.0)
+    rsi = technical.get("rsi_14", 50.0)
+    crypto = symbol.endswith("-USD")
+    hot_1d = 0.08 if crypto else 0.025
+    hot_5d = 0.18 if crypto else 0.06
+    hot_20d = 0.35 if crypto else 0.12
+    panic_1d = -hot_1d
+    panic_5d = -hot_5d
+    panic_20d = -hot_20d
+
+    if r1 <= panic_1d or r5 <= panic_5d or r20 <= panic_20d:
+        return "PANIKA / RYZYKO"
+    if r1 >= hot_1d or r5 >= hot_5d or r20 >= hot_20d:
+        return "PEREŁKA MOMENTUM"
+    if technical.get("near_20d_high") and r20 > (0.08 if crypto else 0.04) and 45 <= rsi <= 82:
+        return "BREAKOUT WATCH"
+    if r5 > (0.08 if crypto else 0.03) and r20 > (0.06 if crypto else 0.025):
+        return "MOMENTUM WATCH"
+    return "—"
+
+
+def momentum_radar_score(symbol: str, technical: dict, risk: dict) -> float:
+    """Ranking score for discovery; intentionally separate from validated ML score."""
+    r1 = technical.get("return_1d", 0.0)
+    r5 = technical.get("return_5d", 0.0)
+    r20 = technical.get("return_20d", 0.0)
+    r60 = technical.get("return_60d", 0.0)
+    rsi = technical.get("rsi_14", 50.0)
+    volatility = risk.get("annual_volatility", 0.0)
+    trend_bonus = (
+        (1.2 if technical.get("above_sma_50") else -0.4)
+        + (0.8 if technical.get("above_sma_200") else 0.0)
+        + (1.1 if technical.get("near_20d_high") else 0.0)
+    )
+    overheating_penalty = max(0.0, rsi - 82) * 0.08
+    risk_penalty = min(3.0, float(volatility or 0.0)) * (0.8 if symbol.endswith("-USD") else 1.1)
+    return float(r1 * 300 + r5 * 180 + r20 * 80 + r60 * 18 + trend_bonus - overheating_penalty - risk_penalty)
+
+
 def _asset_class(symbol: str) -> str:
     if symbol.endswith("-USD"):
         return "Krypto"
@@ -139,6 +182,8 @@ def _row_from_result(symbol: str, result: dict, horizon: int) -> dict:
     return {
         "Symbol": symbol, "Klasa": _asset_class(symbol), "Horyzont": horizon,
         "Data": str(result["last_date"].date()), "Setup": _setup_label(technical, horizon), "Cena": result["last_price"],
+        "Radar momentum": momentum_radar_label(symbol, technical),
+        "Radar score": momentum_radar_score(symbol, technical, r),
         "Ocena": observation_label(f), "Sygnał": signal_label(f["probability_up"], f["quality"]),
         "P(wzrost)": f["probability_up"], "Oczekiwany ruch": f["expected_return"],
         "Dolna granica 90%": f["lower_return"], "Górna granica 90%": f["upper_return"],

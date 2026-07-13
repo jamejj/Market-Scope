@@ -624,10 +624,10 @@ def _render_ranking_table(frame: pd.DataFrame, title: str, empty_text: str) -> N
         "Cena": "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
         "Zwrot 1d": "{:+.1%}", "Zwrot 5d": "{:+.1%}", "Zwrot 20d": "{:+.1%}", "RSI 14": "{:.1f}",
         "AUC walidacji": "{:.3f}", "Brier": "{:.3f}", "Pewność": "{:.1%}",
-        "Zmienność roczna": "{:.1%}", "Max drawdown": "{:.1%}", "Score": "{:.2f}",
+        "Zmienność roczna": "{:.1%}", "Max drawdown": "{:.1%}", "Score": "{:.2f}", "Radar score": "{:.1f}",
     }
     columns = [
-        "Symbol", "Klasa", "Setup", "Ocena", "P(wzrost)", "Oczekiwany ruch",
+        "Symbol", "Klasa", "Setup", "Radar momentum", "Ocena", "P(wzrost)", "Oczekiwany ruch",
         "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Jakość modelu", "Score",
     ]
     present = [column for column in columns if column in frame.columns]
@@ -636,6 +636,55 @@ def _render_ranking_table(frame: pd.DataFrame, title: str, empty_text: str) -> N
 
 def _unique_symbols(frame: pd.DataFrame) -> int:
     return int(frame["Symbol"].nunique()) if "Symbol" in frame and not frame.empty else 0
+
+
+def _class_from_symbol(symbol: str) -> str:
+    symbol = str(symbol).upper()
+    if symbol.endswith("-USD"):
+        return "Krypto"
+    if symbol.endswith(".WA"):
+        return "GPW"
+    if "." in symbol:
+        return "ETF / Europa"
+    if symbol.startswith("^"):
+        return "Indeks"
+    return "USA / ETF"
+
+
+def _ensure_radar_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    frame = frame.copy()
+    for column in ["Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "Zmienność roczna", "RSI 14"]:
+        if column in frame:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    def numeric(column: str) -> pd.Series:
+        if column in frame:
+            return pd.to_numeric(frame[column], errors="coerce").fillna(0)
+        return pd.Series(0.0, index=frame.index)
+    if "Radar score" not in frame:
+        frame["Radar score"] = (
+            numeric("Zwrot 1d") * 300
+            + numeric("Zwrot 5d") * 180
+            + numeric("Zwrot 20d") * 80
+            - numeric("Zmienność roczna").clip(upper=3) * 0.9
+        )
+    if "Radar momentum" not in frame:
+        def label(row: pd.Series) -> str:
+            crypto = str(row.get("Symbol", "")).upper().endswith("-USD")
+            hot_1d = 0.08 if crypto else 0.025
+            hot_5d = 0.18 if crypto else 0.06
+            hot_20d = 0.35 if crypto else 0.12
+            r1 = float(row.get("Zwrot 1d") or 0)
+            r5 = float(row.get("Zwrot 5d") or 0)
+            r20 = float(row.get("Zwrot 20d") or 0)
+            if r1 <= -hot_1d or r5 <= -hot_5d or r20 <= -hot_20d:
+                return "PANIKA / RYZYKO"
+            if r1 >= hot_1d or r5 >= hot_5d or r20 >= hot_20d:
+                return "PEREŁKA MOMENTUM"
+            if r5 > (0.08 if crypto else 0.03) and r20 > (0.06 if crypto else 0.025):
+                return "MOMENTUM WATCH"
+            return "—"
+        frame["Radar momentum"] = frame.apply(label, axis=1)
+    return frame
 
 
 def _journal_dataframe(entries: list[dict]) -> pd.DataFrame:
@@ -777,44 +826,48 @@ def render_signal_dashboard() -> None:
         frame["Klasa"] = "Rynek"
     if "Setup" not in frame:
         frame["Setup"] = "—"
+    frame = _ensure_radar_columns(frame)
 
     bullish_labels = {"SILNY KANDYDAT WZROSTOWY", "KANDYDAT WZROSTOWY"}
     bearish_labels = {"SILNE RYZYKO SPADKU", "RYZYKO SPADKU"}
     bullish = frame[frame["Ocena"].isin(bullish_labels)]
     bearish = frame[frame["Ocena"].isin(bearish_labels)]
+    discoveries = frame[frame["Radar momentum"].isin({"PEREŁKA MOMENTUM", "BREAKOUT WATCH", "MOMENTUM WATCH"})]
     errors = snapshot.get("errors", {})
+    crypto_errors = [symbol for symbol in errors if str(symbol).upper().endswith("-USD")]
     visible_symbols = _unique_symbols(frame)
-    summary = st.columns(5)
+    summary = st.columns(6)
     summary[0].metric("Instrumenty", f"{completed or visible_symbols}/{total or visible_symbols}")
     summary[1].metric("Wiersze sygnałów", len(frame), help="Każdy instrument ma osobne wiersze dla horyzontów 1d/5d/20d.")
-    summary[2].metric("Kandydaci wzrostowi", _unique_symbols(bullish), help="Liczba unikalnych symboli z co najmniej jednym sygnałem wzrostowym.")
-    summary[3].metric("Ryzyko spadku", _unique_symbols(bearish), help="Liczba unikalnych symboli z co najmniej jednym sygnałem spadkowym.")
-    summary[4].metric("Pominięte", len(errors), help="Symbole bez danych lub z błędem pobierania.")
+    summary[2].metric("Perełki momentum", _unique_symbols(discoveries), help="Ruchy wykryte technicznie bez wymagania potwierdzenia AUC.")
+    summary[3].metric("Kandydaci ML", _unique_symbols(bullish), help="Sygnały wzrostowe potwierdzone walidacją modelu.")
+    summary[4].metric("Ryzyko spadku", _unique_symbols(bearish), help="Liczba unikalnych symboli z co najmniej jednym sygnałem spadkowym.")
+    summary[5].metric("Pominięte", len(errors), help="Symbole bez danych lub z błędem pobierania.")
+
+    if crypto_errors:
+        st.warning(
+            f"Ten zapisany skan pominął **{len(crypto_errors)} krypto** przez brak danych w momencie skanowania. "
+            "Ranking krypto jest więc niepełny — kliknij **Przelicz cały ranking teraz**, gdy masz połączenie z internetem."
+        )
 
     formats = {
         "Cena": "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
         "Zwrot 1d": "{:+.1%}", "Zwrot 5d": "{:+.1%}", "Zwrot 20d": "{:+.1%}", "RSI 14": "{:.1f}",
         "AUC walidacji": "{:.3f}", "Brier": "{:.3f}", "Pewność": "{:.1%}", "Zmienność roczna": "{:.1%}",
-        "Max drawdown": "{:.1%}", "Score": "{:.2f}",
+        "Max drawdown": "{:.1%}", "Score": "{:.2f}", "Radar score": "{:.1f}",
     }
 
-    horizon_tabs = st.tabs(["Hot movers", "Szybki ruch 1d", "Swing 5d", "Trend 20d", "Wszystko"])
+    horizon_tabs = st.tabs(["Perełki momentum", "Szybki ruch 1d", "Swing 5d", "Trend 20d", "Wszystko"])
     with horizon_tabs[0]:
         base = frame[frame["Horyzont"] == frame["Horyzont"].min()].copy()
         if base.empty:
             base = frame.copy()
-        base["Momentum score"] = (
-            base.get("Zwrot 1d", 0) * 3
-            + base.get("Zwrot 5d", 0) * 2
-            + base.get("Zwrot 20d", 0)
-            - base.get("Zmienność roczna", 0) * 0.08
-        )
-        hot = base.sort_values("Momentum score", ascending=False).head(15)
-        st.subheader("Najmocniejsze aktualne ruchy")
-        st.caption("Ten widok nie wymaga potwierdzenia ML — to radar momentum do szybkiego sprawdzenia, szczególnie przy krypto.")
+        hot = base.sort_values("Radar score", ascending=False).head(18)
+        st.subheader("Perełki momentum i najmocniejsze aktualne ruchy")
+        st.caption("Ten widok nie wymaga potwierdzenia ML. Łapie gwałtowne ruchy i breakouty do szybkiego sprawdzenia — szczególnie przy krypto.")
         hot_columns = [
-            "Symbol", "Klasa", "Setup", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d",
-            "RSI 14", "Ocena", "P(wzrost)", "AUC walidacji", "Jakość modelu",
+            "Symbol", "Klasa", "Radar momentum", "Setup", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d",
+            "RSI 14", "Radar score", "Ocena", "P(wzrost)", "AUC walidacji", "Jakość modelu",
         ]
         present = [column for column in hot_columns if column in hot.columns]
         st.dataframe(hot[present].style.format(formats), use_container_width=True, hide_index=True)
@@ -833,22 +886,25 @@ def render_signal_dashboard() -> None:
             st.caption("To shortlist do dalszej analizy. Nie jest rekomendacją kupna ani gwarancją ruchu.")
 
     with horizon_tabs[4]:
-        filters = st.columns(3)
+        filters = st.columns(4)
         selected_horizon = filters[0].selectbox("Horyzont", ["Wszystkie", 1, 5, 20, 60], key="radar_horizon_filter")
         selected_class = filters[1].selectbox("Klasa", ["Wszystkie"] + sorted(frame["Klasa"].dropna().unique().tolist()), key="radar_class_filter")
-        only_candidates = filters[2].checkbox("Tylko kandydaci wzrostowi", value=False, key="radar_candidates_only")
+        only_discoveries = filters[2].checkbox("Tylko perełki momentum", value=False, key="radar_discoveries_only")
+        only_candidates = filters[3].checkbox("Tylko kandydaci ML", value=False, key="radar_candidates_only")
         filtered = frame.copy()
         if selected_horizon != "Wszystkie":
             filtered = filtered[filtered["Horyzont"] == selected_horizon]
         if selected_class != "Wszystkie":
             filtered = filtered[filtered["Klasa"] == selected_class]
+        if only_discoveries:
+            filtered = filtered[filtered["Radar momentum"].isin({"PEREŁKA MOMENTUM", "BREAKOUT WATCH", "MOMENTUM WATCH"})]
         if only_candidates:
             filtered = filtered[filtered["Ocena"].isin(bullish_labels)]
-        filtered = filtered.sort_values("Score", ascending=False)
+        filtered = filtered.sort_values(["Radar score", "Score"], ascending=False)
         columns = [
-            "Symbol", "Klasa", "Horyzont", "Setup", "Cena", "Ocena", "P(wzrost)", "Oczekiwany ruch",
+            "Symbol", "Klasa", "Horyzont", "Radar momentum", "Setup", "Cena", "Ocena", "P(wzrost)", "Oczekiwany ruch",
             "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Brier", "Jakość modelu",
-            "Pewność", "Zmienność roczna", "Max drawdown", "Score",
+            "Pewność", "Zmienność roczna", "Max drawdown", "Radar score", "Score",
         ]
         present = [column for column in columns if column in filtered.columns]
         st.dataframe(filtered[present].style.format(formats), use_container_width=True, hide_index=True)
@@ -860,7 +916,14 @@ def render_signal_dashboard() -> None:
             st.dataframe(bearish[columns].style.format(formats), use_container_width=True, hide_index=True)
 
     if errors:
-        st.caption(f"Pominięte instrumenty: {len(errors)}")
+        with st.expander(f"Pominięte instrumenty i błędy danych ({len(errors)})"):
+            error_frame = pd.DataFrame(
+                [
+                    {"Symbol": symbol, "Klasa": _class_from_symbol(symbol), "Błąd": message}
+                    for symbol, message in sorted(errors.items())
+                ]
+            )
+            st.dataframe(error_frame, use_container_width=True, hide_index=True)
 
 
 _hero_snapshot = load_snapshot() or {}
@@ -1056,8 +1119,8 @@ with settings:
     s1, s2, s3, s4 = st.columns(4)
     s1.markdown("<div class='pro-card'><h3>1. Dane</h3><p>Pobiera ceny, wolumen i benchmark rynku. Krypto liczy w skali 365 dni, giełdy w 252 sesjach.</p></div>", unsafe_allow_html=True)
     s2.markdown("<div class='pro-card'><h3>2. Cechy</h3><p>Buduje momentum, trend, RSI, MACD, ATR, tail ratio, presję ceny/wolumenu i relatywną siłę.</p></div>", unsafe_allow_html=True)
-    s3.markdown("<div class='pro-card'><h3>3. Model zoo</h3><p>Porównuje regresję logistyczną, gradient boosting i ExtraTrees, a wagi dobiera przez walk-forward.</p></div>", unsafe_allow_html=True)
-    s4.markdown("<div class='pro-card'><h3>4. Refit</h3><p>Po ocenie jakości finalny ensemble uczy się ponownie na całej dostępnej historii.</p></div>", unsafe_allow_html=True)
+    s3.markdown("<div class='pro-card'><h3>3. Radar</h3><p>Oddziela perełki momentum od kandydatów potwierdzonych modelem, żeby nie gubić gwałtownych ruchów.</p></div>", unsafe_allow_html=True)
+    s4.markdown("<div class='pro-card'><h3>4. Model zoo</h3><p>Porównuje regresję logistyczną, gradient boosting i ExtraTrees, a wagi dobiera przez walk-forward.</p></div>", unsafe_allow_html=True)
 
     st.subheader("Dlaczego aplikacja czasem mówi „wstrzymaj się”?")
     st.markdown("""
@@ -1092,6 +1155,8 @@ with method:
 Model korzysta z kilkudziesięciu cech: stóp zwrotu, RSI Wildera, MACD, ATR, pasm Bollingera, średnich 10–200 sesji, momentum, realized Sharpe, downside volatility, tail ratio, presji ceny/wolumenu, luk cenowych, anomalii wolumenu, odległości od wybicia/paniki oraz relatywnej siły względem rynku. Dla GPW kontekstem jest fundusz śledzący WIG20 Total Return, dla rynku amerykańskiego S&P 500, a dla altcoinów Bitcoin.
 
 Kierunek liczy adaptacyjny ensemble: regularizowana regresja logistyczna, histogram gradient boosting i ExtraTrees. Wagi modeli są dobierane osobno dla każdego instrumentu i horyzontu na walk-forward validation z luką chroniącą przed podglądaniem przyszłości. Oczekiwany ruch liczy osobny ensemble regresyjny: Ridge, Random Forest, histogram gradient boosting i ExtraTrees. Prawdopodobieństwo jest kalibrowane i automatycznie ściągane do 50%, gdy AUC i Brier na późniejszym okresie nie potwierdzają jakości modelu. Po walidacji modele produkcyjne są ponownie trenowane na całej dostępnej historii.
+
+Sygnały mają dwie warstwy. **Perełki momentum** łapią nietypowy ruch ceny, wybicia i silne przyspieszenie — to radar odkrywania okazji do dalszego sprawdzenia, szczególnie przy krypto. **Kandydaci ML** wymagają dodatkowo potwierdzonej jakości modelu poza próbką, dlatego pojawiają się rzadziej. Dzięki temu aplikacja nie gubi gorących ruchów, ale też nie udaje, że każdy szybki wzrost jest statystycznie potwierdzoną przewagą.
 
 ### Ochrona przed fałszywie dobrym wynikiem
 
