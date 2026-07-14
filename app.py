@@ -757,6 +757,11 @@ def render_signal_journal() -> None:
     metrics[3].metric("Trafność", "—" if summary["hit_rate"] is None else pct(summary["hit_rate"]))
     metrics[4].metric("Śr. wynik", "—" if summary["average_return"] is None else pct(summary["average_return"]))
     metrics[5].metric("Mediana", "—" if summary["median_return"] is None else pct(summary["median_return"]))
+    risk_metrics_cols = st.columns(4)
+    risk_metrics_cols[0].metric("Profit factor", "—" if summary.get("profit_factor") is None else f"{summary['profit_factor']:.2f}")
+    risk_metrics_cols[1].metric("Expectancy", "—" if summary.get("expectancy") is None else pct(summary["expectancy"]))
+    risk_metrics_cols[2].metric("Max DD paper", "—" if summary.get("max_drawdown") is None else pct(summary["max_drawdown"]))
+    risk_metrics_cols[3].metric("Payoff ratio", "—" if summary.get("payoff_ratio") is None else f"{summary['payoff_ratio']:.2f}")
 
     if not entries:
         st.info("Journal jest pusty. Uruchom pełny skan w zakładce **Sygnały**, a po zakończeniu directional signals zapiszą się automatycznie.")
@@ -771,14 +776,63 @@ def render_signal_journal() -> None:
     closed = frame[frame["Status"] == "zamknięty"].sort_values("Data sygnału", ascending=False)
     open_entries = frame[frame["Status"] != "zamknięty"].sort_values(["Data sygnału", "Pozostało"], ascending=[False, True])
 
-    tabs = st.tabs(["Otwarte sygnały", "Zamknięte wyniki", "Statystyki"])
+    tabs = st.tabs(["Performance Lab", "Otwarte sygnały", "Zamknięte wyniki", "Statystyki"])
     with tabs[0]:
+        if closed.empty:
+            st.info("Performance Lab ruszy po zamknięciu pierwszych sygnałów. Najpierw potrzebujemy historii paper-performance.")
+        else:
+            performance = closed.copy().sort_values("Data sygnału")
+            performance["Equity paper"] = (1 + performance["strategy_return"].fillna(0)).cumprod()
+            performance["Drawdown"] = performance["Equity paper"] / performance["Equity paper"].cummax() - 1
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=performance["Data sygnału"], y=performance["Equity paper"],
+                mode="lines+markers", name="Equity paper",
+            ))
+            fig.add_trace(go.Scatter(
+                x=performance["Data sygnału"], y=performance["Drawdown"],
+                mode="lines", name="Drawdown", yaxis="y2",
+            ))
+            fig.update_layout(
+                template="plotly_dark",
+                height=380,
+                margin=dict(l=10, r=10, t=25, b=10),
+                legend=dict(orientation="h"),
+                yaxis=dict(title="Kapitał paper", tickformat=".2f"),
+                yaxis2=dict(title="Drawdown", overlaying="y", side="right", tickformat=".0%"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            lab_cols = st.columns(2)
+            by_class = closed.groupby("Klasa").agg(
+                Liczba=("Symbol", "count"),
+                Trafność=("hit", "mean"),
+                Średni_wynik=("strategy_return", "mean"),
+                Mediana=("strategy_return", "median"),
+            ).sort_values("Średni_wynik", ascending=False).reset_index()
+            by_direction = closed.groupby(["Kierunek", "Horyzont"]).agg(
+                Liczba=("Symbol", "count"),
+                Trafność=("hit", "mean"),
+                Średni_wynik=("strategy_return", "mean"),
+                Najgorszy=("strategy_return", "min"),
+            ).sort_values("Średni_wynik", ascending=False).reset_index()
+            lab_cols[0].subheader("Edge po klasach aktywów")
+            lab_cols[0].dataframe(
+                by_class.style.format({"Trafność": "{:.1%}", "Średni_wynik": "{:+.1%}", "Mediana": "{:+.1%}"}),
+                use_container_width=True, hide_index=True,
+            )
+            lab_cols[1].subheader("Edge po kierunku i horyzoncie")
+            lab_cols[1].dataframe(
+                by_direction.style.format({"Trafność": "{:.1%}", "Średni_wynik": "{:+.1%}", "Najgorszy": "{:+.1%}"}),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption("To paper-performance sygnałów z journalu. Nie uwzględnia poślizgu, podatków, wielkości pozycji ani limitów płynności.")
+    with tabs[1]:
         columns = [
             "Data sygnału", "Symbol", "Klasa", "Horyzont", "Kierunek", "Setup", "Ocena",
             "P(wzrost)", "Cena start", "Upłynęło", "Pozostało", "Jakość", "Score",
         ]
         st.dataframe(open_entries[[c for c in columns if c in open_entries]].style.format(formats), use_container_width=True, hide_index=True)
-    with tabs[1]:
+    with tabs[2]:
         columns = [
             "Data sygnału", "Data oceny", "Symbol", "Horyzont", "Kierunek", "Trafiony",
             "Cena start", "Cena oceny", "Zwrot instrumentu", "Wynik kierunkowy", "Jakość", "Setup",
@@ -787,7 +841,7 @@ def render_signal_journal() -> None:
             st.info("Jeszcze żaden sygnał nie dojrzał do oceny. Wróć po upływie horyzontu 1/5/20 dni lub sesji.")
         else:
             st.dataframe(closed[[c for c in columns if c in closed]].style.format(formats), use_container_width=True, hide_index=True)
-    with tabs[2]:
+    with tabs[3]:
         if closed.empty:
             st.info("Statystyki pojawią się po zamknięciu pierwszych sygnałów.")
         else:

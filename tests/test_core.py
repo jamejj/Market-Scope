@@ -5,7 +5,7 @@ from market_oracle.backtest import walk_forward_backtest
 from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES
 from market_oracle.engine import observation_label, signal_label
 from market_oracle.features import build_features, supervised_frame
-from market_oracle.journal import load_journal, record_snapshot_signals, refresh_journal_results
+from market_oracle.journal import journal_summary, load_journal, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, snapshot_is_stale
 from market_oracle.risk import periods_per_year, risk_metrics
@@ -145,3 +145,22 @@ def test_signal_journal_records_and_evaluates(tmp_path, monkeypatch):
     assert refreshed[0]["status"] == "closed"
     assert refreshed[0]["hit"] is True
     assert refreshed[0]["strategy_return"] > 0
+    summary = journal_summary(refreshed)
+    assert summary["profit_factor"] is None
+    assert summary["expectancy"] > 0
+    assert summary["max_drawdown"] == 0
+
+
+def test_journal_summary_risk_metrics():
+    entries = [
+        {"status": "closed", "strategy_return": 0.10, "hit": True},
+        {"status": "closed", "strategy_return": -0.04, "hit": False},
+        {"status": "closed", "strategy_return": 0.02, "hit": True},
+        {"status": "open"},
+    ]
+    summary = journal_summary(entries)
+    assert summary["closed"] == 3
+    assert summary["open"] == 1
+    assert summary["profit_factor"] == 3.0
+    assert summary["payoff_ratio"] == 1.5
+    assert summary["max_drawdown"] < 0

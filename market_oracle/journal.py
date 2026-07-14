@@ -170,13 +170,26 @@ def journal_summary(entries: list[dict]) -> dict:
         return {
             "total": len(entries), "closed": 0, "open": len(open_entries),
             "hit_rate": None, "average_return": None, "median_return": None,
-            "best_return": None, "worst_return": None,
+            "best_return": None, "worst_return": None, "profit_factor": None,
+            "payoff_ratio": None, "expectancy": None, "max_drawdown": None,
         }
     returns = pd.Series([entry["strategy_return"] for entry in closed], dtype=float)
     hits = pd.Series([entry["hit"] for entry in closed], dtype=bool)
+    wins = returns[returns > 0]
+    losses = returns[returns < 0]
+    gross_profit = float(wins.sum()) if not wins.empty else 0.0
+    gross_loss = float(abs(losses.sum())) if not losses.empty else 0.0
+    equity = (1 + returns).cumprod()
+    drawdown = equity / equity.cummax() - 1
+    average_win = float(wins.mean()) if not wins.empty else None
+    average_loss = float(abs(losses.mean())) if not losses.empty else None
     return {
         "total": len(entries), "closed": len(closed), "open": len(open_entries),
         "hit_rate": float(hits.mean()), "average_return": float(returns.mean()),
         "median_return": float(returns.median()), "best_return": float(returns.max()),
         "worst_return": float(returns.min()),
+        "profit_factor": None if gross_loss == 0 else gross_profit / gross_loss,
+        "payoff_ratio": None if not average_loss else (average_win or 0.0) / average_loss,
+        "expectancy": float(returns.mean()),
+        "max_drawdown": float(drawdown.min()) if not drawdown.empty else None,
     }
