@@ -193,3 +193,85 @@ def journal_summary(entries: list[dict]) -> dict:
         "expectancy": float(returns.mean()),
         "max_drawdown": float(drawdown.min()) if not drawdown.empty else None,
     }
+
+
+def paper_portfolio(
+    entries: list[dict],
+    starting_capital: float = 10_000.0,
+    position_fraction: float = 0.10,
+    round_trip_cost_bps: float = 20.0,
+) -> tuple[pd.DataFrame, dict]:
+    """Simulate a simple sequential paper portfolio from closed journal signals."""
+    closed = [
+        entry for entry in entries
+        if entry.get("status") == "closed" and entry.get("strategy_return") is not None
+    ]
+    if not closed:
+        return pd.DataFrame(), {
+            "trades": 0,
+            "final_capital": float(starting_capital),
+            "total_return": 0.0,
+            "max_drawdown": None,
+            "profit_factor": None,
+            "hit_rate": None,
+            "average_trade": None,
+            "expectancy_capital": None,
+        }
+
+    closed = sorted(
+        closed,
+        key=lambda entry: (
+            str(entry.get("target_date") or entry.get("signal_date") or ""),
+            str(entry.get("symbol") or ""),
+            int(entry.get("horizon") or 0),
+        ),
+    )
+    capital = float(starting_capital)
+    peak = capital
+    cost = float(round_trip_cost_bps) / 10_000
+    fraction = max(0.0, min(float(position_fraction), 1.0))
+    rows: list[dict] = []
+
+    for index, entry in enumerate(closed, start=1):
+        raw_return = float(entry.get("strategy_return") or 0.0)
+        net_return = raw_return - cost
+        capital_before = capital
+        position_value = capital_before * fraction
+        pnl = position_value * net_return
+        capital = max(0.0, capital_before + pnl)
+        peak = max(peak, capital)
+        drawdown = capital / peak - 1 if peak else 0.0
+        rows.append({
+            "Nr": index,
+            "Data sygnału": entry.get("signal_date"),
+            "Data oceny": entry.get("target_date"),
+            "Symbol": entry.get("symbol"),
+            "Klasa": entry.get("asset_class", "—"),
+            "Horyzont": entry.get("horizon"),
+            "Kierunek": entry.get("direction"),
+            "Zwrot brutto": raw_return,
+            "Zwrot netto": net_return,
+            "Pozycja": fraction,
+            "Kapitał przed": capital_before,
+            "P&L": pnl,
+            "Kapitał": capital,
+            "Drawdown": drawdown,
+        })
+
+    curve = pd.DataFrame(rows)
+    pnl_series = curve["P&L"].astype(float)
+    wins = pnl_series[pnl_series > 0]
+    losses = pnl_series[pnl_series < 0]
+    gross_profit = float(wins.sum()) if not wins.empty else 0.0
+    gross_loss = float(abs(losses.sum())) if not losses.empty else 0.0
+    summary = {
+        "trades": int(len(curve)),
+        "final_capital": float(capital),
+        "total_return": float(capital / starting_capital - 1) if starting_capital else 0.0,
+        "max_drawdown": float(curve["Drawdown"].min()) if not curve.empty else None,
+        "profit_factor": None if gross_loss == 0 else gross_profit / gross_loss,
+        "hit_rate": float((pnl_series > 0).mean()) if not pnl_series.empty else None,
+        "average_trade": float(curve["Zwrot netto"].mean()) if not curve.empty else None,
+        "expectancy_capital": float(pnl_series.mean()) if not pnl_series.empty else None,
+    }
+    return curve, summary

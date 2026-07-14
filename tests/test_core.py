@@ -5,7 +5,7 @@ from market_oracle.backtest import walk_forward_backtest
 from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES
 from market_oracle.engine import observation_label, signal_label
 from market_oracle.features import build_features, supervised_frame
-from market_oracle.journal import journal_summary, load_journal, record_snapshot_signals, refresh_journal_results
+from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, snapshot_is_stale
 from market_oracle.risk import periods_per_year, risk_metrics
@@ -163,4 +163,28 @@ def test_journal_summary_risk_metrics():
     assert summary["open"] == 1
     assert summary["profit_factor"] == 3.0
     assert summary["payoff_ratio"] == 1.5
+    assert summary["max_drawdown"] < 0
+
+
+def test_paper_portfolio_applies_sizing_and_costs():
+    entries = [
+        {
+            "status": "closed", "signal_date": "2026-01-01", "target_date": "2026-01-06",
+            "symbol": "AAA", "asset_class": "USA", "horizon": 5, "direction": "LONG",
+            "strategy_return": 0.10,
+        },
+        {
+            "status": "closed", "signal_date": "2026-01-02", "target_date": "2026-01-07",
+            "symbol": "BBB", "asset_class": "USA", "horizon": 5, "direction": "LONG",
+            "strategy_return": -0.05,
+        },
+        {"status": "open", "strategy_return": 1.0},
+    ]
+    curve, summary = paper_portfolio(entries, starting_capital=10_000, position_fraction=0.20, round_trip_cost_bps=25)
+    assert len(curve) == 2
+    assert curve["Zwrot netto"].iloc[0] == 0.0975
+    assert curve["P&L"].iloc[0] == 195
+    assert summary["trades"] == 2
+    assert summary["final_capital"] < 10_195
+    assert summary["total_return"] > 0
     assert summary["max_drawdown"] < 0

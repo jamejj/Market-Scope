@@ -17,7 +17,9 @@ from market_oracle.catalog import (
 )
 from market_oracle.data import download_history, download_profile
 from market_oracle.engine import analyze_asset, scan_market_multi, signal_label
-from market_oracle.journal import journal_summary, load_journal, record_snapshot_signals, refresh_journal_results
+from market_oracle.journal import (
+    journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results,
+)
 from market_oracle.monitor import default_universe, load_snapshot, snapshot_is_stale
 from market_oracle.search import search_assets
 
@@ -781,27 +783,83 @@ def render_signal_journal() -> None:
         if closed.empty:
             st.info("Performance Lab ruszy po zamknięciu pierwszych sygnałów. Najpierw potrzebujemy historii paper-performance.")
         else:
+            st.subheader("Paper Portfolio")
+            controls = st.columns(3)
+            starting_capital = controls[0].number_input(
+                "Kapitał startowy",
+                min_value=1_000,
+                max_value=1_000_000,
+                value=10_000,
+                step=1_000,
+                key="paper_starting_capital",
+            )
+            position_fraction = controls[1].slider(
+                "Wielkość pozycji",
+                min_value=1,
+                max_value=50,
+                value=10,
+                step=1,
+                format="%d%%",
+                key="paper_position_fraction",
+            ) / 100
+            round_trip_cost_bps = controls[2].slider(
+                "Koszt round-trip",
+                min_value=0,
+                max_value=150,
+                value=20,
+                step=5,
+                help="Łączny koszt wejścia i wyjścia: prowizja, spread i uproszczony poślizg.",
+                key="paper_round_trip_cost_bps",
+            )
+            portfolio_curve, portfolio = paper_portfolio(
+                entries,
+                starting_capital=float(starting_capital),
+                position_fraction=float(position_fraction),
+                round_trip_cost_bps=float(round_trip_cost_bps),
+            )
+            portfolio_cols = st.columns(6)
+            portfolio_cols[0].metric("Transakcje", portfolio["trades"])
+            portfolio_cols[1].metric("Kapitał końcowy", f"{portfolio['final_capital']:,.0f}")
+            portfolio_cols[2].metric("Zwrot portfela", pct(portfolio["total_return"]))
+            portfolio_cols[3].metric("Max DD", "—" if portfolio["max_drawdown"] is None else pct(portfolio["max_drawdown"]))
+            portfolio_cols[4].metric("PF netto", "—" if portfolio["profit_factor"] is None else f"{portfolio['profit_factor']:.2f}")
+            portfolio_cols[5].metric("Trafność netto", "—" if portfolio["hit_rate"] is None else pct(portfolio["hit_rate"]))
+
             performance = closed.copy().sort_values("Data sygnału")
             performance["Equity paper"] = (1 + performance["strategy_return"].fillna(0)).cumprod()
             performance["Drawdown"] = performance["Equity paper"] / performance["Equity paper"].cummax() - 1
             fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=performance["Data sygnału"], y=performance["Equity paper"],
-                mode="lines+markers", name="Equity paper",
-            ))
-            fig.add_trace(go.Scatter(
-                x=performance["Data sygnału"], y=performance["Drawdown"],
-                mode="lines", name="Drawdown", yaxis="y2",
-            ))
+            if not portfolio_curve.empty:
+                fig.add_trace(go.Scatter(
+                    x=portfolio_curve["Data oceny"], y=portfolio_curve["Kapitał"],
+                    mode="lines+markers", name="Paper portfolio",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=portfolio_curve["Data oceny"], y=portfolio_curve["Drawdown"],
+                    mode="lines", name="Drawdown", yaxis="y2",
+                ))
             fig.update_layout(
                 template="plotly_dark",
                 height=380,
                 margin=dict(l=10, r=10, t=25, b=10),
                 legend=dict(orientation="h"),
-                yaxis=dict(title="Kapitał paper", tickformat=".2f"),
+                yaxis=dict(title="Kapitał paper", tickformat=",.0f"),
                 yaxis2=dict(title="Drawdown", overlaying="y", side="right", tickformat=".0%"),
             )
             st.plotly_chart(fig, use_container_width=True)
+            with st.expander("Ostatnie transakcje paper portfolio"):
+                portfolio_columns = [
+                    "Data sygnału", "Data oceny", "Symbol", "Klasa", "Horyzont", "Kierunek",
+                    "Zwrot brutto", "Zwrot netto", "Pozycja", "P&L", "Kapitał", "Drawdown",
+                ]
+                st.dataframe(
+                    portfolio_curve[portfolio_columns].tail(30).style.format({
+                        "Zwrot brutto": "{:+.1%}", "Zwrot netto": "{:+.1%}", "Pozycja": "{:.0%}",
+                        "P&L": "{:+,.0f}", "Kapitał": "{:,.0f}", "Drawdown": "{:.1%}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
             lab_cols = st.columns(2)
             by_class = closed.groupby("Klasa").agg(
                 Liczba=("Symbol", "count"),
@@ -825,7 +883,7 @@ def render_signal_journal() -> None:
                 by_direction.style.format({"Trafność": "{:.1%}", "Średni_wynik": "{:+.1%}", "Najgorszy": "{:+.1%}"}),
                 use_container_width=True, hide_index=True,
             )
-            st.caption("To paper-performance sygnałów z journalu. Nie uwzględnia poślizgu, podatków, wielkości pozycji ani limitów płynności.")
+            st.caption("To paper-performance sygnałów z journalu. Uwzględnia uproszczony koszt round-trip i sizing pozycji, ale nadal nie uwzględnia podatków, realnej płynności ani pełnego poślizgu z rynku.")
     with tabs[1]:
         columns = [
             "Data sygnału", "Symbol", "Klasa", "Horyzont", "Kierunek", "Setup", "Ocena",
