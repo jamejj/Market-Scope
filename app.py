@@ -647,9 +647,10 @@ def _render_ranking_table(frame: pd.DataFrame, title: str, empty_text: str) -> N
         "Zwrot 1d": "{:+.1%}", "Zwrot 5d": "{:+.1%}", "Zwrot 20d": "{:+.1%}", "RSI 14": "{:.1f}",
         "AUC walidacji": "{:.3f}", "Brier": "{:.3f}", "Pewność": "{:.1%}",
         "Zmienność roczna": "{:.1%}", "Max drawdown": "{:.1%}", "Score": "{:.2f}", "Radar score": "{:.1f}",
+        "Risk/reward": "{:.2f}", "Edge score": "{:.2f}",
     }
     columns = [
-        "Symbol", "Klasa", "Setup", "Radar momentum", "Ocena", "P(wzrost)", "Oczekiwany ruch",
+        "Symbol", "Klasa", "Setup", "Akcja radaru", "Radar momentum", "Ocena", "P(wzrost)", "Oczekiwany ruch",
         "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Jakość modelu", "Score",
     ]
     present = [column for column in columns if column in frame.columns]
@@ -675,7 +676,11 @@ def _class_from_symbol(symbol: str) -> str:
 
 def _ensure_radar_columns(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.copy()
-    for column in ["Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "Zmienność roczna", "RSI 14"]:
+    for column in [
+        "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "Zmienność roczna", "RSI 14",
+        "P(wzrost)", "Oczekiwany ruch", "Dolna granica 90%", "Górna granica 90%",
+        "AUC walidacji", "Brier",
+    ]:
         if column in frame:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
     def numeric(column: str) -> pd.Series:
@@ -706,6 +711,38 @@ def _ensure_radar_columns(frame: pd.DataFrame) -> pd.DataFrame:
                 return "MOMENTUM WATCH"
             return "—"
         frame["Radar momentum"] = frame.apply(label, axis=1)
+    if "Risk/reward" not in frame:
+        downside = numeric("Dolna granica 90%").clip(upper=0).abs()
+        fallback_risk = numeric("Zmienność roczna").clip(lower=0.0) / 16
+        downside = downside.where(downside > 0.005, fallback_risk).clip(lower=0.005)
+        upside = pd.concat([
+            numeric("Górna granica 90%"),
+            numeric("Oczekiwany ruch"),
+            pd.Series(0.0, index=frame.index),
+        ], axis=1).max(axis=1).clip(lower=0)
+        frame["Risk/reward"] = (upside / downside).replace([float("inf"), -float("inf")], 0).fillna(0)
+    if "Edge score" not in frame:
+        auc_quality = ((numeric("AUC walidacji") - 0.50) / 0.12).clip(lower=0, upper=1)
+        brier_quality = ((0.27 - numeric("Brier")) / 0.06).clip(lower=0, upper=1)
+        frame["Edge score"] = (
+            numeric("Oczekiwany ruch") * 120
+            + (numeric("P(wzrost)") - 0.5) * 90
+            + frame["Risk/reward"].clip(upper=4) * 0.9
+            + auc_quality * brier_quality * 2.4
+            - numeric("Zmienność roczna").clip(upper=3) * 0.35
+        )
+    if "Akcja radaru" not in frame:
+        def action(row: pd.Series) -> str:
+            if str(row.get("Jakość modelu", "")).startswith("NISKA"):
+                return "OBSERWUJ — BRAK EDGE ML"
+            if float(row.get("Edge score") or 0) >= 4.5 and float(row.get("Oczekiwany ruch") or 0) > 0:
+                return "PRIORYTET DO ANALIZY"
+            if float(row.get("Edge score") or 0) >= 2.5 and float(row.get("Oczekiwany ruch") or 0) > 0:
+                return "WATCHLIST"
+            if float(row.get("Oczekiwany ruch") or 0) < 0 or float(row.get("P(wzrost)") or 0.5) < 0.45:
+                return "RYZYKO / UNIKAJ"
+            return "NEUTRALNIE"
+        frame["Akcja radaru"] = frame.apply(action, axis=1)
     return frame
 
 
@@ -1000,10 +1037,50 @@ def render_signal_dashboard() -> None:
         "Zwrot 1d": "{:+.1%}", "Zwrot 5d": "{:+.1%}", "Zwrot 20d": "{:+.1%}", "RSI 14": "{:.1f}",
         "AUC walidacji": "{:.3f}", "Brier": "{:.3f}", "Pewność": "{:.1%}", "Zmienność roczna": "{:.1%}",
         "Max drawdown": "{:.1%}", "Score": "{:.2f}", "Radar score": "{:.1f}",
+        "Risk/reward": "{:.2f}", "Edge score": "{:.2f}",
     }
 
-    horizon_tabs = st.tabs(["Perełki momentum", "Szybki ruch 1d", "Swing 5d", "Trend 20d", "Wszystko"])
+    horizon_tabs = st.tabs(["Dzisiejszy radar", "Perełki momentum", "Risk/reward", "Szybki ruch 1d", "Swing 5d", "Trend 20d", "Wszystko"])
     with horizon_tabs[0]:
+        st.subheader("Dzisiejszy radar")
+        st.caption("Szybki briefing: gdzie patrzeć najpierw. To shortlist badawcza, nie automatyczna rekomendacja transakcji.")
+        base = frame.copy()
+        priority = (
+            base[base["Akcja radaru"].isin(["PRIORYTET DO ANALIZY", "WATCHLIST"])]
+            .sort_values(["Edge score", "Risk/reward"], ascending=False)
+            .drop_duplicates("Symbol")
+            .head(8)
+        )
+        hot_now = (
+            base.sort_values("Radar score", ascending=False)
+            .drop_duplicates("Symbol")
+            .head(8)
+        )
+        risk_now = (
+            base[
+                base["Akcja radaru"].eq("RYZYKO / UNIKAJ")
+                | base["Ocena"].isin(bearish_labels)
+                | base["Radar momentum"].eq("PANIKA / RYZYKO")
+            ]
+            .sort_values(["Edge score", "Score"], ascending=True)
+            .drop_duplicates("Symbol")
+            .head(8)
+        )
+        radar_cols = st.columns(3)
+        compact_columns = [
+            "Symbol", "Klasa", "Horyzont", "Akcja radaru", "Radar momentum",
+            "P(wzrost)", "Oczekiwany ruch", "Risk/reward", "Edge score",
+        ]
+        radar_cols[0].subheader("Priorytet / watchlist")
+        radar_cols[0].dataframe(priority[[c for c in compact_columns if c in priority]].style.format(formats), use_container_width=True, hide_index=True)
+        radar_cols[1].subheader("Najmocniejsze ruchy")
+        radar_cols[1].dataframe(hot_now[[c for c in compact_columns if c in hot_now]].style.format(formats), use_container_width=True, hide_index=True)
+        radar_cols[2].subheader("Ryzyka / unikaj")
+        if risk_now.empty:
+            radar_cols[2].info("Brak wyraźnych ryzyk w zapisanym rankingu.")
+        else:
+            radar_cols[2].dataframe(risk_now[[c for c in compact_columns if c in risk_now]].style.format(formats), use_container_width=True, hide_index=True)
+    with horizon_tabs[1]:
         base = frame[frame["Horyzont"] == frame["Horyzont"].min()].copy()
         if base.empty:
             base = frame.copy()
@@ -1016,10 +1093,20 @@ def render_signal_dashboard() -> None:
         ]
         present = [column for column in hot_columns if column in hot.columns]
         st.dataframe(hot[present].style.format(formats), use_container_width=True, hide_index=True)
+    with horizon_tabs[2]:
+        rr = frame.sort_values(["Edge score", "Risk/reward"], ascending=False).drop_duplicates("Symbol").head(20)
+        st.subheader("Najlepszy stosunek potencjału do ryzyka")
+        st.caption("Ranking łączy oczekiwany ruch, przedział niepewności, prawdopodobieństwo, AUC/Brier i zmienność. Wysoki wynik oznacza priorytet analizy, nie pewność zysku.")
+        rr_columns = [
+            "Symbol", "Klasa", "Horyzont", "Akcja radaru", "Setup", "Ocena",
+            "P(wzrost)", "Oczekiwany ruch", "Risk/reward", "Edge score",
+            "AUC walidacji", "Brier", "Jakość modelu", "Zmienność roczna",
+        ]
+        st.dataframe(rr[[c for c in rr_columns if c in rr]].style.format(formats), use_container_width=True, hide_index=True)
     for tab, horizon, title in [
-        (horizon_tabs[1], 1, "Najciekawsze setupy krótkoterminowe"),
-        (horizon_tabs[2], 5, "Najciekawsze setupy swingowe"),
-        (horizon_tabs[3], 20, "Najciekawsze setupy trendowe"),
+        (horizon_tabs[3], 1, "Najciekawsze setupy krótkoterminowe"),
+        (horizon_tabs[4], 5, "Najciekawsze setupy swingowe"),
+        (horizon_tabs[5], 20, "Najciekawsze setupy trendowe"),
     ]:
         with tab:
             scoped = frame[frame["Horyzont"] == horizon].sort_values("Score", ascending=False)
@@ -1030,7 +1117,7 @@ def render_signal_dashboard() -> None:
                 _render_ranking_table(candidates.head(12), title, "Brak potwierdzonych kandydatów.")
             st.caption("To shortlist do dalszej analizy. Nie jest rekomendacją kupna ani gwarancją ruchu.")
 
-    with horizon_tabs[4]:
+    with horizon_tabs[6]:
         filters = st.columns(4)
         selected_horizon = filters[0].selectbox("Horyzont", ["Wszystkie", 1, 5, 20, 60], key="radar_horizon_filter")
         selected_class = filters[1].selectbox("Klasa", ["Wszystkie"] + sorted(frame["Klasa"].dropna().unique().tolist()), key="radar_class_filter")
@@ -1047,9 +1134,9 @@ def render_signal_dashboard() -> None:
             filtered = filtered[filtered["Ocena"].isin(bullish_labels)]
         filtered = filtered.sort_values(["Radar score", "Score"], ascending=False)
         columns = [
-            "Symbol", "Klasa", "Horyzont", "Radar momentum", "Setup", "Cena", "Ocena", "P(wzrost)", "Oczekiwany ruch",
+            "Symbol", "Klasa", "Horyzont", "Akcja radaru", "Radar momentum", "Setup", "Cena", "Ocena", "P(wzrost)", "Oczekiwany ruch",
             "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Brier", "Jakość modelu",
-            "Pewność", "Zmienność roczna", "Max drawdown", "Radar score", "Score",
+            "Pewność", "Zmienność roczna", "Max drawdown", "Risk/reward", "Edge score", "Radar score", "Score",
         ]
         present = [column for column in columns if column in filtered.columns]
         st.dataframe(filtered[present].style.format(formats), use_container_width=True, hide_index=True)

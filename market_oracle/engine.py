@@ -140,6 +140,48 @@ def momentum_radar_score(symbol: str, technical: dict, risk: dict) -> float:
     return float(r1 * 300 + r5 * 180 + r20 * 80 + r60 * 18 + trend_bonus - overheating_penalty - risk_penalty)
 
 
+def risk_reward_metrics(forecast: dict, risk: dict, technical: dict) -> dict[str, float | str]:
+    expected = float(forecast.get("expected_return") or 0.0)
+    lower = float(forecast.get("lower_return") or 0.0)
+    upper = float(forecast.get("upper_return") or 0.0)
+    probability = float(forecast.get("probability_up") or 0.5)
+    auc = float(forecast.get("auc") or 0.5)
+    brier = float(forecast.get("brier") or 0.25)
+    volatility = float(risk.get("annual_volatility") or 0.0)
+    downside = max(abs(min(lower, 0.0)), volatility / 16, 0.005)
+    upside = max(max(upper, expected, 0.0), 0.0)
+    risk_reward = upside / downside if downside else 0.0
+    model_quality = max(0.0, min(1.0, (auc - 0.50) / 0.12)) * max(0.0, min(1.0, (0.27 - brier) / 0.06))
+    trend_quality = (
+        (0.45 if technical.get("above_sma_50") else -0.15)
+        + (0.35 if technical.get("above_sma_200") else 0.0)
+        + (0.25 if technical.get("near_20d_high") else 0.0)
+    )
+    edge_score = (
+        expected * 120
+        + (probability - 0.5) * 90
+        + min(risk_reward, 4.0) * 0.9
+        + model_quality * 2.4
+        + trend_quality
+        - min(volatility, 3.0) * 0.35
+    )
+    if forecast.get("quality", "").startswith("NISKA"):
+        action = "OBSERWUJ — BRAK EDGE ML"
+    elif edge_score >= 4.5 and expected > 0:
+        action = "PRIORYTET DO ANALIZY"
+    elif edge_score >= 2.5 and expected > 0:
+        action = "WATCHLIST"
+    elif expected < 0 or probability < 0.45:
+        action = "RYZYKO / UNIKAJ"
+    else:
+        action = "NEUTRALNIE"
+    return {
+        "risk_reward": float(risk_reward),
+        "edge_score": float(edge_score),
+        "radar_action": action,
+    }
+
+
 def _asset_class(symbol: str) -> str:
     if symbol.endswith("-USD"):
         return "Krypto"
@@ -179,11 +221,13 @@ def _row_from_result(symbol: str, result: dict, horizon: int) -> dict:
         + (0.55 if technical["near_20d_high"] else 0.0)
     )
     score = (f["probability_up"] - 0.5) * 210 * quality + f["expected_return"] * 90 + momentum_bonus - risk_penalty
+    rr = risk_reward_metrics(f, r, technical)
     return {
         "Symbol": symbol, "Klasa": _asset_class(symbol), "Horyzont": horizon,
         "Data": str(result["last_date"].date()), "Setup": _setup_label(technical, horizon), "Cena": result["last_price"],
         "Radar momentum": momentum_radar_label(symbol, technical),
         "Radar score": momentum_radar_score(symbol, technical, r),
+        "Risk/reward": rr["risk_reward"], "Edge score": rr["edge_score"], "Akcja radaru": rr["radar_action"],
         "Ocena": observation_label(f), "Sygnał": signal_label(f["probability_up"], f["quality"]),
         "P(wzrost)": f["probability_up"], "Oczekiwany ruch": f["expected_return"],
         "Dolna granica 90%": f["lower_return"], "Górna granica 90%": f["upper_return"],

@@ -3,7 +3,7 @@ import pandas as pd
 
 from market_oracle.backtest import walk_forward_backtest
 from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES
-from market_oracle.engine import observation_label, signal_label
+from market_oracle.engine import observation_label, risk_reward_metrics, signal_label
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast
@@ -86,6 +86,19 @@ def test_low_quality_forecast_never_becomes_buy_signal():
     assert signal_label(0.9, forecast["quality"]) == "BRAK PRZEWAGI"
     confirmed = {"quality": "UMIARKOWANA", "probability_up": 0.60, "expected_return": 0.03}
     assert observation_label(confirmed) == "KANDYDAT WZROSTOWY"
+
+
+def test_risk_reward_metrics_prioritize_confirmed_edge():
+    forecast = {
+        "quality": "WYSOKA", "probability_up": 0.64, "expected_return": 0.06,
+        "lower_return": -0.04, "upper_return": 0.14, "auc": 0.63, "brier": 0.22,
+    }
+    risk = {"annual_volatility": 0.32}
+    technical = {"above_sma_50": True, "above_sma_200": True, "near_20d_high": True}
+    metrics = risk_reward_metrics(forecast, risk, technical)
+    assert metrics["risk_reward"] > 3
+    assert metrics["edge_score"] > 4.5
+    assert metrics["radar_action"] == "PRIORYTET DO ANALIZY"
 
 
 def test_background_monitor_persists_snapshot(tmp_path, monkeypatch):
