@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -342,6 +343,25 @@ def start_signal_scan_background() -> None:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+
+
+def auto_start_signal_scan(snapshot: dict | None, stale: bool) -> bool:
+    if os.getenv("MARKETSCOPE_AUTO_SCAN", "1") == "0":
+        return False
+    if snapshot and snapshot.get("status") == "running":
+        return False
+    if not stale:
+        return False
+    signature = "missing"
+    if snapshot:
+        signature = "|".join(
+            str(snapshot.get(key, "")) for key in ("schema_version", "updated_at", "completed", "total")
+        )
+    if st.session_state.get("_auto_scan_signature") == signature:
+        return False
+    st.session_state["_auto_scan_signature"] = signature
+    start_signal_scan_background()
+    return True
 
 
 def pct(value: float) -> str:
@@ -787,12 +807,16 @@ def render_signal_journal() -> None:
 def render_signal_dashboard() -> None:
     snapshot = load_snapshot()
     if not snapshot:
-        st.info("Ranking nie został jeszcze policzony. Uruchom aplikację plikiem **Uruchom MarketScope.command** albo użyj przycisku pełnego skanu poniżej.")
+        if auto_start_signal_scan(None, True):
+            st.info("Ranking nie został jeszcze policzony, więc MarketScope automatycznie wystartował pierwszy skan w tle. Postęp pojawi się za chwilę.")
+        else:
+            st.info("Ranking nie został jeszcze policzony. Uruchom aplikację plikiem **Uruchom MarketScope.command** albo użyj przycisku pełnego skanu poniżej.")
         return
 
     stale_snapshot = snapshot_is_stale(snapshot)
     status = snapshot.get("status")
     completed, total = snapshot.get("completed", 0), snapshot.get("total", 0)
+    auto_started = auto_start_signal_scan(snapshot, stale_snapshot)
     if status == "running":
         st.info(
             f"Monitor analizuje rynek w tle: **{completed}/{total}** instrumentów. "
@@ -800,7 +824,10 @@ def render_signal_dashboard() -> None:
         )
         st.progress(completed / total if total else 0)
     elif status == "error":
-        st.error(f"Ostatni skan został przerwany: {snapshot.get('error', 'nieznany błąd')}")
+        if auto_started:
+            st.warning(f"Ostatni skan został przerwany: {snapshot.get('error', 'nieznany błąd')}. Startuję nowy skan w tle.")
+        else:
+            st.error(f"Ostatni skan został przerwany: {snapshot.get('error', 'nieznany błąd')}")
     else:
         updated = pd.Timestamp(snapshot["updated_at"])
         if updated.tzinfo is not None:
@@ -808,11 +835,17 @@ def render_signal_dashboard() -> None:
         horizons = snapshot.get("horizons") or [snapshot.get("horizon", 20)]
         horizon_text = ", ".join(f"{h}d" for h in horizons)
         if stale_snapshot:
-            st.warning(
-                f"Ten ranking jest ze starego formatu albo ma niepełny zakres (**{horizon_text}**, "
-                f"{snapshot.get('total', 0)} instrumentów). Uruchom ponownie aplikację albo kliknij **Przelicz cały ranking teraz**, "
-                "żeby dostać radar 1d/5d/20d z hot movers."
-            )
+            if auto_started:
+                st.warning(
+                    f"Ten ranking był stary albo niepełny (**{horizon_text}**, {snapshot.get('total', 0)} instrumentów), "
+                    "więc MarketScope automatycznie wystartował świeży skan w tle."
+                )
+            else:
+                st.warning(
+                    f"Ten ranking jest ze starego formatu albo ma niepełny zakres (**{horizon_text}**, "
+                    f"{snapshot.get('total', 0)} instrumentów). Uruchom ponownie aplikację albo kliknij **Przelicz cały ranking teraz**, "
+                    "żeby dostać radar 1d/5d/20d z hot movers."
+                )
         else:
             st.success(f"Ranking gotowy · aktualizacja: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzonty: **{horizon_text}**")
 
@@ -1135,7 +1168,7 @@ with settings:
     """)
 
     st.subheader("Automatyczny monitor rynku")
-    st.write("Launcher uruchamia obok aplikacji lekki proces o obniżonym priorytecie. Co 12 godzin sprawdza reprezentatywne spółki GPW i USA, ETF-y oraz krypto. Wynik zapisuje lokalnie, dlatego zakładka **Sygnały** pokazuje od razu ostatni gotowy ranking i odświeża postęp bez przeładowywania całej aplikacji.")
+    st.write("Launcher uruchamia obok aplikacji lekki proces o obniżonym priorytecie. Domyślnie co 6 godzin sprawdza reprezentatywne spółki GPW i USA, ETF-y oraz krypto. Jeśli ranking jest stary, niepełny albo w starym formacie, zakładka **Sygnały** potrafi sama wystartować świeży skan w tle. Wynik zapisuje lokalnie, dlatego dashboard pokazuje ostatni gotowy ranking i odświeża postęp bez przeładowywania całej aplikacji.")
 
     with st.expander("Znaczenie parametrów i skrótów"):
         st.markdown("""
@@ -1145,6 +1178,7 @@ with settings:
         - **Zakres 90%** — szeroki przedział możliwego ruchu, a nie obietnica ceny docelowej.
         - **Benchmark** — rynek odniesienia: S&P 500, WIG20 Total Return albo Bitcoin dla altcoinów.
         - **Purge gap** — luka między treningiem i walidacją chroniąca przed podglądaniem przyszłości.
+        - **Auto scan** — można wyłączyć przez `MARKETSCOPE_AUTO_SCAN=0` albo zmienić rytm monitora przez `MARKETSCOPE_SCAN_INTERVAL_HOURS`.
         """)
 
 with method:

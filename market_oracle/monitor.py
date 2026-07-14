@@ -133,7 +133,7 @@ def run_signal_scan(
         lock_file.close()
 
 
-def snapshot_is_stale(snapshot: dict | None, max_age_hours: int = 12) -> bool:
+def snapshot_is_stale(snapshot: dict | None, max_age_hours: float = 6) -> bool:
     if not snapshot or snapshot.get("status") != "complete" or not snapshot.get("updated_at"):
         return True
     if int(snapshot.get("schema_version") or 0) < SCAN_SCHEMA_VERSION:
@@ -153,7 +153,7 @@ def snapshot_is_stale(snapshot: dict | None, max_age_hours: int = 12) -> bool:
     return datetime.now(timezone.utc) - updated > timedelta(hours=max_age_hours)
 
 
-def monitor_loop(interval_hours: int = 12, poll_seconds: int = 60) -> None:
+def monitor_loop(interval_hours: float = 6, poll_seconds: int = 60) -> None:
     while True:
         try:
             snapshot = load_snapshot()
