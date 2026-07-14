@@ -651,7 +651,7 @@ def _render_ranking_table(frame: pd.DataFrame, title: str, empty_text: str) -> N
     }
     columns = [
         "Symbol", "Klasa", "Setup", "Akcja radaru", "Radar momentum", "Ocena", "P(wzrost)", "Oczekiwany ruch",
-        "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Jakość modelu", "Score",
+        "Risk/reward", "Edge score", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Jakość modelu", "Score",
     ]
     present = [column for column in columns if column in frame.columns]
     st.dataframe(frame[present].style.format(formats), use_container_width=True, hide_index=True)
@@ -1195,8 +1195,11 @@ with home:
         <div class="pro-card"><small>Universe</small><h3>Spółki</h3><p>GPW, USA, sektory, mniejsze firmy i wyszukiwarka globalna.</p></div>
         <div class="pro-card"><small>Markets</small><h3>ETF-y</h3><p>Szeroki rynek, sektory, obligacje, surowce, regiony i UCITS.</p></div>
         <div class="pro-card"><small>24/7 risk</small><h3>Krypto</h3><p>Najważniejsze kryptowaluty, segmenty rynku i ręczne symbole.</p></div>
-        <div class="pro-card"><small>Scanner</small><h3>Sygnały</h3><p>Hot movers, swing, trend i multi-horyzontowy ranking rynku.</p></div>
-        <div class="pro-card"><small>Performance</small><h3>Journal</h3><p>Automatyczne rozliczanie sygnałów i skuteczności modelu.</p></div>
+        <div class="pro-card"><small>Scanner</small><h3>Sygnały</h3><p>Today’s Radar, momentum, ML candidates i risk/reward shortlist.</p></div>
+        <div class="pro-card"><small>Performance</small><h3>Journal</h3><p>Paper-performance, equity curve, drawdown i skuteczność sygnałów.</p></div>
+        <div class="pro-card"><small>Validation</small><h3>Backtest</h3><p>Chronologiczny walk-forward z kosztami, bez trenowania na przyszłości.</p></div>
+        <div class="pro-card"><small>Controls</small><h3>Model</h3><p>Ustawienia historii, wyjaśnienie parametrów i automatycznego monitora.</p></div>
+        <div class="pro-card"><small>Trust</small><h3>Metodologia</h3><p>Opis modelu, ograniczeń, walidacji i zabezpieczeń przed fałszywym edge.</p></div>
     </div>
     """, unsafe_allow_html=True)
     st.subheader("Jak czytać prognozę?")
@@ -1351,7 +1354,7 @@ with settings:
     s1, s2, s3, s4 = st.columns(4)
     s1.markdown("<div class='pro-card'><h3>1. Dane</h3><p>Pobiera ceny, wolumen i benchmark rynku. Krypto liczy w skali 365 dni, giełdy w 252 sesjach.</p></div>", unsafe_allow_html=True)
     s2.markdown("<div class='pro-card'><h3>2. Cechy</h3><p>Buduje momentum, trend, RSI, MACD, ATR, tail ratio, presję ceny/wolumenu i relatywną siłę.</p></div>", unsafe_allow_html=True)
-    s3.markdown("<div class='pro-card'><h3>3. Radar</h3><p>Oddziela perełki momentum od kandydatów potwierdzonych modelem, żeby nie gubić gwałtownych ruchów.</p></div>", unsafe_allow_html=True)
+    s3.markdown("<div class='pro-card'><h3>3. Radar</h3><p>Liczy momentum, risk/reward i Edge score, żeby ustalić priorytet dalszej analizy.</p></div>", unsafe_allow_html=True)
     s4.markdown("<div class='pro-card'><h3>4. Model zoo</h3><p>Porównuje regresję logistyczną, gradient boosting i ExtraTrees, a wagi dobiera przez walk-forward.</p></div>", unsafe_allow_html=True)
 
     st.subheader("Dlaczego aplikacja czasem mówi „wstrzymaj się”?")
@@ -1377,6 +1380,8 @@ with settings:
         - **Zakres 90%** — szeroki przedział możliwego ruchu, a nie obietnica ceny docelowej.
         - **Benchmark** — rynek odniesienia: S&P 500, WIG20 Total Return albo Bitcoin dla altcoinów.
         - **Purge gap** — luka między treningiem i walidacją chroniąca przed podglądaniem przyszłości.
+        - **Risk/reward** — relacja potencjalnego ruchu dodatniego do szacowanego downside z przedziału niepewności.
+        - **Edge score** — priorytet analizy łączący oczekiwany ruch, P(wzrost), AUC/Brier, trend i zmienność.
         - **Auto scan** — można wyłączyć przez `MARKETSCOPE_AUTO_SCAN=0` albo zmienić rytm monitora przez `MARKETSCOPE_SCAN_INTERVAL_HOURS`.
         """)
 
@@ -1390,6 +1395,8 @@ Model korzysta z kilkudziesięciu cech: stóp zwrotu, RSI Wildera, MACD, ATR, pa
 Kierunek liczy adaptacyjny ensemble: regularizowana regresja logistyczna, histogram gradient boosting i ExtraTrees. Wagi modeli są dobierane osobno dla każdego instrumentu i horyzontu na walk-forward validation z luką chroniącą przed podglądaniem przyszłości. Oczekiwany ruch liczy osobny ensemble regresyjny: Ridge, Random Forest, histogram gradient boosting i ExtraTrees. Prawdopodobieństwo jest kalibrowane i automatycznie ściągane do 50%, gdy AUC i Brier na późniejszym okresie nie potwierdzają jakości modelu. Po walidacji modele produkcyjne są ponownie trenowane na całej dostępnej historii.
 
 Sygnały mają dwie warstwy. **Perełki momentum** łapią nietypowy ruch ceny, wybicia i silne przyspieszenie — to radar odkrywania okazji do dalszego sprawdzenia, szczególnie przy krypto. **Kandydaci ML** wymagają dodatkowo potwierdzonej jakości modelu poza próbką, dlatego pojawiają się rzadziej. Dzięki temu aplikacja nie gubi gorących ruchów, ale też nie udaje, że każdy szybki wzrost jest statystycznie potwierdzoną przewagą.
+
+Widok **Dzisiejszy radar** dodaje trzecią warstwę: priorytet analizy. **Risk/reward** porównuje górny potencjał z downside z przedziału niepewności, a **Edge score** łączy oczekiwany ruch, P(wzrost), jakość AUC/Brier, trend techniczny i zmienność. To nie jest polecenie kupna — to kolejność, w jakiej warto sprawdzać setupy.
 
 ### Ochrona przed fałszywie dobrym wynikiem
 
