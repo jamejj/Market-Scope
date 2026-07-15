@@ -15,11 +15,13 @@ from .engine import scan_market, scan_market_multi
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SNAPSHOT_PATH = DATA_DIR / "signals.json"
 LOCK_PATH = DATA_DIR / "signals.lock"
-SCAN_SCHEMA_VERSION = 4
+SCAN_SCHEMA_VERSION = 5
 EXPECTED_HORIZONS = {1, 5, 20}
 EXPECTED_RECORD_FIELDS = {
     "Symbol", "Klasa", "Horyzont", "Setup", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d",
     "Radar momentum", "Radar score", "Risk/reward", "Edge score", "Akcja radaru",
+    "Setup score", "Setup grade", "Momentum score", "Trend score", "Risk control",
+    "Liquidity score", "Model edge", "Teza radaru",
 }
 
 

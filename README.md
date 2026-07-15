@@ -13,6 +13,7 @@ Lokalny panel badawczy analizujący akcje, ETF-y i krypto. Generuje probabilisty
 - ponowny trening modelu produkcyjnego na całej dostępnej historii;
 - prawidłowa annualizacja 365 dni dla krypto i 252 sesji dla giełd;
 - Today’s Radar z priorytetami analizy, momentum, risk/reward i Edge score;
+- Setup Intelligence z rozbiciem na momentum, trend, kontrolę ryzyka, płynność, model edge i krótką tezę radaru;
 - ranking rynku, analiza ryzyka i backtest walk-forward z kosztami transakcji;
 - Signal Journal i Performance Lab z paper portfolio, kosztami, sizingiem, equity curve i drawdown;
 - zakładka **Model**, która tłumaczy ustawienia oraz neutralne sygnały;

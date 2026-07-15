@@ -3,7 +3,7 @@ import pandas as pd
 
 from market_oracle.backtest import walk_forward_backtest
 from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES
-from market_oracle.engine import observation_label, risk_reward_metrics, signal_label
+from market_oracle.engine import observation_label, risk_reward_metrics, setup_intelligence, signal_label
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast
@@ -99,6 +99,25 @@ def test_risk_reward_metrics_prioritize_confirmed_edge():
     assert metrics["risk_reward"] > 3
     assert metrics["edge_score"] > 4.5
     assert metrics["radar_action"] == "PRIORYTET DO ANALIZY"
+
+
+def test_setup_intelligence_explains_clean_setup():
+    forecast = {
+        "quality": "WYSOKA", "probability_up": 0.64, "expected_return": 0.06,
+        "lower_return": -0.04, "upper_return": 0.14, "auc": 0.63, "brier": 0.22,
+    }
+    risk = {"annual_volatility": 0.32, "max_drawdown": -0.18}
+    technical = {
+        "return_1d": 0.02, "return_5d": 0.08, "return_20d": 0.16, "return_60d": 0.30,
+        "momentum_acceleration": 0.04, "rsi_14": 66, "atr_pct": 0.025,
+        "relative_volume_20": 0.60, "avg_dollar_volume_20": 25_000_000,
+        "drawdown_60": -0.02, "range_position_60": 0.92,
+        "above_sma_50": True, "above_sma_200": True, "near_20d_high": True, "near_60d_high": True,
+    }
+    intelligence = setup_intelligence("TEST", forecast, risk, technical)
+    assert intelligence["setup_score"] >= 65
+    assert intelligence["setup_grade"].startswith(("A", "B"))
+    assert "momentum" in intelligence["thesis"] or "ML" in intelligence["thesis"]
 
 
 def test_background_monitor_persists_snapshot(tmp_path, monkeypatch):

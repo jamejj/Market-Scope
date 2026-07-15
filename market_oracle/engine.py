@@ -23,16 +23,33 @@ def _benchmark_for(symbol: str) -> str | None:
 
 def _technical_snapshot(data: pd.DataFrame) -> dict[str, float | bool]:
     close = data["Close"].astype(float)
+    high = data["High"].astype(float)
+    low = data["Low"].astype(float)
+    volume = data["Volume"].astype(float)
     change = close.diff()
     gain = change.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
     loss = (-change.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
     rsi = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+    prev = close.shift(1)
+    true_range = pd.concat([(high - low), (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
+    rolling_high_60 = close.rolling(60).max()
+    rolling_low_60 = close.rolling(60).min()
+    volume_20 = volume.rolling(20).mean()
+    volume_base = float(volume_20.iloc[-1]) if np.isfinite(volume_20.iloc[-1]) else 0.0
+    range_width = float(rolling_high_60.iloc[-1] - rolling_low_60.iloc[-1])
+    range_position_60 = 0.5 if not np.isfinite(range_width) or range_width <= 0 else float((close.iloc[-1] - rolling_low_60.iloc[-1]) / range_width)
     return {
         "return_1d": float(close.pct_change(1).iloc[-1]),
         "return_5d": float(close.pct_change(5).iloc[-1]),
         "return_20d": float(close.pct_change(20).iloc[-1]),
         "return_60d": float(close.pct_change(60).iloc[-1]),
+        "momentum_acceleration": float(close.pct_change(5).iloc[-1] - close.pct_change(20).iloc[-1] / 4),
         "rsi_14": float(rsi.iloc[-1]),
+        "atr_pct": float(true_range.ewm(alpha=1 / 14, adjust=False).mean().iloc[-1] / close.iloc[-1]),
+        "relative_volume_20": float(volume.iloc[-1] / volume_base - 1) if volume_base > 0 else 0.0,
+        "avg_dollar_volume_20": float((close * volume).rolling(20).mean().iloc[-1]),
+        "drawdown_60": float(close.iloc[-1] / rolling_high_60.iloc[-1] - 1),
+        "range_position_60": range_position_60,
         "above_sma_50": bool(close.iloc[-1] > close.rolling(50).mean().iloc[-1]),
         "above_sma_200": bool(close.iloc[-1] > close.rolling(200).mean().iloc[-1]),
         "near_20d_high": bool(close.iloc[-1] >= close.rolling(20).max().iloc[-1] * 0.98),
@@ -182,6 +199,126 @@ def risk_reward_metrics(forecast: dict, risk: dict, technical: dict) -> dict[str
     }
 
 
+def _clip_score(value: float) -> float:
+    if not np.isfinite(value):
+        return 0.0
+    return float(max(0.0, min(100.0, value)))
+
+
+def setup_intelligence(symbol: str, forecast: dict, risk: dict, technical: dict) -> dict[str, float | str]:
+    """Explainable trader-facing scorecard for ranking setup quality."""
+    crypto = symbol.upper().endswith("-USD")
+    r1 = float(technical.get("return_1d") or 0.0)
+    r5 = float(technical.get("return_5d") or 0.0)
+    r20 = float(technical.get("return_20d") or 0.0)
+    r60 = float(technical.get("return_60d") or 0.0)
+    rsi = float(technical.get("rsi_14") or 50.0)
+    acceleration = float(technical.get("momentum_acceleration") or 0.0)
+    relative_volume = float(technical.get("relative_volume_20") or 0.0)
+    range_position = float(technical.get("range_position_60") or 0.5)
+    annual_volatility = float(risk.get("annual_volatility") or 0.0)
+    max_drawdown = abs(float(risk.get("max_drawdown") or 0.0))
+    atr_pct = float(technical.get("atr_pct") or 0.0)
+    dollar_volume = max(float(technical.get("avg_dollar_volume_20") or 0.0), 1.0)
+    expected = float(forecast.get("expected_return") or 0.0)
+    probability = float(forecast.get("probability_up") or 0.5)
+    auc = float(forecast.get("auc") or 0.5)
+    brier = float(forecast.get("brier") or 0.25)
+    risk_reward = float(risk_reward_metrics(forecast, risk, technical)["risk_reward"])
+
+    # Crypto has naturally wider moves, so its momentum thresholds are deliberately higher.
+    hot_1d = 0.08 if crypto else 0.025
+    hot_5d = 0.18 if crypto else 0.06
+    hot_20d = 0.35 if crypto else 0.12
+    overheating = max(0.0, (rsi - 78) / 22)
+
+    momentum_score = _clip_score(
+        45
+        + (r1 / hot_1d) * 10
+        + (r5 / hot_5d) * 18
+        + (r20 / hot_20d) * 18
+        + (r60 / max(hot_20d * 1.8, 0.01)) * 8
+        + min(relative_volume, 2.5) * 5
+        + (acceleration / hot_5d) * 10
+        - overheating * 18
+    )
+    trend_score = _clip_score(
+        30
+        + (22 if technical.get("above_sma_50") else -8)
+        + (20 if technical.get("above_sma_200") else -4)
+        + (12 if technical.get("near_20d_high") else 0)
+        + (10 if technical.get("near_60d_high") else 0)
+        + (range_position - 0.5) * 26
+        + max(min(r20, hot_20d), -hot_20d) / hot_20d * 10
+    )
+    risk_control = _clip_score(
+        86
+        - min(annual_volatility, 3.0) * (30 if crypto else 55)
+        - min(max_drawdown, 0.90) * 32
+        - min(atr_pct, 0.18) * (110 if crypto else 170)
+        - max(0.0, rsi - 82) * 0.65
+    )
+    liquidity_score = _clip_score((np.log10(dollar_volume) - (5.2 if crypto else 5.6)) * 25)
+    auc_quality = max(0.0, min(1.0, (auc - 0.50) / 0.12))
+    brier_quality = max(0.0, min(1.0, (0.27 - brier) / 0.06))
+    ml_score = _clip_score(
+        auc_quality * brier_quality * 62
+        + max(0.0, probability - 0.5) * 120
+        + max(0.0, expected) * 180
+    )
+    rr_score = _clip_score(min(risk_reward, 4.0) / 4 * 100)
+    setup_score = _clip_score(
+        momentum_score * 0.23
+        + trend_score * 0.20
+        + risk_control * 0.18
+        + ml_score * 0.22
+        + liquidity_score * 0.07
+        + rr_score * 0.10
+    )
+
+    if setup_score >= 72 and ml_score >= 45 and risk_control >= 45:
+        grade = "A — czysty setup"
+    elif setup_score >= 62 and risk_control >= 35:
+        grade = "B — watchlist"
+    elif momentum_score >= 72 and risk_control >= 30:
+        grade = "M — momentum do sprawdzenia"
+    elif risk_control < 28:
+        grade = "R — ryzyko dominuje"
+    else:
+        grade = "C — obserwuj"
+
+    reasons: list[str] = []
+    if momentum_score >= 70:
+        reasons.append("silne momentum")
+    elif r5 > 0 and r20 > 0:
+        reasons.append("dodatni impet")
+    if trend_score >= 70:
+        reasons.append("trend 50/200 wspiera ruch")
+    elif technical.get("near_20d_high"):
+        reasons.append("blisko wybicia 20d")
+    if ml_score >= 55:
+        reasons.append("ML potwierdza edge")
+    elif forecast.get("quality", "").startswith("NISKA"):
+        reasons.append("ML bez przewagi")
+    if relative_volume >= 0.35:
+        reasons.append("wolumen powyżej normy")
+    if risk_control < 35:
+        reasons.append("wysokie ryzyko/zmienność")
+    if not reasons:
+        reasons.append("brak dominującego czynnika")
+
+    return {
+        "setup_score": setup_score,
+        "setup_grade": grade,
+        "momentum_score": momentum_score,
+        "trend_score": trend_score,
+        "risk_control": risk_control,
+        "liquidity_score": liquidity_score,
+        "ml_score": ml_score,
+        "thesis": " · ".join(reasons[:4]),
+    }
+
+
 def _asset_class(symbol: str) -> str:
     if symbol.endswith("-USD"):
         return "Krypto"
@@ -222,12 +359,17 @@ def _row_from_result(symbol: str, result: dict, horizon: int) -> dict:
     )
     score = (f["probability_up"] - 0.5) * 210 * quality + f["expected_return"] * 90 + momentum_bonus - risk_penalty
     rr = risk_reward_metrics(f, r, technical)
+    intelligence = setup_intelligence(symbol, f, r, technical)
     return {
         "Symbol": symbol, "Klasa": _asset_class(symbol), "Horyzont": horizon,
         "Data": str(result["last_date"].date()), "Setup": _setup_label(technical, horizon), "Cena": result["last_price"],
         "Radar momentum": momentum_radar_label(symbol, technical),
         "Radar score": momentum_radar_score(symbol, technical, r),
         "Risk/reward": rr["risk_reward"], "Edge score": rr["edge_score"], "Akcja radaru": rr["radar_action"],
+        "Setup score": intelligence["setup_score"], "Setup grade": intelligence["setup_grade"],
+        "Momentum score": intelligence["momentum_score"], "Trend score": intelligence["trend_score"],
+        "Risk control": intelligence["risk_control"], "Liquidity score": intelligence["liquidity_score"],
+        "Model edge": intelligence["ml_score"], "Teza radaru": intelligence["thesis"],
         "Ocena": observation_label(f), "Sygnał": signal_label(f["probability_up"], f["quality"]),
         "P(wzrost)": f["probability_up"], "Oczekiwany ruch": f["expected_return"],
         "Dolna granica 90%": f["lower_return"], "Górna granica 90%": f["upper_return"],
