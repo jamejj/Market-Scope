@@ -10,6 +10,7 @@ from market_oracle.model import fit_forecast
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
 from market_oracle.risk import periods_per_year, risk_metrics
 from market_oracle.signals import SignalInputs, signal_decision, signal_inputs_from_forecast
+from market_oracle.validation import ValidationConfig, aggregate_summary, aggregate_validate_histories, group_summary
 
 
 def synthetic_data(n=900):
@@ -89,6 +90,24 @@ def test_signal_decision_is_shared_and_blocks_low_quality():
     payload = signal_inputs_from_forecast({"probability_up": 0.61, "expected_return": 0.03, "quality": "UMIARKOWANA"})
     assert payload.source == "ML"
     assert signal_decision(payload, threshold=0.56) == 1
+
+
+def test_aggregate_validation_keeps_rejected_observations():
+    histories = {"AAA": synthetic_data(560), "BBB": synthetic_data(580)}
+    config = ValidationConfig(horizons=(1,), initial_train=260, test_size=25, max_folds=1)
+    frame = aggregate_validate_histories(histories, markets={"AAA": "USA", "BBB": "ETF"}, config=config)
+    assert not frame.empty
+    assert set(frame["Symbol"]) == {"AAA", "BBB"}
+    assert frame["Fold"].nunique() >= 1
+    assert "DecisionReason" in frame
+    assert frame["Position"].isin([-1, 0, 1]).all()
+    assert (frame["Position"] == 0).any()
+    summary = aggregate_summary(frame)
+    assert summary["observations"] == len(frame)
+    assert summary["rejected"] >= 1
+    assert 0 <= summary["auc"] <= 1
+    by_market = group_summary(frame, "Market")
+    assert set(by_market["Market"]) == {"USA", "ETF"}
 
 
 def test_crypto_uses_365_day_annualization():

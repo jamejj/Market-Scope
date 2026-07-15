@@ -19,6 +19,7 @@ Lokalny panel badawczy analizujący akcje, ETF-y i krypto. Generuje probabilisty
 - wejście na następnym otwarciu, koszty oraz poślizg oddzielone od samej trafności prognozy;
 - ranking rynku, analiza ryzyka i backtest walk-forward z kosztami transakcji;
 - Signal Journal i Performance Lab z paper portfolio, kosztami, sizingiem, equity curve i drawdown;
+- Aggregate Validation do zbiorczego sprawdzania edge według symbolu, rynku, horyzontu i folda, z zapisem również odrzuconych sygnałów;
 - zakładka **Model**, która tłumaczy ustawienia oraz neutralne sygnały;
 - automatyczny monitor rynku zapisujący gotowy ranking domyślnie co 6 godzin;
 - adaptacyjny ensemble, który dobiera udział modelu liniowego i nieliniowego na osobnym okresie kalibracji.
@@ -32,6 +33,8 @@ Na macOS można po prostu kliknąć dwukrotnie plik `Uruchom MarketScope.command
 Pełny ranking działa dwustopniowo. Najpierw szybki **FAST Radar** skanuje cały rynek technicznie, a następnie **Deep ML** odpala pełne modele tylko dla shortlisty najciekawszych instrumentów. W tym czasie dashboard pokazuje ranking częściowy i stopniowo zastępuje wiersze FAST wierszami ML.
 
 Model w produkcji i backteście używa tej samej definicji targetu: kierunek close-to-close. Finalna decyzja przechodzi przez wspólny pakiet `SignalInputs`, czyli probability, expected return i jakość walidacji. Backtest i Journal nie zakładają już wejścia po tej samej cenie zamknięcia, na której powstał sygnał. Sygnał jest generowany po close dnia `t`, a wykonanie liczone jest od następnego open z kosztem i uproszczonym poślizgiem.
+
+Moduł Aggregate Validation jest przeznaczony do cięższego egzaminu systemu: chronologicznie przechodzi po wielu instrumentach i horyzontach, zapisuje każdą obserwację decyzyjną oraz powód odrzucenia sygnału. To ma pomóc odpowiedzieć, czy przewaga utrzymuje się szerzej, a nie tylko na pojedynczym szczęśliwym tickerze.
 
 ```bash
 python3 -m venv .venv

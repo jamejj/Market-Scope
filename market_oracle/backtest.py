@@ -17,7 +17,7 @@ from .model import (
     _weighted_prediction,
 )
 from .risk import periods_per_year
-from .signals import SignalInputs, signal_decision
+from .signals import SignalInputs, signal_verdict
 
 
 @dataclass
@@ -198,7 +198,8 @@ def walk_forward_backtest(
             brier=state.validation_brier,
             source="BACKTEST",
         )
-        position = signal_decision(inputs, threshold)
+        verdict = signal_verdict(inputs, threshold)
+        position = verdict.decision
         gross = position * float(execution_forward.iloc[i])
         total_cost = abs(position) * (cost_bps + slippage_bps) / 10_000
         net = gross - total_cost
@@ -215,6 +216,8 @@ def walk_forward_backtest(
             "ValidationAUC": state.validation_auc,
             "ValidationBrier": state.validation_brier,
             "Position": position,
+            "DecisionReason": verdict.reason,
+            "DecisionLabel": verdict.label,
             "GrossReturn": gross,
             "Return": net,
             "ActualUp": int(y.iloc[i]),

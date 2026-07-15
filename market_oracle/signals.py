@@ -20,6 +20,15 @@ class SignalInputs:
     source: str = "ML"
 
 
+@dataclass(frozen=True)
+class SignalVerdict:
+    """Final gate output with an audit reason."""
+
+    decision: int
+    reason: str
+    label: str
+
+
 def signal_inputs_from_forecast(forecast: dict, source: str = "ML") -> SignalInputs:
     """Create the shared decision payload from a production forecast dict."""
     return SignalInputs(
@@ -32,7 +41,7 @@ def signal_inputs_from_forecast(forecast: dict, source: str = "ML") -> SignalInp
     )
 
 
-def signal_decision(inputs: SignalInputs, threshold: float = 0.56) -> int:
+def signal_verdict(inputs: SignalInputs, threshold: float = 0.56, min_expected_return: float = 0.0) -> SignalVerdict:
     """Shared directional decision used by production labels and validation.
 
     Returns 1 for long, -1 for short and 0 for no trade. Weak model quality is
@@ -42,9 +51,21 @@ def signal_decision(inputs: SignalInputs, threshold: float = 0.56) -> int:
     expected_return = float(inputs.expected_return)
     quality = str(inputs.quality)
     if quality.startswith("NISKA"):
-        return 0
-    if probability >= threshold and expected_return >= 0:
-        return 1
-    if probability <= 1 - threshold and expected_return <= 0:
-        return -1
-    return 0
+        return SignalVerdict(0, "LOW_QUALITY", "BRAK SYGNAŁU")
+    if probability >= threshold:
+        if expected_return < 0:
+            return SignalVerdict(0, "EXPECTED_RETURN_CONFLICT", "OBSERWUJ")
+        if expected_return < min_expected_return:
+            return SignalVerdict(0, "EXPECTED_RETURN_TOO_SMALL", "OBSERWUJ")
+        return SignalVerdict(1, "LONG_CONFIRMED", "LONG")
+    if probability <= 1 - threshold:
+        if expected_return > 0:
+            return SignalVerdict(0, "EXPECTED_RETURN_CONFLICT", "OBSERWUJ")
+        if abs(expected_return) < min_expected_return:
+            return SignalVerdict(0, "EXPECTED_RETURN_TOO_SMALL", "OBSERWUJ")
+        return SignalVerdict(-1, "SHORT_CONFIRMED", "SHORT")
+    return SignalVerdict(0, "PROBABILITY_INSIDE_BAND", "OBSERWUJ")
+
+
+def signal_decision(inputs: SignalInputs, threshold: float = 0.56, min_expected_return: float = 0.0) -> int:
+    return signal_verdict(inputs, threshold, min_expected_return).decision
