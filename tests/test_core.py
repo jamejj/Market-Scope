@@ -10,7 +10,14 @@ from market_oracle.model import fit_forecast
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
 from market_oracle.risk import periods_per_year, risk_metrics
 from market_oracle.signals import SignalInputs, signal_decision, signal_inputs_from_forecast
-from market_oracle.validation import ValidationConfig, aggregate_summary, aggregate_validate_histories, group_summary
+from market_oracle.validation import (
+    ValidationConfig,
+    aggregate_summary,
+    aggregate_validate_histories,
+    cost_stress_summary,
+    group_summary,
+    validation_report,
+)
 
 
 def synthetic_data(n=900):
@@ -94,18 +101,33 @@ def test_signal_decision_is_shared_and_blocks_low_quality():
 
 def test_aggregate_validation_keeps_rejected_observations():
     histories = {"AAA": synthetic_data(560), "BBB": synthetic_data(580)}
-    config = ValidationConfig(horizons=(1,), initial_train=260, test_size=25, max_folds=1)
+    config = ValidationConfig(horizons=(1,), initial_train=260, test_size=25, max_folds=1, holdout_size=25)
     frame = aggregate_validate_histories(histories, markets={"AAA": "USA", "BBB": "ETF"}, config=config)
     assert not frame.empty
     assert set(frame["Symbol"]) == {"AAA", "BBB"}
     assert frame["Fold"].nunique() >= 1
+    assert "HOLDOUT" in set(frame["FoldType"])
     assert "DecisionReason" in frame
+    assert "TrainEndDate" in frame
+    assert "CalibrationStartDate" in frame
+    assert "AlwaysLongReturn" in frame
+    assert "MomentumReturn" in frame
+    assert "LinearReturn" in frame
     assert frame["Position"].isin([-1, 0, 1]).all()
     assert (frame["Position"] == 0).any()
     summary = aggregate_summary(frame)
     assert summary["observations"] == len(frame)
     assert summary["rejected"] >= 1
+    assert summary["non_overlapping_trades"] <= summary["trades"]
+    assert "benchmark_mean_returns" in summary
+    assert "cost_stress" in summary
     assert 0 <= summary["auc"] <= 1
+    stress = cost_stress_summary(frame)
+    assert set(stress) == {"1x", "2x", "3x"}
+    report = validation_report(frame, config, ["AAA", "BBB"], commit_hash="test")
+    assert report["manifest"]["commit"] == "test"
+    assert report["manifest"]["experiment_id"]
+    assert report["by_fold"]
     by_market = group_summary(frame, "Market")
     assert set(by_market["Market"]) == {"USA", "ETF"}
 

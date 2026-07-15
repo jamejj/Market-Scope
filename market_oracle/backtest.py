@@ -30,6 +30,10 @@ class _BacktestEnsemble:
     quality: str
     validation_auc: float
     validation_brier: float
+    train_end: int
+    core_end: int
+    calibration_start: int
+    calibration_end: int
 
 
 def _execution_returns(data: pd.DataFrame, horizon: int) -> pd.Series:
@@ -149,6 +153,10 @@ def _fit_backtest_ensemble(
         quality=quality,
         validation_auc=validation_auc,
         validation_brier=validation_brier,
+        train_end=train_end,
+        core_end=core_end,
+        calibration_start=calibration_start,
+        calibration_end=train_end,
     )
 
 

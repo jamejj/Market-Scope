@@ -1555,6 +1555,7 @@ with settings:
         - **Target modelu** — kierunek close-to-close, zgodny w produkcji i backteście.
         - **SignalInputs** — wspólny pakiet finalnej decyzji: P(wzrost), oczekiwany ruch i jakość modelu. Produkcja i backtest używają tej samej bramki decyzyjnej.
         - **DecisionReason** — audyt decyzji: potwierdzony LONG/SHORT albo powód odrzucenia, np. niska jakość, brak przebicia progu lub konflikt probability z expected return.
+        - **Aggregate Validation** — cięższy egzamin edge: foldy train/cal/test, holdout, benchmarki, stress kosztów i analiza koncentracji wyniku.
         - **Next open execution** — sygnał powstaje po zamknięciu świecy, a test/Journal liczy wejście dopiero od następnego otwarcia.
         - **Auto scan** — można wyłączyć przez `MARKETSCOPE_AUTO_SCAN=0` albo zmienić rytm monitora przez `MARKETSCOPE_SCAN_INTERVAL_HOURS`.
         """)
@@ -1576,7 +1577,7 @@ Skaner działa dwustopniowo. **FAST Radar** lekko skanuje cały rynek i wybiera 
 
 Backtest używa tej samej definicji celu co produkcja: model przewiduje kierunek **close-to-close**. Finalny sygnał przechodzi przez wspólny obiekt decyzyjny **SignalInputs**: skalibrowane prawdopodobieństwo, expected return z ensemble regresyjnego oraz jakość walidacji. Dzięki temu backtest nie testuje już luźno podobnej strategii opartej tylko o próg prawdopodobieństwa, tylko coraz wierniej odtwarza produkcyjną bramkę sygnału. Wynik finansowy jest liczony osobno bardziej konserwatywnie: sygnał pojawia się po zamknięciu dnia `t`, wejście jest liczone od otwarcia kolejnej sesji, a wynik uwzględnia koszt oraz uproszczony poślizg. Dzięki temu można odróżnić jakość prognozy kierunku od tego, czy dało się ją wykonać po realistycznej cenie.
 
-**Aggregate Validation** to osobny, cięższy egzamin systemu. Przechodzi chronologicznie po wielu tickerach i horyzontach, w każdym foldzie trenuje tylko na wcześniejszej historii, zostawia purge gap, a później zapisuje każdą potencjalną decyzję: również te odrzucone. Raport można potem grupować według rynku, tickera, horyzontu i folda, żeby sprawdzić, czy wynik nie pochodzi z jednego szczęśliwego instrumentu albo jednego okresu.
+**Aggregate Validation** to osobny, cięższy egzamin systemu. Przechodzi chronologicznie po wielu tickerach i horyzontach, w każdym foldzie trenuje tylko na wcześniejszej historii, zostawia purge gap, a później zapisuje każdą potencjalną decyzję: również te odrzucone. Raport zachowuje metadane train/calibration/test, finalny holdout, identyfikator eksperymentu, timestamp i commit hash. Porównuje MarketScope z always-long, buy-hold proxy, prostym momentum i samotną Logistic Regression, liczy stress kosztów 1×/2×/3×, niepokrywające się transakcje, ekspozycję, drawdown, Sharpe/Sortino i koncentrację wyniku. To pozwala sprawdzić, czy wynik nie pochodzi z jednego szczęśliwego instrumentu, jednego okresu albo kilku najlepszych transakcji.
 
 ### Ochrona przed fałszywie dobrym wynikiem
 
@@ -1586,6 +1587,7 @@ Backtest używa tej samej definicji celu co produkcja: model przewiduje kierunek
 - dobór wag modeli korzysta z expanding walk-forward validation;
 - backtest jest chronologiczny walk-forward i uwzględnia koszt transakcji;
 - Aggregate Validation zapisuje powód każdej decyzji, także odrzuconych sygnałów;
+- raport Aggregate Validation pokazuje benchmarki, holdout, stress kosztów oraz koncentrację zysków;
 - aplikacja pokazuje przedział niepewności oraz jakość poza próbką;
 - skaner nie składa zleceń, nie korzysta z dźwigni i nie obiecuje zysku.
 
