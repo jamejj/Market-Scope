@@ -847,7 +847,8 @@ def _journal_dataframe(entries: list[dict]) -> pd.DataFrame:
         "signal_date": "Data sygnału", "symbol": "Symbol", "asset_class": "Klasa",
         "horizon": "Horyzont", "setup": "Setup", "label": "Ocena",
         "probability_up": "P(wzrost)", "expected_return": "Oczekiwany ruch",
-        "quality": "Jakość", "entry_price": "Cena start", "target_date": "Data oceny",
+        "quality": "Jakość", "signal_price": "Cena sygnału", "entry_date": "Data wejścia",
+        "entry_price": "Cena wejścia", "execution": "Egzekucja", "target_date": "Data oceny",
         "target_price": "Cena oceny", "bars_elapsed": "Upłynęło", "bars_remaining": "Pozostało",
         "score": "Score",
     })
@@ -896,7 +897,7 @@ def render_signal_journal() -> None:
 
     frame = _journal_dataframe(entries)
     formats = {
-        "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:+.1%}", "Cena start": "{:.2f}",
+        "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:+.1%}", "Cena sygnału": "{:.2f}", "Cena wejścia": "{:.2f}",
         "Cena oceny": "{:.2f}", "Zwrot instrumentu": "{:+.1%}", "Wynik kierunkowy": "{:+.1%}",
         "Score": "{:.2f}",
     }
@@ -1012,13 +1013,13 @@ def render_signal_journal() -> None:
     with tabs[1]:
         columns = [
             "Data sygnału", "Symbol", "Klasa", "Horyzont", "Kierunek", "Setup", "Ocena",
-            "P(wzrost)", "Cena start", "Upłynęło", "Pozostało", "Jakość", "Score",
+            "P(wzrost)", "Cena sygnału", "Data wejścia", "Cena wejścia", "Egzekucja", "Upłynęło", "Pozostało", "Jakość", "Score",
         ]
         st.dataframe(open_entries[[c for c in columns if c in open_entries]].style.format(formats), use_container_width=True, hide_index=True)
     with tabs[2]:
         columns = [
             "Data sygnału", "Data oceny", "Symbol", "Horyzont", "Kierunek", "Trafiony",
-            "Cena start", "Cena oceny", "Zwrot instrumentu", "Wynik kierunkowy", "Jakość", "Setup",
+            "Cena sygnału", "Data wejścia", "Cena wejścia", "Cena oceny", "Zwrot instrumentu", "Wynik kierunkowy", "Jakość", "Setup",
         ]
         if closed.empty:
             st.info("Jeszcze żaden sygnał nie dojrzał do oceny. Wróć po upływie horyzontu 1/5/20 dni lub sesji.")
@@ -1463,32 +1464,39 @@ with journal:
 
 with backtest:
     st.header("Backtest walk-forward")
-    st.write("Model jest wielokrotnie trenowany wyłącznie na przeszłości, a następnie testowany na kolejnych, niewidzianych danych.")
+    st.write("Model zoo jest wielokrotnie trenowany wyłącznie na przeszłości, a następnie testowany na kolejnych, niewidzianych danych.")
+    st.caption("Sygnał powstaje po zamknięciu świecy, wejście odbywa się na następnym open, a wynik uwzględnia koszt i uproszczony poślizg.")
     bt_symbol = st.text_input("Symbol", "SPY", help="Np. AAPL, CDR.WA, SPY, BTC-USD", key="bt_symbol").strip().upper()
-    b1, b2, b3 = st.columns(3)
+    b1, b2, b3, b4 = st.columns(4)
     bt_horizon = b1.selectbox("Horyzont", [1, 5, 20, 60], index=1, key="bt_horizon")
     threshold = b2.slider("Minimalna pewność wejścia", 0.51, 0.70, 0.56, 0.01, key="bt_threshold")
     cost_bps = b3.number_input("Koszt transakcji (punkty bazowe)", 0.0, 100.0, 10.0, 1.0, key="bt_cost")
+    slippage_bps = b4.number_input("Poślizg (punkty bazowe)", 0.0, 100.0, 5.0, 1.0, key="bt_slippage")
     if st.button("Uruchom test historyczny", type="primary", key="bt_run", use_container_width=True):
         try:
-            with st.spinner("Symuluję prognozy out-of-sample…"):
+            with st.spinner("Symuluję ensemble out-of-sample z wejściem na następnym open…"):
                 data = download_history(bt_symbol, years)
-                curve, metrics = walk_forward_backtest(data, bt_horizon, threshold, cost_bps)
+                curve, metrics = walk_forward_backtest(data, bt_horizon, threshold, cost_bps, slippage_bps)
             st.session_state["bt_result"] = (bt_symbol, curve, metrics)
         except Exception as exc:
             st.error(str(exc))
     if "bt_result" in st.session_state and st.session_state["bt_result"][0] == bt_symbol:
         _, curve, metrics = st.session_state["bt_result"]
-        cols = st.columns(6)
+        cols = st.columns(8)
         values = [
             ("Łączny zwrot", pct(metrics["total_return"])), ("CAGR", pct(metrics["annual_return"])),
             ("Zmienność", pct(metrics["annual_volatility"])), ("Sharpe", f"{metrics['sharpe']:.2f}"),
             ("Max drawdown", pct(metrics["max_drawdown"])), ("Trafność", pct(metrics["hit_rate"])),
+            ("AUC", f"{metrics['auc']:.3f}"), ("Brier", f"{metrics['brier']:.3f}"),
         ]
         for col, (label, value) in zip(cols, values):
             col.metric(label, value)
         st.line_chart(curve[["Equity", "BuyHold"]])
-        st.caption(f"Aktywne sygnały: {metrics['trades']}. Wyniki historyczne nie gwarantują przyszłych.")
+        st.caption(
+            f"Aktywne sygnały: {metrics['trades']}. Egzekucja: next open. "
+            f"Koszt: {metrics['cost_bps']:.0f} bps, poślizg: {metrics['slippage_bps']:.0f} bps. "
+            "Wyniki historyczne nie gwarantują przyszłych."
+        )
 
 with settings:
     st.header("Model i ustawienia")
@@ -1544,6 +1552,7 @@ with settings:
         - **FAST** — lekki pierwszy przebieg techniczny po całym rynku; służy do odkrywania kandydatów, nie do zapisu sygnałów w Journalu.
         - **ML** — pełna walidowana prognoza modelu dla instrumentów z shortlisty; dopiero te wiersze mogą tworzyć directional signals.
         - **Deep score** — priorytet do pełnego ML, łączący Setup score, momentum, Edge score i kontrolę ryzyka.
+        - **Next open execution** — sygnał powstaje po zamknięciu świecy, a test/Journal liczy wejście dopiero od następnego otwarcia.
         - **Auto scan** — można wyłączyć przez `MARKETSCOPE_AUTO_SCAN=0` albo zmienić rytm monitora przez `MARKETSCOPE_SCAN_INTERVAL_HOURS`.
         """)
 
@@ -1561,6 +1570,8 @@ Sygnały mają dwie warstwy. **Perełki momentum** łapią nietypowy ruch ceny, 
 Widok **Dzisiejszy radar** dodaje trzecią warstwę: priorytet analizy. **Risk/reward** porównuje górny potencjał z downside z przedziału niepewności, a **Edge score** łączy oczekiwany ruch, P(wzrost), jakość AUC/Brier, trend techniczny i zmienność. **Setup intelligence** rozbija ranking na momentum, trend, kontrolę ryzyka, płynność i model edge, a **Teza radaru** tłumaczy najważniejsze powody.
 
 Skaner działa dwustopniowo. **FAST Radar** lekko skanuje cały rynek i wybiera shortlistę przez **Deep score**. Potem **Deep ML** trenuje pełne modele tylko dla najlepszych kandydatów i zastępuje ich wiersze FAST wierszami ML. To skraca czas oczekiwania i zmniejsza szum, ale nadal nie jest poleceniem kupna — to kolejność, w jakiej warto sprawdzać setupy.
+
+Backtest i Journal używają bardziej konserwatywnego wykonania: sygnał pojawia się po zamknięciu dnia `t`, wejście jest liczone od otwarcia kolejnej sesji, a wynik uwzględnia koszt oraz uproszczony poślizg. Dzięki temu test nie zakłada nierealistycznego zakupu po cenie, którą znamy dopiero po wygenerowaniu sygnału.
 
 ### Ochrona przed fałszywie dobrym wynikiem
 

@@ -47,13 +47,15 @@ def test_forecast_bounds():
 
 
 def test_risk_and_backtest():
-    data = synthetic_data()
+    data = synthetic_data(560)
     metrics = risk_metrics(data.Close)
     assert metrics["annual_volatility"] > 0
-    curve, summary = walk_forward_backtest(data, horizon=5)
+    curve, summary = walk_forward_backtest(data, horizon=5, refit_every=120)
     assert not curve.empty
     assert np.isfinite(summary["total_return"])
     assert metrics["periods_per_year"] == 252
+    assert summary["execution"] == "next_open"
+    assert 0 <= summary["auc"] <= 1
 
 
 def test_crypto_uses_365_day_annualization():
@@ -195,6 +197,9 @@ def test_signal_journal_records_and_evaluates(tmp_path, monkeypatch):
     entries = load_journal(path)
     assert len(entries) == 1
     assert entries[0]["direction"] == "LONG"
+    assert entries[0]["execution"] == "NEXT_OPEN"
+    assert entries[0]["signal_price"] == 100.0
+    assert entries[0]["entry_price"] is None
 
     dates = pd.bdate_range("2026-01-09", periods=12)
     prices = np.linspace(99, 111, len(dates))
@@ -206,6 +211,8 @@ def test_signal_journal_records_and_evaluates(tmp_path, monkeypatch):
     refreshed, errors = refresh_journal_results(path=path)
     assert errors == {}
     assert refreshed[0]["status"] == "closed"
+    assert refreshed[0]["entry_price"] > refreshed[0]["signal_price"]
+    assert refreshed[0]["entry_date"] is not None
     assert refreshed[0]["hit"] is True
     assert refreshed[0]["strategy_return"] > 0
     summary = journal_summary(refreshed)

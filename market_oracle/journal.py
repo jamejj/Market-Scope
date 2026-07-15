@@ -59,12 +59,14 @@ def record_snapshot_signals(snapshot: dict, path: Path = JOURNAL_PATH) -> int:
     added = 0
 
     for row in snapshot.get("records", []):
+        if row.get("Tryb analizy") not in {None, "ML"}:
+            continue
         direction = signal_direction(row)
         if direction is None:
             continue
         try:
             horizon = int(row.get("Horyzont", 0))
-            entry_price = float(row.get("Cena"))
+            signal_price = float(row.get("Cena"))
         except (TypeError, ValueError):
             continue
         entry_id = _entry_id(row, snapshot, direction)
@@ -78,7 +80,10 @@ def record_snapshot_signals(snapshot: dict, path: Path = JOURNAL_PATH) -> int:
             "asset_class": row.get("Klasa", "—"),
             "horizon": horizon,
             "direction": direction,
-            "entry_price": entry_price,
+            "execution": "NEXT_OPEN",
+            "signal_price": signal_price,
+            "entry_date": None,
+            "entry_price": None,
             "setup": row.get("Setup", "—"),
             "label": row.get("Ocena", "—"),
             "probability_up": row.get("P(wzrost)"),
@@ -107,6 +112,7 @@ def record_snapshot_signals(snapshot: dict, path: Path = JOURNAL_PATH) -> int:
 
 def _evaluate_entry(entry: dict, history: pd.DataFrame) -> dict:
     close = history["Close"].astype(float)
+    open_price = history["Open"].astype(float) if "Open" in history else close
     signal_date = pd.Timestamp(entry["signal_date"])
     start_idx = int(close.index.searchsorted(signal_date, side="left"))
     if start_idx >= len(close):
@@ -115,21 +121,34 @@ def _evaluate_entry(entry: dict, history: pd.DataFrame) -> dict:
         return entry
 
     horizon = int(entry["horizon"])
-    target_idx = start_idx + horizon
-    bars_elapsed = max(0, len(close) - 1 - start_idx)
+    use_next_open = entry.get("execution") == "NEXT_OPEN" or entry.get("entry_price") is None
+    entry_idx = start_idx + 1 if use_next_open else start_idx
+    if entry_idx >= len(open_price):
+        entry["status"] = "open"
+        entry["bars_elapsed"] = 0
+        entry["bars_remaining"] = horizon
+        return entry
+
+    if use_next_open:
+        entry["entry_date"] = str(open_price.index[entry_idx].date())
+        entry["entry_price"] = float(open_price.iloc[entry_idx])
+        entry["execution"] = "NEXT_OPEN"
+
+    target_idx = entry_idx + horizon if use_next_open else start_idx + horizon
+    bars_elapsed = max(0, len(close) - 1 - entry_idx)
     entry["bars_elapsed"] = min(horizon, bars_elapsed)
     entry["bars_remaining"] = max(0, horizon - bars_elapsed)
-    if target_idx >= len(close):
+    if target_idx >= len(open_price):
         entry["status"] = "open"
         return entry
 
-    target_price = float(close.iloc[target_idx])
+    target_price = float(open_price.iloc[target_idx]) if use_next_open else float(close.iloc[target_idx])
     entry_price = float(entry["entry_price"])
     underlying_return = target_price / entry_price - 1
     strategy_return = underlying_return if entry["direction"] == "LONG" else -underlying_return
     entry.update({
         "status": "closed",
-        "target_date": str(close.index[target_idx].date()),
+        "target_date": str(open_price.index[target_idx].date()) if use_next_open else str(close.index[target_idx].date()),
         "target_price": target_price,
         "underlying_return": float(underlying_return),
         "strategy_return": float(strategy_return),
