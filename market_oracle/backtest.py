@@ -8,6 +8,7 @@ from sklearn.metrics import brier_score_loss, roc_auc_score
 from .features import build_features
 from .model import _classification_models, _classification_weights, _model_probabilities, _weighted_prediction
 from .risk import periods_per_year
+from .signals import signal_decision
 
 
 def _execution_returns(data: pd.DataFrame, horizon: int) -> pd.Series:
@@ -30,10 +31,19 @@ def _supervised_execution_frame(
     data: pd.DataFrame, horizon: int, context: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.DataFrame]:
     features = build_features(data, context)
+    # Keep the prediction target aligned with production: close[t+h] > close[t].
+    # Execution P&L is measured separately from next open to future open.
+    close_to_close = data["Close"].astype(float).shift(-horizon) / data["Close"].astype(float) - 1
     realized = _execution_returns(data, horizon)
     prices = _execution_prices(data, horizon)
-    target = (realized > 0).astype(float)
-    valid = features.notna().all(axis=1) & realized.notna() & prices["EntryPrice"].notna() & prices["ExitPrice"].notna()
+    target = (close_to_close > 0).astype(float)
+    valid = (
+        features.notna().all(axis=1)
+        & close_to_close.notna()
+        & realized.notna()
+        & prices["EntryPrice"].notna()
+        & prices["ExitPrice"].notna()
+    )
     return features.loc[valid], target.loc[valid].astype(int), realized.loc[valid], prices.loc[valid]
 
 
@@ -43,12 +53,14 @@ def _fit_backtest_ensemble(
     """Fit the same classifier family as production using only past data."""
     train_end = int(train_end)
     calibration_size = max(45, min(120, train_end // 5))
-    core_end = max(160, train_end - calibration_size - horizon)
-    if core_end >= train_end - 20:
-        core_end = max(160, int(train_end * 0.78))
+    calibration_start = max(180 + horizon, train_end - calibration_size)
+    core_end = max(160, calibration_start - horizon)
+    if calibration_start >= train_end - 20 or core_end >= calibration_start:
+        calibration_start = max(180 + horizon, int(train_end * 0.78))
+        core_end = max(160, calibration_start - horizon)
 
     X_core, y_core = X.iloc[:core_end], y.iloc[:core_end]
-    X_cal, y_cal = X.iloc[core_end:train_end], y.iloc[core_end:train_end]
+    X_cal, y_cal = X.iloc[calibration_start:train_end], y.iloc[calibration_start:train_end]
     if y_core.nunique() < 2:
         raise ValueError("Za mało zróżnicowanych danych w oknie treningowym.")
 
@@ -103,7 +115,10 @@ def walk_forward_backtest(
             float(calibrator.predict_proba(np.array([[raw_probability]]))[:, 1][0])
             if calibrator is not None else raw_probability
         )
-        position = 1 if probability >= threshold else (-1 if probability <= 1 - threshold else 0)
+        # Backtest still only has the classifier leg; expected return is set by direction so
+        # the entry rule stays consistent with production's "probability + direction" gate.
+        expected_direction = 1.0 if probability >= 0.5 else -1.0
+        position = signal_decision(probability, expected_direction, "WYSOKA", threshold)
         gross = position * float(forward.iloc[i])
         total_cost = abs(position) * (cost_bps + slippage_bps) / 10_000
         net = gross - total_cost
@@ -119,6 +134,7 @@ def walk_forward_backtest(
             "GrossReturn": gross,
             "Return": net,
             "ActualUp": int(y.iloc[i]),
+            "ExecutionUp": int(forward.iloc[i] > 0),
         })
     result = pd.DataFrame(records).set_index("Date")
     if result.empty:
@@ -142,6 +158,8 @@ def walk_forward_backtest(
         "hit_rate": float((result.loc[active, "Return"] > 0).mean()) if active.any() else 0.0,
         "auc": float(roc_auc_score(result["ActualUp"], probability)) if result["ActualUp"].nunique() > 1 else 0.5,
         "brier": float(brier_score_loss(result["ActualUp"], probability)),
+        "execution_hit_rate": float((result.loc[active, "GrossReturn"] > 0).mean()) if active.any() else 0.0,
+        "target": "close_to_close",
         "execution": "next_open",
         "cost_bps": float(cost_bps),
         "slippage_bps": float(slippage_bps),

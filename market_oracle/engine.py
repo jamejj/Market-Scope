@@ -9,6 +9,7 @@ from .data import download_history
 from .features import build_features, supervised_frame
 from .model import fit_forecast
 from .risk import risk_metrics
+from .signals import signal_decision
 
 
 def _benchmark_for(symbol: str) -> str | None:
@@ -99,17 +100,23 @@ def signal_label(probability: float, quality: str | None = None) -> str:
 
 
 def observation_label(forecast: dict) -> str:
-    if forecast["quality"].startswith("NISKA"):
+    decision = signal_decision(
+        float(forecast["probability_up"]),
+        float(forecast["expected_return"]),
+        str(forecast["quality"]),
+        threshold=0.55,
+    )
+    if decision == 0 and forecast["quality"].startswith("NISKA"):
         return "BRAK SYGNAŁU"
     probability = forecast["probability_up"]
     expected = forecast["expected_return"]
-    if probability >= 0.62 and expected > 0:
+    if decision == 1 and probability >= 0.62:
         return "SILNY KANDYDAT WZROSTOWY"
-    if probability >= 0.55 and expected > 0:
+    if decision == 1:
         return "KANDYDAT WZROSTOWY"
-    if probability <= 0.38 and expected < 0:
+    if decision == -1 and probability <= 0.38:
         return "SILNE RYZYKO SPADKU"
-    if probability <= 0.45 and expected < 0:
+    if decision == -1:
         return "RYZYKO SPADKU"
     return "OBSERWUJ"
 

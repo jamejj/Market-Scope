@@ -1552,6 +1552,7 @@ with settings:
         - **FAST** — lekki pierwszy przebieg techniczny po całym rynku; służy do odkrywania kandydatów, nie do zapisu sygnałów w Journalu.
         - **ML** — pełna walidowana prognoza modelu dla instrumentów z shortlisty; dopiero te wiersze mogą tworzyć directional signals.
         - **Deep score** — priorytet do pełnego ML, łączący Setup score, momentum, Edge score i kontrolę ryzyka.
+        - **Target modelu** — kierunek close-to-close, zgodny w produkcji i backteście.
         - **Next open execution** — sygnał powstaje po zamknięciu świecy, a test/Journal liczy wejście dopiero od następnego otwarcia.
         - **Auto scan** — można wyłączyć przez `MARKETSCOPE_AUTO_SCAN=0` albo zmienić rytm monitora przez `MARKETSCOPE_SCAN_INTERVAL_HOURS`.
         """)
@@ -1571,7 +1572,7 @@ Widok **Dzisiejszy radar** dodaje trzecią warstwę: priorytet analizy. **Risk/r
 
 Skaner działa dwustopniowo. **FAST Radar** lekko skanuje cały rynek i wybiera shortlistę przez **Deep score**. Potem **Deep ML** trenuje pełne modele tylko dla najlepszych kandydatów i zastępuje ich wiersze FAST wierszami ML. To skraca czas oczekiwania i zmniejsza szum, ale nadal nie jest poleceniem kupna — to kolejność, w jakiej warto sprawdzać setupy.
 
-Backtest i Journal używają bardziej konserwatywnego wykonania: sygnał pojawia się po zamknięciu dnia `t`, wejście jest liczone od otwarcia kolejnej sesji, a wynik uwzględnia koszt oraz uproszczony poślizg. Dzięki temu test nie zakłada nierealistycznego zakupu po cenie, którą znamy dopiero po wygenerowaniu sygnału.
+Backtest używa tej samej definicji celu co produkcja: model przewiduje kierunek **close-to-close**. Wynik finansowy jest liczony osobno bardziej konserwatywnie: sygnał pojawia się po zamknięciu dnia `t`, wejście jest liczone od otwarcia kolejnej sesji, a wynik uwzględnia koszt oraz uproszczony poślizg. Dzięki temu można odróżnić jakość prognozy kierunku od tego, czy dało się ją wykonać po realistycznej cenie.
 
 ### Ochrona przed fałszywie dobrym wynikiem
 

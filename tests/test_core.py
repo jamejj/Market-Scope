@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from market_oracle.backtest import walk_forward_backtest
+from market_oracle.backtest import _supervised_execution_frame, walk_forward_backtest
 from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES
 from market_oracle.engine import observation_label, risk_reward_metrics, scan_market_fast, setup_intelligence, signal_label
 from market_oracle.features import build_features, supervised_frame
@@ -9,6 +9,7 @@ from market_oracle.journal import journal_summary, load_journal, paper_portfolio
 from market_oracle.model import fit_forecast
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
 from market_oracle.risk import periods_per_year, risk_metrics
+from market_oracle.signals import signal_decision
 
 
 def synthetic_data(n=900):
@@ -55,7 +56,33 @@ def test_risk_and_backtest():
     assert np.isfinite(summary["total_return"])
     assert metrics["periods_per_year"] == 252
     assert summary["execution"] == "next_open"
+    assert summary["target"] == "close_to_close"
     assert 0 <= summary["auc"] <= 1
+
+
+def test_backtest_target_is_close_to_close_but_pnl_is_next_open():
+    data = synthetic_data(460)
+    idx = 320
+    signal_day = data.index[idx]
+    next_day = data.index[idx + 1]
+    exit_day = data.index[idx + 2]
+    data.loc[signal_day, "Close"] = 100.0
+    data.loc[next_day, "Close"] = 120.0
+    data.loc[next_day, "Open"] = 100.0
+    data.loc[exit_day, "Open"] = 90.0
+    X, y, realized, prices = _supervised_execution_frame(data, horizon=1)
+    assert signal_day in X.index
+    assert y.loc[signal_day] == 1
+    assert realized.loc[signal_day] < 0
+    assert prices.loc[signal_day, "EntryPrice"] == 100.0
+    assert prices.loc[signal_day, "ExitPrice"] == 90.0
+
+
+def test_signal_decision_is_shared_and_blocks_low_quality():
+    assert signal_decision(0.63, 0.02, "WYSOKA", threshold=0.56) == 1
+    assert signal_decision(0.37, -0.02, "WYSOKA", threshold=0.56) == -1
+    assert signal_decision(0.70, 0.04, "NISKA — BRAK PRZEWAGI", threshold=0.56) == 0
+    assert signal_decision(0.63, -0.01, "WYSOKA", threshold=0.56) == 0
 
 
 def test_crypto_uses_365_day_annualization():
@@ -187,6 +214,12 @@ def test_signal_journal_records_and_evaluates(tmp_path, monkeypatch):
                 "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
                 "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62,
                 "Brier": 0.22, "Jakość modelu": "WYSOKA", "Score": 4.2,
+                "Tryb analizy": "ML",
+            },
+            {
+                "Symbol": "FAST", "Klasa": "USA", "Horyzont": 5, "Data": "2026-01-10",
+                "Cena": 50.0, "Setup": "Breakout / momentum", "Ocena": "KANDYDAT WZROSTOWY",
+                "P(wzrost)": 0.70, "Oczekiwany ruch": 0.05, "Tryb analizy": "FAST",
             },
             {"Symbol": "SKIP", "Horyzont": 5, "Cena": 10.0, "Ocena": "BRAK SYGNAŁU"},
         ],
