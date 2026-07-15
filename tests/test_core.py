@@ -9,7 +9,7 @@ from market_oracle.journal import journal_summary, load_journal, paper_portfolio
 from market_oracle.model import fit_forecast
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
 from market_oracle.risk import periods_per_year, risk_metrics
-from market_oracle.signals import signal_decision
+from market_oracle.signals import SignalInputs, signal_decision, signal_inputs_from_forecast
 
 
 def synthetic_data(n=900):
@@ -58,6 +58,8 @@ def test_risk_and_backtest():
     assert summary["execution"] == "next_open"
     assert summary["target"] == "close_to_close"
     assert 0 <= summary["auc"] <= 1
+    assert "ExpectedReturn" in curve
+    assert "Quality" in curve
 
 
 def test_backtest_target_is_close_to_close_but_pnl_is_next_open():
@@ -70,19 +72,23 @@ def test_backtest_target_is_close_to_close_but_pnl_is_next_open():
     data.loc[next_day, "Close"] = 120.0
     data.loc[next_day, "Open"] = 100.0
     data.loc[exit_day, "Open"] = 90.0
-    X, y, realized, prices = _supervised_execution_frame(data, horizon=1)
+    X, y, model_return, realized, prices = _supervised_execution_frame(data, horizon=1)
     assert signal_day in X.index
     assert y.loc[signal_day] == 1
+    assert model_return.loc[signal_day] > 0
     assert realized.loc[signal_day] < 0
     assert prices.loc[signal_day, "EntryPrice"] == 100.0
     assert prices.loc[signal_day, "ExitPrice"] == 90.0
 
 
 def test_signal_decision_is_shared_and_blocks_low_quality():
-    assert signal_decision(0.63, 0.02, "WYSOKA", threshold=0.56) == 1
-    assert signal_decision(0.37, -0.02, "WYSOKA", threshold=0.56) == -1
-    assert signal_decision(0.70, 0.04, "NISKA — BRAK PRZEWAGI", threshold=0.56) == 0
-    assert signal_decision(0.63, -0.01, "WYSOKA", threshold=0.56) == 0
+    assert signal_decision(SignalInputs(0.63, 0.02, "WYSOKA"), threshold=0.56) == 1
+    assert signal_decision(SignalInputs(0.37, -0.02, "WYSOKA"), threshold=0.56) == -1
+    assert signal_decision(SignalInputs(0.70, 0.04, "NISKA — BRAK PRZEWAGI"), threshold=0.56) == 0
+    assert signal_decision(SignalInputs(0.63, -0.01, "WYSOKA"), threshold=0.56) == 0
+    payload = signal_inputs_from_forecast({"probability_up": 0.61, "expected_return": 0.03, "quality": "UMIARKOWANA"})
+    assert payload.source == "ML"
+    assert signal_decision(payload, threshold=0.56) == 1
 
 
 def test_crypto_uses_365_day_annualization():

@@ -1,14 +1,35 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
 from .features import build_features
-from .model import _classification_models, _classification_weights, _model_probabilities, _weighted_prediction
+from .model import (
+    _classification_models,
+    _classification_weights,
+    _model_probabilities,
+    _regression_models,
+    _regression_weights,
+    _weighted_prediction,
+)
 from .risk import periods_per_year
-from .signals import signal_decision
+from .signals import SignalInputs, signal_decision
+
+
+@dataclass
+class _BacktestEnsemble:
+    class_models: dict[str, object]
+    class_weights: dict[str, float]
+    calibrator: LogisticRegression | None
+    reg_models: dict[str, object]
+    reg_weights: dict[str, float]
+    quality: str
+    validation_auc: float
+    validation_brier: float
 
 
 def _execution_returns(data: pd.DataFrame, horizon: int) -> pd.Series:
@@ -29,28 +50,49 @@ def _execution_prices(data: pd.DataFrame, horizon: int) -> pd.DataFrame:
 
 def _supervised_execution_frame(
     data: pd.DataFrame, horizon: int, context: pd.DataFrame | None = None,
-) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.DataFrame]:
     features = build_features(data, context)
     # Keep the prediction target aligned with production: close[t+h] > close[t].
     # Execution P&L is measured separately from next open to future open.
     close_to_close = data["Close"].astype(float).shift(-horizon) / data["Close"].astype(float) - 1
-    realized = _execution_returns(data, horizon)
+    execution_return = _execution_returns(data, horizon)
     prices = _execution_prices(data, horizon)
     target = (close_to_close > 0).astype(float)
     valid = (
         features.notna().all(axis=1)
         & close_to_close.notna()
-        & realized.notna()
+        & execution_return.notna()
         & prices["EntryPrice"].notna()
         & prices["ExitPrice"].notna()
     )
-    return features.loc[valid], target.loc[valid].astype(int), realized.loc[valid], prices.loc[valid]
+    return (
+        features.loc[valid],
+        target.loc[valid].astype(int),
+        close_to_close.loc[valid],
+        execution_return.loc[valid],
+        prices.loc[valid],
+    )
+
+
+def _quality_from_validation(y_true: pd.Series, probability: np.ndarray) -> tuple[str, float, float]:
+    probability = np.clip(probability, 1e-4, 1 - 1e-4)
+    if len(y_true) < 35 or y_true.nunique() < 2:
+        return "NISKA — BRAK PRZEWAGI", 0.5, 0.25
+    auc = float(roc_auc_score(y_true, probability))
+    brier = float(brier_score_loss(y_true, probability))
+    if auc >= 0.60 and brier <= 0.24:
+        quality = "WYSOKA"
+    elif auc >= 0.55 and brier <= 0.26:
+        quality = "UMIARKOWANA"
+    else:
+        quality = "NISKA — BRAK PRZEWAGI"
+    return quality, auc, brier
 
 
 def _fit_backtest_ensemble(
-    X: pd.DataFrame, y: pd.Series, train_end: int, horizon: int,
-) -> tuple[dict[str, object], dict[str, float], LogisticRegression | None]:
-    """Fit the same classifier family as production using only past data."""
+    X: pd.DataFrame, y: pd.Series, returns: pd.Series, train_end: int, horizon: int,
+) -> _BacktestEnsemble:
+    """Fit the production classifier and expected-return model families on past data."""
     train_end = int(train_end)
     calibration_size = max(45, min(120, train_end // 5))
     calibration_start = max(180 + horizon, train_end - calibration_size)
@@ -61,26 +103,53 @@ def _fit_backtest_ensemble(
 
     X_core, y_core = X.iloc[:core_end], y.iloc[:core_end]
     X_cal, y_cal = X.iloc[calibration_start:train_end], y.iloc[calibration_start:train_end]
+    r_core = returns.iloc[:core_end]
+    r_cal = returns.iloc[calibration_start:train_end]
     if y_core.nunique() < 2:
         raise ValueError("Za mało zróżnicowanych danych w oknie treningowym.")
 
     weight_models = _classification_models()
     for model in weight_models.values():
         model.fit(X_core, y_core)
+    quality = "NISKA — BRAK PRZEWAGI"
+    validation_auc = 0.5
+    validation_brier = 0.25
     if len(X_cal) >= 35 and y_cal.nunique() > 1:
         calibration_predictions = _model_probabilities(weight_models, X_cal)
         weights = _classification_weights(calibration_predictions, y_cal.to_numpy())
         raw_cal = _weighted_prediction(calibration_predictions, weights)
+        quality, validation_auc, validation_brier = _quality_from_validation(y_cal, raw_cal)
         calibrator = LogisticRegression(C=0.5, max_iter=1000)
         calibrator.fit(raw_cal.reshape(-1, 1), y_cal)
     else:
         weights = {"linear": 0.45, "boosting": 0.35, "extra_trees": 0.20}
         calibrator = None
 
+    weight_reg_models = _regression_models()
+    for model in weight_reg_models.values():
+        model.fit(X_core, r_core)
+    if len(X_cal) >= 35:
+        reg_predictions = {name: model.predict(X_cal) for name, model in weight_reg_models.items()}
+        reg_weights = _regression_weights(reg_predictions, r_cal)
+    else:
+        reg_weights = {"ridge": 0.40, "forest": 0.25, "boosting": 0.20, "extra_trees": 0.15}
+
     models = _classification_models()
     for model in models.values():
         model.fit(X.iloc[:train_end], y.iloc[:train_end])
-    return models, weights, calibrator
+    reg_models = _regression_models()
+    for model in reg_models.values():
+        model.fit(X.iloc[:train_end], returns.iloc[:train_end])
+    return _BacktestEnsemble(
+        class_models=models,
+        class_weights=weights,
+        calibrator=calibrator,
+        reg_models=reg_models,
+        reg_weights=reg_weights,
+        quality=quality,
+        validation_auc=validation_auc,
+        validation_brier=validation_brier,
+    )
 
 
 def walk_forward_backtest(
@@ -98,28 +167,39 @@ def walk_forward_backtest(
     exit is the open after the requested horizon. Costs are round-trip bps plus
     simplified slippage bps.
     """
-    X, y, forward, prices = _supervised_execution_frame(data, horizon, context)
+    X, y, model_forward, execution_forward, prices = _supervised_execution_frame(data, horizon, context)
     start = max(300, int(len(X) * 0.55))
     records = []
-    models = None
-    weights: dict[str, float] | None = None
-    calibrator = None
+    state: _BacktestEnsemble | None = None
     for i in range(start, len(X)):
-        if models is None or (i - start) % max(1, refit_every) == 0:
+        if state is None or (i - start) % max(1, refit_every) == 0:
             train_end = i - horizon - 1
             if train_end < 200:
                 continue
-            models, weights, calibrator = _fit_backtest_ensemble(X, y, train_end, horizon)
-        raw_probability = float(_weighted_prediction(_model_probabilities(models, X.iloc[[i]]), weights or {})[0])
-        probability = (
-            float(calibrator.predict_proba(np.array([[raw_probability]]))[:, 1][0])
-            if calibrator is not None else raw_probability
+            state = _fit_backtest_ensemble(X, y, model_forward, train_end, horizon)
+        raw_probability = float(
+            _weighted_prediction(_model_probabilities(state.class_models, X.iloc[[i]]), state.class_weights)[0]
         )
-        # Backtest still only has the classifier leg; expected return is set by direction so
-        # the entry rule stays consistent with production's "probability + direction" gate.
-        expected_direction = 1.0 if probability >= 0.5 else -1.0
-        position = signal_decision(probability, expected_direction, "WYSOKA", threshold)
-        gross = position * float(forward.iloc[i])
+        probability = (
+            float(state.calibrator.predict_proba(np.array([[raw_probability]]))[:, 1][0])
+            if state.calibrator is not None else raw_probability
+        )
+        expected_return = float(
+            _weighted_prediction(
+                {name: model.predict(X.iloc[[i]]) for name, model in state.reg_models.items()},
+                state.reg_weights,
+            )[0]
+        )
+        inputs = SignalInputs(
+            probability=probability,
+            expected_return=expected_return,
+            quality=state.quality,
+            auc=state.validation_auc,
+            brier=state.validation_brier,
+            source="BACKTEST",
+        )
+        position = signal_decision(inputs, threshold)
+        gross = position * float(execution_forward.iloc[i])
         total_cost = abs(position) * (cost_bps + slippage_bps) / 10_000
         net = gross - total_cost
         price_row = prices.iloc[i]
@@ -130,11 +210,15 @@ def walk_forward_backtest(
             "EntryPrice": float(price_row["EntryPrice"]),
             "ExitPrice": float(price_row["ExitPrice"]),
             "Probability": probability,
+            "ExpectedReturn": expected_return,
+            "Quality": state.quality,
+            "ValidationAUC": state.validation_auc,
+            "ValidationBrier": state.validation_brier,
             "Position": position,
             "GrossReturn": gross,
             "Return": net,
             "ActualUp": int(y.iloc[i]),
-            "ExecutionUp": int(forward.iloc[i] > 0),
+            "ExecutionUp": int(execution_forward.iloc[i] > 0),
         })
     result = pd.DataFrame(records).set_index("Date")
     if result.empty:

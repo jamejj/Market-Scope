@@ -15,7 +15,8 @@ Lokalny panel badawczy analizujący akcje, ETF-y i krypto. Generuje probabilisty
 - Today’s Radar z priorytetami analizy, momentum, risk/reward i Edge score;
 - Setup Intelligence z rozbiciem na momentum, trend, kontrolę ryzyka, płynność, model edge i krótką tezę radaru;
 - dwustopniowy skaner: szybki FAST Radar całego rynku oraz Deep ML tylko dla shortlisty;
-- realistyczniejszy walk-forward backtest z ensemble, wejściem na następnym otwarciu, kosztami i poślizgiem;
+- realistyczniejszy walk-forward backtest z tym samym pakietem wejść decyzyjnych co produkcja: probability, expected return i jakość modelu;
+- wejście na następnym otwarciu, koszty oraz poślizg oddzielone od samej trafności prognozy;
 - ranking rynku, analiza ryzyka i backtest walk-forward z kosztami transakcji;
 - Signal Journal i Performance Lab z paper portfolio, kosztami, sizingiem, equity curve i drawdown;
 - zakładka **Model**, która tłumaczy ustawienia oraz neutralne sygnały;
@@ -30,7 +31,7 @@ Na macOS można po prostu kliknąć dwukrotnie plik `Uruchom MarketScope.command
 
 Pełny ranking działa dwustopniowo. Najpierw szybki **FAST Radar** skanuje cały rynek technicznie, a następnie **Deep ML** odpala pełne modele tylko dla shortlisty najciekawszych instrumentów. W tym czasie dashboard pokazuje ranking częściowy i stopniowo zastępuje wiersze FAST wierszami ML.
 
-Model w produkcji i backteście używa tej samej definicji targetu: kierunek close-to-close. Backtest i Journal nie zakładają już wejścia po tej samej cenie zamknięcia, na której powstał sygnał. Sygnał jest generowany po close dnia `t`, a wykonanie liczone jest od następnego open z kosztem i uproszczonym poślizgiem.
+Model w produkcji i backteście używa tej samej definicji targetu: kierunek close-to-close. Finalna decyzja przechodzi przez wspólny pakiet `SignalInputs`, czyli probability, expected return i jakość walidacji. Backtest i Journal nie zakładają już wejścia po tej samej cenie zamknięcia, na której powstał sygnał. Sygnał jest generowany po close dnia `t`, a wykonanie liczone jest od następnego open z kosztem i uproszczonym poślizgiem.
 
 ```bash
 python3 -m venv .venv
