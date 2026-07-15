@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+DEFAULT_SIGNAL_THRESHOLD = 0.55
+
+
 @dataclass(frozen=True)
 class SignalInputs:
     """Auditable input bundle for the final directional gate.
@@ -41,7 +44,9 @@ def signal_inputs_from_forecast(forecast: dict, source: str = "ML") -> SignalInp
     )
 
 
-def signal_verdict(inputs: SignalInputs, threshold: float = 0.56, min_expected_return: float = 0.0) -> SignalVerdict:
+def signal_verdict(
+    inputs: SignalInputs, threshold: float = DEFAULT_SIGNAL_THRESHOLD, min_expected_return: float = 0.0,
+) -> SignalVerdict:
     """Shared directional decision used by production labels and validation.
 
     Returns 1 for long, -1 for short and 0 for no trade. Weak model quality is
@@ -67,5 +72,7 @@ def signal_verdict(inputs: SignalInputs, threshold: float = 0.56, min_expected_r
     return SignalVerdict(0, "PROBABILITY_INSIDE_BAND", "OBSERWUJ")
 
 
-def signal_decision(inputs: SignalInputs, threshold: float = 0.56, min_expected_return: float = 0.0) -> int:
+def signal_decision(
+    inputs: SignalInputs, threshold: float = DEFAULT_SIGNAL_THRESHOLD, min_expected_return: float = 0.0,
+) -> int:
     return signal_verdict(inputs, threshold, min_expected_return).decision

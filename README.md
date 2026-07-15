@@ -19,7 +19,7 @@ Lokalny panel badawczy analizujący akcje, ETF-y i krypto. Generuje probabilisty
 - wejście na następnym otwarciu, koszty oraz poślizg oddzielone od samej trafności prognozy;
 - ranking rynku, analiza ryzyka i backtest walk-forward z kosztami transakcji;
 - Signal Journal i Performance Lab z paper portfolio, kosztami, sizingiem, equity curve i drawdown;
-- Aggregate Validation do zbiorczego sprawdzania edge według symbolu, rynku, horyzontu i folda, z holdoutem, benchmarkami, stress testem kosztów i zapisem również odrzuconych sygnałów;
+- Aggregate Validation do zbiorczego sprawdzania edge według symbolu, rynku, horyzontu i folda, z osobnym holdoutem, fingerprintem danych, benchmarkami, stress testem kosztów i zapisem również odrzuconych sygnałów;
 - zakładka **Model**, która tłumaczy ustawienia oraz neutralne sygnały;
 - automatyczny monitor rynku zapisujący gotowy ranking domyślnie co 6 godzin;
 - adaptacyjny ensemble, który dobiera udział modelu liniowego i nieliniowego na osobnym okresie kalibracji.
@@ -34,7 +34,7 @@ Pełny ranking działa dwustopniowo. Najpierw szybki **FAST Radar** skanuje cał
 
 Model w produkcji i backteście używa tej samej definicji targetu: kierunek close-to-close. Finalna decyzja przechodzi przez wspólny pakiet `SignalInputs`, czyli probability, expected return i jakość walidacji. Backtest i Journal nie zakładają już wejścia po tej samej cenie zamknięcia, na której powstał sygnał. Sygnał jest generowany po close dnia `t`, a wykonanie liczone jest od następnego open z kosztem i uproszczonym poślizgiem.
 
-Moduł Aggregate Validation jest przeznaczony do cięższego egzaminu systemu: chronologicznie przechodzi po wielu instrumentach i horyzontach, zapisuje każdą obserwację decyzyjną oraz powód odrzucenia sygnału. Raport zachowuje metadane train/calibration/test, finalny holdout, benchmarki always-long, buy-hold proxy, momentum i Logistic Regression, stress kosztów 1×/2×/3× oraz koncentrację wyniku. To ma pomóc odpowiedzieć, czy przewaga utrzymuje się szerzej, a nie tylko na pojedynczym szczęśliwym tickerze.
+Moduł Aggregate Validation jest przeznaczony do cięższego egzaminu systemu: chronologicznie przechodzi po wielu instrumentach i horyzontach, zapisuje każdą obserwację decyzyjną oraz powód odrzucenia sygnału. Foldy przed holdoutem są wybierane równomiernie po historii, a nie tylko z początku danych. Raport zachowuje metadane train/calibration/test, osobne summary WALK_FORWARD i HOLDOUT, fingerprint wejściowych danych, zakres dat symboli, benchmarki always-long, buy-hold proxy, momentum i Logistic Regression, stress kosztów 1×/2×/3× oraz koncentrację wyniku. Artefakty walidacji można zapisać append-only do katalogu eksperymentów. To ma pomóc odpowiedzieć, czy przewaga utrzymuje się szerzej, a nie tylko na pojedynczym szczęśliwym tickerze.
 
 ```bash
 python3 -m venv .venv

@@ -15,7 +15,7 @@ from sklearn.metrics import brier_score_loss, roc_auc_score
 from .backtest import _fit_backtest_ensemble, _supervised_execution_frame
 from .data import download_history
 from .model import _model_probabilities, _weighted_prediction
-from .signals import SignalInputs, signal_verdict
+from .signals import DEFAULT_SIGNAL_THRESHOLD, SignalInputs, signal_verdict
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,7 @@ class ValidationConfig:
     """Frozen experiment contract for aggregate validation."""
 
     horizons: tuple[int, ...] = (1, 5, 20)
-    threshold: float = 0.56
+    threshold: float = DEFAULT_SIGNAL_THRESHOLD
     cost_bps: float = 10.0
     slippage_bps: float = 5.0
     initial_train: int = 420
@@ -45,7 +45,7 @@ def _fold_ranges(length: int, horizon: int, config: ValidationConfig) -> list[Fo
     """Return chronological folds with a purge gap before each test block."""
     minimum_train = max(220, config.initial_train)
     test_size = max(20, config.test_size)
-    ranges: list[FoldSpec] = []
+    candidates: list[FoldSpec] = []
     test_start = minimum_train + horizon
     fold_id = 1
     holdout_size = max(0, int(config.holdout_size))
@@ -59,11 +59,19 @@ def _fold_ranges(length: int, horizon: int, config: ValidationConfig) -> list[Fo
         train_end = test_start - horizon
         test_end = min(regular_end, test_start + test_size)
         if train_end >= 220 and test_end - test_start >= 20:
-            ranges.append(FoldSpec(fold_id, train_end, test_start, test_end))
+            candidates.append(FoldSpec(fold_id, train_end, test_start, test_end))
             fold_id += 1
-        if config.max_folds is not None and len(ranges) >= config.max_folds:
-            break
         test_start += test_size
+
+    if config.max_folds is not None and len(candidates) > config.max_folds:
+        selected_positions = np.linspace(0, len(candidates) - 1, config.max_folds, dtype=int)
+        candidates = [candidates[int(position)] for position in dict.fromkeys(selected_positions)]
+        candidates = [
+            FoldSpec(fold_id=index + 1, train_end=fold.train_end, test_start=fold.test_start, test_end=fold.test_end)
+            for index, fold in enumerate(candidates)
+        ]
+    ranges: list[FoldSpec] = candidates
+    fold_id = len(ranges) + 1
     if holdout_start is not None:
         train_end = holdout_start - horizon
         if train_end >= 220 and length - holdout_start >= 20:
@@ -208,6 +216,23 @@ def validate_history(
     return pd.DataFrame(records)
 
 
+def data_fingerprint(histories: dict[str, pd.DataFrame]) -> tuple[str, dict[str, dict]]:
+    """Hash the exact input data used by an experiment."""
+    digest = hashlib.sha256()
+    ranges: dict[str, dict] = {}
+    for symbol in sorted(histories):
+        frame = histories[symbol].sort_index()
+        cols = [col for col in ("Open", "High", "Low", "Close", "Volume") if col in frame]
+        start = str(frame.index.min().date()) if len(frame) else None
+        end = str(frame.index.max().date()) if len(frame) else None
+        ranges[symbol] = {"start": start, "end": end, "rows": int(len(frame))}
+        digest.update(symbol.encode())
+        digest.update(json.dumps(ranges[symbol], sort_keys=True).encode())
+        if cols:
+            digest.update(pd.util.hash_pandas_object(frame[cols], index=True).values.tobytes())
+    return digest.hexdigest()[:24], ranges
+
+
 def aggregate_validate_histories(
     histories: dict[str, pd.DataFrame],
     *,
@@ -229,7 +254,11 @@ def aggregate_validate_histories(
     if not frames:
         return pd.DataFrame()
     non_empty = [frame for frame in frames if not frame.empty]
-    return pd.concat(non_empty, ignore_index=True) if non_empty else pd.DataFrame()
+    result = pd.concat(non_empty, ignore_index=True) if non_empty else pd.DataFrame()
+    fingerprint, ranges = data_fingerprint(histories)
+    result.attrs["data_fingerprint"] = fingerprint
+    result.attrs["data_ranges"] = ranges
+    return result
 
 
 def aggregate_validate_universe(
@@ -270,12 +299,41 @@ def aggregate_validate_universe(
     return frame, errors
 
 
-def _portfolio_daily(frame: pd.DataFrame, return_col: str = "Return") -> pd.Series:
-    if frame.empty or return_col not in frame:
-        return pd.Series(dtype=float)
-    scaled = frame[["Date", "Horizon", return_col]].copy()
-    scaled["Strategy"] = scaled[return_col].astype(float) / scaled["Horizon"].replace(0, np.nan).astype(float)
-    return scaled.groupby("Date")["Strategy"].mean().sort_index().fillna(0.0)
+def _portfolio_timeline(
+    frame: pd.DataFrame, return_col: str = "Return", position_col: str = "Position",
+) -> pd.DataFrame:
+    """Approximate daily portfolio path by keeping positions open from entry to exit."""
+    if frame.empty or return_col not in frame or position_col not in frame:
+        return pd.DataFrame(columns=["Return", "ActivePositions", "Entries"])
+    active = frame[frame[position_col] != 0].copy()
+    if active.empty:
+        return pd.DataFrame(columns=["Return", "ActivePositions", "Entries"])
+    rows: list[dict] = []
+    entry_counts: dict[pd.Timestamp, int] = {}
+    for _, trade in active.iterrows():
+        entry = pd.Timestamp(trade["EntryDate"]).normalize()
+        exit_date = pd.Timestamp(trade["ExitDate"]).normalize()
+        if pd.isna(entry) or pd.isna(exit_date):
+            continue
+        if exit_date < entry:
+            exit_date = entry
+        holding_dates = pd.date_range(entry, exit_date, freq="D")
+        if holding_dates.empty:
+            holding_dates = pd.DatetimeIndex([entry])
+        daily_piece = float(trade[return_col]) / len(holding_dates)
+        entry_counts[entry] = entry_counts.get(entry, 0) + 1
+        for date in holding_dates:
+            rows.append({"Date": date, "PositionReturn": daily_piece})
+    if not rows:
+        return pd.DataFrame(columns=["Return", "ActivePositions", "Entries"])
+    path = pd.DataFrame(rows)
+    grouped = path.groupby("Date")["PositionReturn"].agg(["mean", "count"]).rename(
+        columns={"mean": "Return", "count": "ActivePositions"}
+    )
+    all_days = pd.date_range(grouped.index.min(), grouped.index.max(), freq="D")
+    grouped = grouped.reindex(all_days, fill_value=0.0)
+    grouped["Entries"] = [entry_counts.get(pd.Timestamp(day), 0) for day in grouped.index]
+    return grouped
 
 
 def _risk_stats(daily: pd.Series) -> dict[str, float]:
@@ -379,6 +437,8 @@ def experiment_manifest(
     symbols: list[str] | tuple[str, ...] | dict[str, str],
     *,
     commit_hash: str | None = None,
+    data_fingerprint_value: str | None = None,
+    data_ranges: dict | None = None,
 ) -> dict:
     universe = sorted(symbols.keys() if isinstance(symbols, dict) else symbols)
     commit = commit_hash or _current_commit()
@@ -386,6 +446,8 @@ def experiment_manifest(
         "commit": commit,
         "config": asdict(config),
         "universe": universe,
+        "data_fingerprint": data_fingerprint_value,
+        "data_ranges": data_ranges or {},
         "engine": "SignalInputs+classifier/regression ensemble",
         "target": "close_to_close",
         "execution": "next_open",
@@ -428,10 +490,10 @@ def aggregate_summary(frame: pd.DataFrame) -> dict:
     losses = -returns[returns < 0].sum()
     probability = frame["Probability"].clip(1e-4, 1 - 1e-4)
     rejection_reasons = frame.loc[~active, "DecisionReason"].value_counts().to_dict()
-    daily = _portfolio_daily(frame)
-    risk = _risk_stats(daily)
-    concurrent = frame.loc[active].groupby("Date")["Position"].count() if active.any() else pd.Series(dtype=float)
+    timeline = _portfolio_timeline(frame)
+    risk = _risk_stats(timeline["Return"] if not timeline.empty else pd.Series(dtype=float))
     ci = bootstrap_mean_return(frame, samples=250)
+    active_days = timeline["ActivePositions"] > 0 if not timeline.empty else pd.Series(dtype=bool)
     return {
         "observations": int(len(frame)),
         "trades": int(active.sum()),
@@ -443,9 +505,9 @@ def aggregate_summary(frame: pd.DataFrame) -> dict:
         "expectancy_ci_95": ci,
         "profit_factor": float(gains / losses) if losses > 0 else (None if gains == 0 else float("inf")),
         "hit_rate": float((returns > 0).mean()) if len(returns) else None,
-        "exposure": float(active.mean()),
-        "avg_concurrent_positions": float(concurrent.mean()) if len(concurrent) else 0.0,
-        "turnover_per_day": float(active.sum() / max(1, frame["Date"].nunique())),
+        "exposure": float(active_days.mean()) if len(active_days) else 0.0,
+        "avg_concurrent_positions": float(timeline["ActivePositions"].mean()) if not timeline.empty else 0.0,
+        "turnover_per_day": float(timeline["Entries"].sum() / max(1, len(timeline))) if not timeline.empty else 0.0,
         **risk,
         "auc": float(roc_auc_score(frame["ActualUp"], probability)) if frame["ActualUp"].nunique() > 1 else 0.5,
         "brier": float(brier_score_loss(frame["ActualUp"], probability)),
@@ -495,13 +557,46 @@ def validation_report(
     symbols: list[str] | tuple[str, ...] | dict[str, str],
     *,
     commit_hash: str | None = None,
+    data_fingerprint_value: str | None = None,
+    data_ranges: dict | None = None,
 ) -> dict:
     """Produce an auditable experiment report without hiding weak groups."""
+    walk_forward = frame[frame["FoldType"] != "HOLDOUT"].copy() if not frame.empty else frame
+    holdout = frame[frame["FoldType"] == "HOLDOUT"].copy() if not frame.empty else frame
+    fingerprint = data_fingerprint_value or frame.attrs.get("data_fingerprint")
+    ranges = data_ranges or frame.attrs.get("data_ranges")
     return {
-        "manifest": experiment_manifest(config, symbols, commit_hash=commit_hash),
-        "summary": aggregate_summary(frame),
-        "by_market": group_summary(frame, "Market").to_dict("records"),
-        "by_symbol": group_summary(frame, "Symbol").to_dict("records"),
-        "by_horizon": group_summary(frame, "Horizon").to_dict("records"),
+        "manifest": experiment_manifest(
+            config,
+            symbols,
+            commit_hash=commit_hash,
+            data_fingerprint_value=fingerprint,
+            data_ranges=ranges,
+        ),
+        "summary": aggregate_summary(walk_forward),
+        "holdout_summary": aggregate_summary(holdout),
+        "combined_summary": aggregate_summary(frame),
+        "by_market": group_summary(walk_forward, "Market").to_dict("records"),
+        "by_symbol": group_summary(walk_forward, "Symbol").to_dict("records"),
+        "by_horizon": group_summary(walk_forward, "Horizon").to_dict("records"),
         "by_fold": group_summary(frame, ["FoldType", "Fold"]).to_dict("records"),
+    }
+
+
+def save_validation_artifacts(frame: pd.DataFrame, report: dict, output_dir: str | Path) -> dict[str, str]:
+    """Persist raw records and report; manifest log is append-only."""
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    experiment_id = str(report["manifest"]["experiment_id"])
+    records_path = output / f"records_{experiment_id}.csv"
+    report_path = output / f"report_{experiment_id}.json"
+    manifest_log = output / "manifest.jsonl"
+    frame.to_csv(records_path, index=False)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+    with manifest_log.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(report["manifest"], ensure_ascii=False, default=str) + "\n")
+    return {
+        "records": str(records_path),
+        "report": str(report_path),
+        "manifest_log": str(manifest_log),
     }

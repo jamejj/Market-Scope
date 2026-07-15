@@ -9,13 +9,16 @@ from market_oracle.journal import journal_summary, load_journal, paper_portfolio
 from market_oracle.model import fit_forecast
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
 from market_oracle.risk import periods_per_year, risk_metrics
-from market_oracle.signals import SignalInputs, signal_decision, signal_inputs_from_forecast
+from market_oracle.signals import DEFAULT_SIGNAL_THRESHOLD, SignalInputs, signal_decision, signal_inputs_from_forecast
 from market_oracle.validation import (
     ValidationConfig,
+    _fold_ranges,
     aggregate_summary,
     aggregate_validate_histories,
     cost_stress_summary,
+    data_fingerprint,
     group_summary,
+    save_validation_artifacts,
     validation_report,
 )
 
@@ -99,11 +102,13 @@ def test_signal_decision_is_shared_and_blocks_low_quality():
     assert signal_decision(payload, threshold=0.56) == 1
 
 
-def test_aggregate_validation_keeps_rejected_observations():
+def test_aggregate_validation_keeps_rejected_observations(tmp_path):
     histories = {"AAA": synthetic_data(560), "BBB": synthetic_data(580)}
     config = ValidationConfig(horizons=(1,), initial_train=260, test_size=25, max_folds=1, holdout_size=25)
+    assert config.threshold == DEFAULT_SIGNAL_THRESHOLD
     frame = aggregate_validate_histories(histories, markets={"AAA": "USA", "BBB": "ETF"}, config=config)
     assert not frame.empty
+    assert frame.attrs["data_fingerprint"]
     assert set(frame["Symbol"]) == {"AAA", "BBB"}
     assert frame["Fold"].nunique() >= 1
     assert "HOLDOUT" in set(frame["FoldType"])
@@ -113,6 +118,7 @@ def test_aggregate_validation_keeps_rejected_observations():
     assert "AlwaysLongReturn" in frame
     assert "MomentumReturn" in frame
     assert "LinearReturn" in frame
+    assert "ActivePositions" not in frame
     assert frame["Position"].isin([-1, 0, 1]).all()
     assert (frame["Position"] == 0).any()
     summary = aggregate_summary(frame)
@@ -121,15 +127,35 @@ def test_aggregate_validation_keeps_rejected_observations():
     assert summary["non_overlapping_trades"] <= summary["trades"]
     assert "benchmark_mean_returns" in summary
     assert "cost_stress" in summary
+    assert 0 <= summary["exposure"] <= 1
     assert 0 <= summary["auc"] <= 1
     stress = cost_stress_summary(frame)
     assert set(stress) == {"1x", "2x", "3x"}
     report = validation_report(frame, config, ["AAA", "BBB"], commit_hash="test")
     assert report["manifest"]["commit"] == "test"
+    assert report["manifest"]["data_fingerprint"] == frame.attrs["data_fingerprint"]
     assert report["manifest"]["experiment_id"]
+    assert report["summary"]["observations"] < report["combined_summary"]["observations"]
+    assert report["holdout_summary"]["observations"] > 0
     assert report["by_fold"]
+    written = save_validation_artifacts(frame, report, tmp_path)
+    assert pd.read_json(written["manifest_log"], lines=True).iloc[-1]["experiment_id"] == report["manifest"]["experiment_id"]
+    fingerprint, ranges = data_fingerprint(histories)
+    assert fingerprint == frame.attrs["data_fingerprint"]
+    assert ranges["AAA"]["rows"] == len(histories["AAA"])
     by_market = group_summary(frame, "Market")
     assert set(by_market["Market"]) == {"USA", "ETF"}
+
+
+def test_fold_selection_is_evenly_distributed_before_holdout():
+    folds = _fold_ranges(length=900, horizon=5, config=ValidationConfig(initial_train=260, test_size=40, max_folds=4, holdout_size=80))
+    walk = [fold for fold in folds if fold.fold_type == "WALK_FORWARD"]
+    holdout = [fold for fold in folds if fold.fold_type == "HOLDOUT"]
+    assert len(walk) == 4
+    assert len(holdout) == 1
+    assert walk[0].test_start < walk[1].test_start < walk[2].test_start < walk[3].test_start
+    assert walk[-1].test_end <= holdout[0].test_start - 5
+    assert walk[-1].test_start > walk[1].test_start
 
 
 def test_crypto_uses_365_day_annualization():

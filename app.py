@@ -22,6 +22,7 @@ from market_oracle.journal import (
 )
 from market_oracle.monitor import default_universe, load_snapshot, snapshot_is_stale
 from market_oracle.search import search_assets
+from market_oracle.signals import DEFAULT_SIGNAL_THRESHOLD
 
 
 st.set_page_config(page_title="MarketScope PRO", page_icon="📈", layout="wide")
@@ -1469,7 +1470,7 @@ with backtest:
     bt_symbol = st.text_input("Symbol", "SPY", help="Np. AAPL, CDR.WA, SPY, BTC-USD", key="bt_symbol").strip().upper()
     b1, b2, b3, b4 = st.columns(4)
     bt_horizon = b1.selectbox("Horyzont", [1, 5, 20, 60], index=1, key="bt_horizon")
-    threshold = b2.slider("Minimalna pewność wejścia", 0.51, 0.70, 0.56, 0.01, key="bt_threshold")
+    threshold = b2.slider("Minimalna pewność wejścia", 0.51, 0.70, DEFAULT_SIGNAL_THRESHOLD, 0.01, key="bt_threshold")
     cost_bps = b3.number_input("Koszt transakcji (punkty bazowe)", 0.0, 100.0, 10.0, 1.0, key="bt_cost")
     slippage_bps = b4.number_input("Poślizg (punkty bazowe)", 0.0, 100.0, 5.0, 1.0, key="bt_slippage")
     if st.button("Uruchom test historyczny", type="primary", key="bt_run", use_container_width=True):
@@ -1555,7 +1556,7 @@ with settings:
         - **Target modelu** — kierunek close-to-close, zgodny w produkcji i backteście.
         - **SignalInputs** — wspólny pakiet finalnej decyzji: P(wzrost), oczekiwany ruch i jakość modelu. Produkcja i backtest używają tej samej bramki decyzyjnej.
         - **DecisionReason** — audyt decyzji: potwierdzony LONG/SHORT albo powód odrzucenia, np. niska jakość, brak przebicia progu lub konflikt probability z expected return.
-        - **Aggregate Validation** — cięższy egzamin edge: foldy train/cal/test, holdout, benchmarki, stress kosztów i analiza koncentracji wyniku.
+        - **Aggregate Validation** — cięższy egzamin edge: foldy train/cal/test rozłożone po historii, osobny holdout, fingerprint danych, benchmarki, stress kosztów i analiza koncentracji wyniku.
         - **Next open execution** — sygnał powstaje po zamknięciu świecy, a test/Journal liczy wejście dopiero od następnego otwarcia.
         - **Auto scan** — można wyłączyć przez `MARKETSCOPE_AUTO_SCAN=0` albo zmienić rytm monitora przez `MARKETSCOPE_SCAN_INTERVAL_HOURS`.
         """)
@@ -1577,7 +1578,7 @@ Skaner działa dwustopniowo. **FAST Radar** lekko skanuje cały rynek i wybiera 
 
 Backtest używa tej samej definicji celu co produkcja: model przewiduje kierunek **close-to-close**. Finalny sygnał przechodzi przez wspólny obiekt decyzyjny **SignalInputs**: skalibrowane prawdopodobieństwo, expected return z ensemble regresyjnego oraz jakość walidacji. Dzięki temu backtest nie testuje już luźno podobnej strategii opartej tylko o próg prawdopodobieństwa, tylko coraz wierniej odtwarza produkcyjną bramkę sygnału. Wynik finansowy jest liczony osobno bardziej konserwatywnie: sygnał pojawia się po zamknięciu dnia `t`, wejście jest liczone od otwarcia kolejnej sesji, a wynik uwzględnia koszt oraz uproszczony poślizg. Dzięki temu można odróżnić jakość prognozy kierunku od tego, czy dało się ją wykonać po realistycznej cenie.
 
-**Aggregate Validation** to osobny, cięższy egzamin systemu. Przechodzi chronologicznie po wielu tickerach i horyzontach, w każdym foldzie trenuje tylko na wcześniejszej historii, zostawia purge gap, a później zapisuje każdą potencjalną decyzję: również te odrzucone. Raport zachowuje metadane train/calibration/test, finalny holdout, identyfikator eksperymentu, timestamp i commit hash. Porównuje MarketScope z always-long, buy-hold proxy, prostym momentum i samotną Logistic Regression, liczy stress kosztów 1×/2×/3×, niepokrywające się transakcje, ekspozycję, drawdown, Sharpe/Sortino i koncentrację wyniku. To pozwala sprawdzić, czy wynik nie pochodzi z jednego szczęśliwego instrumentu, jednego okresu albo kilku najlepszych transakcji.
+**Aggregate Validation** to osobny, cięższy egzamin systemu. Przechodzi chronologicznie po wielu tickerach i horyzontach, w każdym foldzie trenuje tylko na wcześniejszej historii, zostawia purge gap, a później zapisuje każdą potencjalną decyzję: również te odrzucone. Foldy rozwojowe są rozłożone po historii, a holdout jest raportowany osobno, żeby nie mieszać okresu egzaminacyjnego z okresem roboczym. Raport zachowuje metadane train/calibration/test, fingerprint danych, zakres dat instrumentów, identyfikator eksperymentu, timestamp i commit hash. Porównuje MarketScope z always-long, buy-hold proxy, prostym momentum i samotną Logistic Regression, liczy stress kosztów 1×/2×/3×, niepokrywające się transakcje, ekspozycję w czasie trwania pozycji, drawdown, Sharpe/Sortino i koncentrację wyniku. To nadal nie jest pełny broker-grade symulator portfela z intrapozycyjną ścieżką ceny, ale jest uczciwsze niż liczenie całego wyniku w dniu sygnału.
 
 ### Ochrona przed fałszywie dobrym wynikiem
 
@@ -1588,6 +1589,7 @@ Backtest używa tej samej definicji celu co produkcja: model przewiduje kierunek
 - backtest jest chronologiczny walk-forward i uwzględnia koszt transakcji;
 - Aggregate Validation zapisuje powód każdej decyzji, także odrzuconych sygnałów;
 - raport Aggregate Validation pokazuje benchmarki, holdout, stress kosztów oraz koncentrację zysków;
+- manifest Aggregate Validation obejmuje commit, konfigurację, universe, fingerprint danych i zakres dat;
 - aplikacja pokazuje przedział niepewności oraz jakość poza próbką;
 - skaner nie składa zleceń, nie korzysta z dźwigni i nie obiecuje zysku.
 

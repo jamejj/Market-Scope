@@ -17,7 +17,7 @@ from .model import (
     _weighted_prediction,
 )
 from .risk import periods_per_year
-from .signals import SignalInputs, signal_verdict
+from .signals import DEFAULT_SIGNAL_THRESHOLD, SignalInputs, signal_verdict
 
 
 @dataclass
@@ -163,7 +163,7 @@ def _fit_backtest_ensemble(
 def walk_forward_backtest(
     data: pd.DataFrame,
     horizon: int = 5,
-    threshold: float = 0.56,
+    threshold: float = DEFAULT_SIGNAL_THRESHOLD,
     cost_bps: float = 10,
     slippage_bps: float = 5,
     context: pd.DataFrame | None = None,
