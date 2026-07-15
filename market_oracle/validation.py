@@ -52,7 +52,9 @@ def _fold_ranges(length: int, horizon: int, config: ValidationConfig) -> list[Fo
     fold_id = 1
     holdout_size = max(0, int(config.holdout_size))
     holdout_start: int | None = None
-    regular_end = length - horizon
+    # X already excludes rows without a future target and next-open execution
+    # price. Without a reserved holdout we can therefore use every valid row.
+    regular_end = length
     if holdout_size >= 20 and length - holdout_size >= minimum_train + horizon + 20:
         holdout_start = length - holdout_size
         regular_end = max(minimum_train + horizon, holdout_start - horizon)

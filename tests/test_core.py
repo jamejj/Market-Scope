@@ -24,6 +24,7 @@ from market_oracle.validation import (
     save_validation_artifacts,
     validation_report,
 )
+import market_oracle.validation as validation_module
 
 
 def synthetic_data(n=900):
@@ -206,6 +207,68 @@ def test_fold_selection_is_evenly_distributed_before_holdout():
     assert walk[0].test_start < walk[1].test_start < walk[2].test_start < walk[3].test_start
     assert walk[-1].test_end <= holdout[0].test_start - 5
     assert walk[-1].test_start > walk[1].test_start
+
+
+def test_validation_uses_all_valid_rows_without_holdout_and_freezes_between_refits(monkeypatch):
+    folds = _fold_ranges(
+        length=500,
+        horizon=5,
+        config=ValidationConfig(initial_train=260, test_size=90, max_folds=None, holdout_size=0),
+    )
+    assert folds[-1].test_end == 500
+    assert {fold.fold_type for fold in folds} == {"WALK_FORWARD"}
+
+    class FakeLinear:
+        def predict_proba(self, X):
+            return np.repeat([[0.45, 0.55]], len(X), axis=0)
+
+    class FakeState:
+        def __init__(self, history_end: int):
+            self.history_end = history_end
+            self.model_train_end = max(1, history_end - 80)
+            self.calibration_start = None
+            self.calibration_end = None
+            self.assessment_start = max(0, history_end - 40)
+            self.assessment_end = history_end
+            self.class_models = {"linear": FakeLinear()}
+            self.quality = "UMIARKOWANA"
+            self.auc = 0.60
+            self.brier = 0.23
+
+        def predict(self, X):
+            from market_oracle.model import ForecastPrediction
+
+            return ForecastPrediction(
+                probability_up=0.58,
+                expected_return=0.02,
+                lower_return=-0.03,
+                upper_return=0.05,
+                raw_probability=0.58,
+                raw_expected_return=0.02,
+                skill=0.5,
+                quality=self.quality,
+                auc=self.auc,
+                brier=self.brier,
+            )
+
+    train_lengths = []
+
+    def fake_fit_state(X, y, returns, horizon):
+        train_lengths.append(len(X))
+        return FakeState(len(X))
+
+    monkeypatch.setattr(validation_module, "fit_forecast_state", fake_fit_state)
+    config = ValidationConfig(
+        horizons=(1,), initial_train=260, test_size=20, max_folds=1, holdout_size=0, refit_every=5,
+    )
+    frame = validation_module.validate_history("AAA", synthetic_data(620), market="USA", config=config)
+    walk = frame[frame["FoldType"] == "WALK_FORWARD"].sort_values("Date").reset_index(drop=True)
+    assert len(walk) == 20
+    assert train_lengths[:4] == [260, 265, 270, 275]
+    assert walk.loc[:4, "TrainEndDate"].nunique() == 1
+    assert walk.loc[0, "TrainEndDate"] == walk.loc[0, "AvailableTrainEndDate"]
+    assert walk.loc[4, "TrainEndDate"] != walk.loc[4, "AvailableTrainEndDate"]
+    assert walk.loc[5, "TrainEndDate"] == walk.loc[5, "AvailableTrainEndDate"]
 
 
 def test_crypto_uses_365_day_annualization():
