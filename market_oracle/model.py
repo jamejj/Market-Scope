@@ -14,6 +14,8 @@ from sklearn.metrics import accuracy_score, brier_score_loss, mean_absolute_erro
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import RobustScaler
 
+from .signals import SignalInputs
+
 
 @dataclass
 class Forecast:
@@ -33,6 +35,88 @@ class Forecast:
     validation_folds: int
     samples: int
     importance: pd.Series
+
+
+@dataclass
+class ForecastPrediction:
+    probability_up: float
+    expected_return: float
+    lower_return: float
+    upper_return: float
+    raw_probability: float
+    raw_expected_return: float
+    skill: float
+    quality: str
+    auc: float
+    brier: float
+
+    def signal_inputs(self, source: str = "ML") -> SignalInputs:
+        return SignalInputs(
+            probability=self.probability_up,
+            expected_return=self.expected_return,
+            quality=self.quality,
+            auc=self.auc,
+            brier=self.brier,
+            source=source,
+        )
+
+
+@dataclass
+class FittedForecastState:
+    """Shared fitted model state used by production, backtest and validation."""
+
+    class_models: dict[str, object]
+    class_weights: dict[str, float]
+    calibrator: LogisticRegression | None
+    reg_models: dict[str, object]
+    reg_weights: dict[str, float]
+    quality: str
+    auc: float
+    brier: float
+    accuracy: float
+    baseline_accuracy: float
+    skill: float
+    validation_start: str
+    validation_end: str
+    validation_folds: int
+    samples: int
+    importance: pd.Series
+    residual_q05: float
+    residual_q95: float
+    sigma: float
+    history_end: int
+    model_train_end: int
+    calibration_start: int | None
+    calibration_end: int | None
+    assessment_start: int
+    assessment_end: int
+
+    def predict(self, latest: pd.DataFrame) -> ForecastPrediction:
+        raw_probability = float(_weighted_prediction(_model_probabilities(self.class_models, latest), self.class_weights)[0])
+        calibrated_probability = (
+            float(self.calibrator.predict_proba(np.array([[raw_probability]]))[:, 1][0])
+            if self.calibrator is not None else raw_probability
+        )
+        probability = 0.5 + self.skill * (calibrated_probability - 0.5)
+        latest_reg_predictions = {name: model.predict(latest) for name, model in self.reg_models.items()}
+        raw_expected = float(_weighted_prediction(latest_reg_predictions, self.reg_weights)[0])
+        expected = raw_expected * self.skill
+        lower = float(expected + self.residual_q05) if np.isfinite(self.residual_q05) else expected - 1.645 * self.sigma
+        upper = float(expected + self.residual_q95) if np.isfinite(self.residual_q95) else expected + 1.645 * self.sigma
+        if lower >= upper:
+            lower, upper = expected - 1.645 * self.sigma, expected + 1.645 * self.sigma
+        return ForecastPrediction(
+            probability_up=float(np.clip(probability, 0.02, 0.98)),
+            expected_return=float(expected),
+            lower_return=float(lower),
+            upper_return=float(upper),
+            raw_probability=float(calibrated_probability),
+            raw_expected_return=float(raw_expected),
+            skill=float(self.skill),
+            quality=self.quality,
+            auc=float(self.auc),
+            brier=float(self.brier),
+        )
 
 
 def _classification_models() -> dict[str, object]:
@@ -192,7 +276,7 @@ def _importance(models: dict[str, object], weights: dict[str, float], columns: p
     return importance.sort_values(ascending=False).head(8)
 
 
-def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.DataFrame, horizon: int) -> Forecast:
+def fit_forecast_state(X: pd.DataFrame, y: pd.Series, returns: pd.Series, horizon: int) -> FittedForecastState:
     if len(X) < 250 or y.nunique() < 2:
         raise ValueError("Za mało zróżnicowanych danych do treningu modelu.")
     split = max(200, int(len(X) * 0.78))
@@ -254,10 +338,6 @@ def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.D
     production_models = _classification_models()
     for model in production_models.values():
         model.fit(X, y)
-    raw_prob = float(_weighted_prediction(_model_probabilities(production_models, latest), model_weights)[0])
-    if calibrator is not None:
-        raw_prob = float(calibrator.predict_proba(np.array([[raw_prob]]))[:, 1][0])
-    probability = 0.5 + skill * (raw_prob - 0.5)
 
     eval_reg_models = _regression_models()
     for model in eval_reg_models.values():
@@ -270,26 +350,60 @@ def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.D
     production_reg_models = _regression_models()
     for model in production_reg_models.values():
         model.fit(X, returns)
-    latest_reg_predictions = {name: model.predict(latest) for name, model in production_reg_models.items()}
-    expected = float(_weighted_prediction(latest_reg_predictions, reg_weights)[0])
-    expected *= skill
     sigma = float(max(residual.std(), r_valid.std() * 0.35, 1e-4))
-    lower = float(expected + residual.quantile(0.05)) if len(residual) >= 30 else expected - 1.645 * sigma
-    upper = float(expected + residual.quantile(0.95)) if len(residual) >= 30 else expected + 1.645 * sigma
-    if lower >= upper:
-        lower, upper = expected - 1.645 * sigma, expected + 1.645 * sigma
 
     importance = _importance(production_models, model_weights, X.columns)
     accuracy = float(accuracy_score(y_valid, valid_prob >= 0.5))
     positive_rate = float(y_valid.mean())
-    return Forecast(
-        probability_up=float(np.clip(probability, 0.02, 0.98)), expected_return=expected,
-        lower_return=lower, upper_return=upper,
-        accuracy=accuracy, auc=float(auc), brier=brier, quality=quality,
+    residual_q05 = float(residual.quantile(0.05)) if len(residual) >= 30 else float("nan")
+    residual_q95 = float(residual.quantile(0.95)) if len(residual) >= 30 else float("nan")
+    return FittedForecastState(
+        class_models=production_models,
+        class_weights={name: float(weight) for name, weight in model_weights.items()},
+        calibrator=calibrator,
+        reg_models=production_reg_models,
+        reg_weights={name: float(weight) for name, weight in reg_weights.items()},
+        quality=quality,
+        auc=float(auc),
+        brier=brier,
+        accuracy=accuracy,
         baseline_accuracy=max(positive_rate, 1 - positive_rate),
-        validation_start=str(X_valid.index[0].date()), validation_end=str(X_valid.index[-1].date()),
-        linear_weight=float(model_weights.get("linear", 0.0)),
-        model_weights={name: float(weight) for name, weight in model_weights.items()},
+        skill=skill,
+        validation_start=str(X_valid.index[0].date()),
+        validation_end=str(X_valid.index[-1].date()),
         validation_folds=validation_folds,
-        samples=len(X), importance=importance,
+        samples=len(X),
+        importance=importance,
+        residual_q05=residual_q05,
+        residual_q95=residual_q95,
+        sigma=sigma,
+        history_end=len(X),
+        model_train_end=train_end,
+        calibration_start=split if use_calibration else None,
+        calibration_end=calibration_end if use_calibration else None,
+        assessment_start=assessment_start if use_calibration else split,
+        assessment_end=len(X),
+    )
+
+
+def fit_forecast(X: pd.DataFrame, y: pd.Series, returns: pd.Series, latest: pd.DataFrame, horizon: int) -> Forecast:
+    state = fit_forecast_state(X, y, returns, horizon)
+    prediction = state.predict(latest)
+    return Forecast(
+        probability_up=prediction.probability_up,
+        expected_return=prediction.expected_return,
+        lower_return=prediction.lower_return,
+        upper_return=prediction.upper_return,
+        accuracy=state.accuracy,
+        auc=state.auc,
+        brier=state.brier,
+        quality=state.quality,
+        baseline_accuracy=state.baseline_accuracy,
+        validation_start=state.validation_start,
+        validation_end=state.validation_end,
+        linear_weight=float(state.class_weights.get("linear", 0.0)),
+        model_weights=state.class_weights,
+        validation_folds=state.validation_folds,
+        samples=state.samples,
+        importance=state.importance,
     )

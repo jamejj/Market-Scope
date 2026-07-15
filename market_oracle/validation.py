@@ -12,10 +12,10 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
-from .backtest import _fit_backtest_ensemble, _supervised_execution_frame
+from .backtest import _supervised_execution_frame
 from .data import download_history
-from .model import _model_probabilities, _weighted_prediction
-from .signals import DEFAULT_SIGNAL_THRESHOLD, SignalInputs, signal_verdict
+from .model import fit_forecast_state
+from .signals import DEFAULT_SIGNAL_THRESHOLD, signal_verdict
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,7 @@ class FoldSpec:
 
 def _fold_ranges(length: int, horizon: int, config: ValidationConfig) -> list[FoldSpec]:
     """Return chronological folds with a purge gap before each test block."""
-    minimum_train = max(220, config.initial_train)
+    minimum_train = max(250, config.initial_train)
     test_size = max(20, config.test_size)
     candidates: list[FoldSpec] = []
     test_start = minimum_train + horizon
@@ -58,7 +58,7 @@ def _fold_ranges(length: int, horizon: int, config: ValidationConfig) -> list[Fo
     while test_start < regular_end:
         train_end = test_start - horizon
         test_end = min(regular_end, test_start + test_size)
-        if train_end >= 220 and test_end - test_start >= 20:
+        if train_end >= 250 and test_end - test_start >= 20:
             candidates.append(FoldSpec(fold_id, train_end, test_start, test_end))
             fold_id += 1
         test_start += test_size
@@ -74,7 +74,7 @@ def _fold_ranges(length: int, horizon: int, config: ValidationConfig) -> list[Fo
     fold_id = len(ranges) + 1
     if holdout_start is not None:
         train_end = holdout_start - horizon
-        if train_end >= 220 and length - holdout_start >= 20:
+        if train_end >= 250 and length - holdout_start >= 20:
             ranges.append(FoldSpec(fold_id, train_end, holdout_start, length, "HOLDOUT"))
     return ranges
 
@@ -95,27 +95,8 @@ def _signal_record(
     threshold: float,
     total_cost: float,
 ) -> dict:
-    raw_probability = float(
-        _weighted_prediction(_model_probabilities(state.class_models, X.iloc[[index_position]]), state.class_weights)[0]
-    )
-    probability = (
-        float(state.calibrator.predict_proba(np.array([[raw_probability]]))[:, 1][0])
-        if state.calibrator is not None else raw_probability
-    )
-    expected_return = float(
-        _weighted_prediction(
-            {name: model.predict(X.iloc[[index_position]]) for name, model in state.reg_models.items()},
-            state.reg_weights,
-        )[0]
-    )
-    inputs = SignalInputs(
-        probability=probability,
-        expected_return=expected_return,
-        quality=state.quality,
-        auc=state.validation_auc,
-        brier=state.validation_brier,
-        source="AGGREGATE_VALIDATION",
-    )
+    prediction = state.predict(X.iloc[[index_position]])
+    inputs = prediction.signal_inputs(source="AGGREGATE_VALIDATION")
     verdict = signal_verdict(inputs, threshold)
     position = verdict.decision
     gross = position * float(execution_forward.iloc[index_position])
@@ -135,10 +116,12 @@ def _signal_record(
         "Horizon": int(horizon),
         "Fold": int(fold.fold_id),
         "FoldType": fold.fold_type,
-        "TrainEndDate": X.index[state.train_end - 1],
-        "CoreEndDate": X.index[state.core_end - 1],
-        "CalibrationStartDate": X.index[state.calibration_start],
-        "CalibrationEndDate": X.index[state.calibration_end - 1],
+        "TrainEndDate": X.index[state.history_end - 1],
+        "CoreEndDate": X.index[state.model_train_end - 1],
+        "CalibrationStartDate": X.index[state.calibration_start] if state.calibration_start is not None else None,
+        "CalibrationEndDate": X.index[state.calibration_end - 1] if state.calibration_end is not None else None,
+        "AssessmentStartDate": X.index[state.assessment_start],
+        "AssessmentEndDate": X.index[state.assessment_end - 1],
         "TestStartDate": X.index[fold.test_start],
         "TestEndDate": X.index[fold.test_end - 1],
         "PurgeGap": int(horizon),
@@ -146,11 +129,14 @@ def _signal_record(
         "ExitDate": price_row["ExitDate"],
         "EntryPrice": float(price_row["EntryPrice"]),
         "ExitPrice": float(price_row["ExitPrice"]),
-        "Probability": probability,
-        "ExpectedReturn": expected_return,
+        "Probability": prediction.probability_up,
+        "ExpectedReturn": prediction.expected_return,
+        "RawProbability": prediction.raw_probability,
+        "RawExpectedReturn": prediction.raw_expected_return,
+        "Skill": prediction.skill,
         "Quality": state.quality,
-        "ValidationAUC": state.validation_auc,
-        "ValidationBrier": state.validation_brier,
+        "ValidationAUC": state.auc,
+        "ValidationBrier": state.brier,
         "Position": int(position),
         "DecisionReason": verdict.reason,
         "DecisionLabel": verdict.label,
@@ -192,7 +178,12 @@ def validate_history(
         X, y, model_forward, execution_forward, prices = _supervised_execution_frame(data, horizon, context)
         for fold in _fold_ranges(len(X), horizon, config):
             try:
-                state = _fit_backtest_ensemble(X, y, model_forward, fold.train_end, horizon)
+                state = fit_forecast_state(
+                    X.iloc[:fold.train_end],
+                    y.iloc[:fold.train_end],
+                    model_forward.iloc[:fold.train_end],
+                    horizon,
+                )
             except ValueError:
                 continue
             for i in range(fold.test_start, fold.test_end):
@@ -216,20 +207,30 @@ def validate_history(
     return pd.DataFrame(records)
 
 
-def data_fingerprint(histories: dict[str, pd.DataFrame]) -> tuple[str, dict[str, dict]]:
+def _fingerprint_frame(digest, key: str, frame: pd.DataFrame, ranges: dict[str, dict]) -> None:
+    frame = frame.sort_index()
+    cols = [col for col in ("Open", "High", "Low", "Close", "Volume") if col in frame]
+    start = str(frame.index.min().date()) if len(frame) else None
+    end = str(frame.index.max().date()) if len(frame) else None
+    ranges[key] = {"start": start, "end": end, "rows": int(len(frame))}
+    digest.update(key.encode())
+    digest.update(json.dumps(ranges[key], sort_keys=True).encode())
+    if cols:
+        digest.update(pd.util.hash_pandas_object(frame[cols], index=True).values.tobytes())
+
+
+def data_fingerprint(
+    histories: dict[str, pd.DataFrame], contexts: dict[str, pd.DataFrame | None] | None = None,
+) -> tuple[str, dict[str, dict]]:
     """Hash the exact input data used by an experiment."""
     digest = hashlib.sha256()
     ranges: dict[str, dict] = {}
     for symbol in sorted(histories):
-        frame = histories[symbol].sort_index()
-        cols = [col for col in ("Open", "High", "Low", "Close", "Volume") if col in frame]
-        start = str(frame.index.min().date()) if len(frame) else None
-        end = str(frame.index.max().date()) if len(frame) else None
-        ranges[symbol] = {"start": start, "end": end, "rows": int(len(frame))}
-        digest.update(symbol.encode())
-        digest.update(json.dumps(ranges[symbol], sort_keys=True).encode())
-        if cols:
-            digest.update(pd.util.hash_pandas_object(frame[cols], index=True).values.tobytes())
+        _fingerprint_frame(digest, symbol, histories[symbol], ranges)
+    for symbol in sorted((contexts or {}).keys()):
+        context = (contexts or {}).get(symbol)
+        if context is not None and not context.empty:
+            _fingerprint_frame(digest, f"context:{symbol}", context, ranges)
     return digest.hexdigest()[:24], ranges
 
 
@@ -255,7 +256,7 @@ def aggregate_validate_histories(
         return pd.DataFrame()
     non_empty = [frame for frame in frames if not frame.empty]
     result = pd.concat(non_empty, ignore_index=True) if non_empty else pd.DataFrame()
-    fingerprint, ranges = data_fingerprint(histories)
+    fingerprint, ranges = data_fingerprint(histories, contexts)
     result.attrs["data_fingerprint"] = fingerprint
     result.attrs["data_ranges"] = ranges
     return result
@@ -442,20 +443,23 @@ def experiment_manifest(
 ) -> dict:
     universe = sorted(symbols.keys() if isinstance(symbols, dict) else symbols)
     commit = commit_hash or _current_commit()
+    timestamp = datetime.now(timezone.utc).isoformat()
     payload = {
         "commit": commit,
         "config": asdict(config),
         "universe": universe,
         "data_fingerprint": data_fingerprint_value,
         "data_ranges": data_ranges or {},
-        "engine": "SignalInputs+classifier/regression ensemble",
+        "engine": "FittedForecastState+SignalInputs shared pipeline",
         "target": "close_to_close",
         "execution": "next_open",
     }
     experiment_id = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    run_id = f"{experiment_id}_{timestamp.replace(':', '').replace('-', '').replace('.', '')}"
     return {
         "experiment_id": experiment_id,
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id,
+        "timestamp_utc": timestamp,
         **payload,
     }
 
@@ -583,20 +587,61 @@ def validation_report(
     }
 
 
+def _unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    counter = 1
+    while True:
+        candidate = path.with_name(f"{stem}_{counter}{suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def save_validation_artifacts(frame: pd.DataFrame, report: dict, output_dir: str | Path) -> dict[str, str]:
     """Persist raw records and report; manifest log is append-only."""
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    experiment_id = str(report["manifest"]["experiment_id"])
-    records_path = output / f"records_{experiment_id}.csv"
-    report_path = output / f"report_{experiment_id}.json"
+    manifest = dict(report["manifest"])
+    run_id = str(manifest.get("run_id") or manifest["experiment_id"])
+    records_path = _unique_path(output / f"records_{run_id}.csv")
+    report_path = _unique_path(output / f"report_{run_id}.json")
     manifest_log = output / "manifest.jsonl"
     frame.to_csv(records_path, index=False)
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+    records_checksum = _file_sha256(records_path)
+    report_to_write = dict(report)
+    report_to_write["manifest"] = {
+        **manifest,
+        "artifacts": {
+            "records": str(records_path),
+            "records_sha256": records_checksum,
+        },
+    }
+    report_path.write_text(json.dumps(report_to_write, ensure_ascii=False, indent=2, default=str))
+    report_checksum = _file_sha256(report_path)
+    manifest_entry = {
+        **report_to_write["manifest"],
+        "artifacts": {
+            **report_to_write["manifest"]["artifacts"],
+            "report": str(report_path),
+            "report_sha256": report_checksum,
+        },
+    }
     with manifest_log.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(report["manifest"], ensure_ascii=False, default=str) + "\n")
+        handle.write(json.dumps(manifest_entry, ensure_ascii=False, default=str) + "\n")
     return {
         "records": str(records_path),
         "report": str(report_path),
         "manifest_log": str(manifest_log),
+        "records_sha256": records_checksum,
+        "report_sha256": report_checksum,
     }

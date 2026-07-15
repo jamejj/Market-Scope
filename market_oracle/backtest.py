@@ -1,39 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
 from .features import build_features
-from .model import (
-    _classification_models,
-    _classification_weights,
-    _model_probabilities,
-    _regression_models,
-    _regression_weights,
-    _weighted_prediction,
-)
+from .model import FittedForecastState, fit_forecast_state
 from .risk import periods_per_year
-from .signals import DEFAULT_SIGNAL_THRESHOLD, SignalInputs, signal_verdict
-
-
-@dataclass
-class _BacktestEnsemble:
-    class_models: dict[str, object]
-    class_weights: dict[str, float]
-    calibrator: LogisticRegression | None
-    reg_models: dict[str, object]
-    reg_weights: dict[str, float]
-    quality: str
-    validation_auc: float
-    validation_brier: float
-    train_end: int
-    core_end: int
-    calibration_start: int
-    calibration_end: int
+from .signals import DEFAULT_SIGNAL_THRESHOLD, signal_verdict
 
 
 def _execution_returns(data: pd.DataFrame, horizon: int) -> pd.Series:
@@ -78,86 +52,11 @@ def _supervised_execution_frame(
     )
 
 
-def _quality_from_validation(y_true: pd.Series, probability: np.ndarray) -> tuple[str, float, float]:
-    probability = np.clip(probability, 1e-4, 1 - 1e-4)
-    if len(y_true) < 35 or y_true.nunique() < 2:
-        return "NISKA — BRAK PRZEWAGI", 0.5, 0.25
-    auc = float(roc_auc_score(y_true, probability))
-    brier = float(brier_score_loss(y_true, probability))
-    if auc >= 0.60 and brier <= 0.24:
-        quality = "WYSOKA"
-    elif auc >= 0.55 and brier <= 0.26:
-        quality = "UMIARKOWANA"
-    else:
-        quality = "NISKA — BRAK PRZEWAGI"
-    return quality, auc, brier
-
-
-def _fit_backtest_ensemble(
+def _fit_backtest_state(
     X: pd.DataFrame, y: pd.Series, returns: pd.Series, train_end: int, horizon: int,
-) -> _BacktestEnsemble:
-    """Fit the production classifier and expected-return model families on past data."""
-    train_end = int(train_end)
-    calibration_size = max(45, min(120, train_end // 5))
-    calibration_start = max(180 + horizon, train_end - calibration_size)
-    core_end = max(160, calibration_start - horizon)
-    if calibration_start >= train_end - 20 or core_end >= calibration_start:
-        calibration_start = max(180 + horizon, int(train_end * 0.78))
-        core_end = max(160, calibration_start - horizon)
-
-    X_core, y_core = X.iloc[:core_end], y.iloc[:core_end]
-    X_cal, y_cal = X.iloc[calibration_start:train_end], y.iloc[calibration_start:train_end]
-    r_core = returns.iloc[:core_end]
-    r_cal = returns.iloc[calibration_start:train_end]
-    if y_core.nunique() < 2:
-        raise ValueError("Za mało zróżnicowanych danych w oknie treningowym.")
-
-    weight_models = _classification_models()
-    for model in weight_models.values():
-        model.fit(X_core, y_core)
-    quality = "NISKA — BRAK PRZEWAGI"
-    validation_auc = 0.5
-    validation_brier = 0.25
-    if len(X_cal) >= 35 and y_cal.nunique() > 1:
-        calibration_predictions = _model_probabilities(weight_models, X_cal)
-        weights = _classification_weights(calibration_predictions, y_cal.to_numpy())
-        raw_cal = _weighted_prediction(calibration_predictions, weights)
-        quality, validation_auc, validation_brier = _quality_from_validation(y_cal, raw_cal)
-        calibrator = LogisticRegression(C=0.5, max_iter=1000)
-        calibrator.fit(raw_cal.reshape(-1, 1), y_cal)
-    else:
-        weights = {"linear": 0.45, "boosting": 0.35, "extra_trees": 0.20}
-        calibrator = None
-
-    weight_reg_models = _regression_models()
-    for model in weight_reg_models.values():
-        model.fit(X_core, r_core)
-    if len(X_cal) >= 35:
-        reg_predictions = {name: model.predict(X_cal) for name, model in weight_reg_models.items()}
-        reg_weights = _regression_weights(reg_predictions, r_cal)
-    else:
-        reg_weights = {"ridge": 0.40, "forest": 0.25, "boosting": 0.20, "extra_trees": 0.15}
-
-    models = _classification_models()
-    for model in models.values():
-        model.fit(X.iloc[:train_end], y.iloc[:train_end])
-    reg_models = _regression_models()
-    for model in reg_models.values():
-        model.fit(X.iloc[:train_end], returns.iloc[:train_end])
-    return _BacktestEnsemble(
-        class_models=models,
-        class_weights=weights,
-        calibrator=calibrator,
-        reg_models=reg_models,
-        reg_weights=reg_weights,
-        quality=quality,
-        validation_auc=validation_auc,
-        validation_brier=validation_brier,
-        train_end=train_end,
-        core_end=core_end,
-        calibration_start=calibration_start,
-        calibration_end=train_end,
-    )
+) -> FittedForecastState:
+    """Fit the exact shared production forecast state on the available past slice."""
+    return fit_forecast_state(X.iloc[:train_end], y.iloc[:train_end], returns.iloc[:train_end], horizon)
 
 
 def walk_forward_backtest(
@@ -178,34 +77,15 @@ def walk_forward_backtest(
     X, y, model_forward, execution_forward, prices = _supervised_execution_frame(data, horizon, context)
     start = max(300, int(len(X) * 0.55))
     records = []
-    state: _BacktestEnsemble | None = None
+    state: FittedForecastState | None = None
     for i in range(start, len(X)):
         if state is None or (i - start) % max(1, refit_every) == 0:
             train_end = i - horizon - 1
-            if train_end < 200:
+            if train_end < 250:
                 continue
-            state = _fit_backtest_ensemble(X, y, model_forward, train_end, horizon)
-        raw_probability = float(
-            _weighted_prediction(_model_probabilities(state.class_models, X.iloc[[i]]), state.class_weights)[0]
-        )
-        probability = (
-            float(state.calibrator.predict_proba(np.array([[raw_probability]]))[:, 1][0])
-            if state.calibrator is not None else raw_probability
-        )
-        expected_return = float(
-            _weighted_prediction(
-                {name: model.predict(X.iloc[[i]]) for name, model in state.reg_models.items()},
-                state.reg_weights,
-            )[0]
-        )
-        inputs = SignalInputs(
-            probability=probability,
-            expected_return=expected_return,
-            quality=state.quality,
-            auc=state.validation_auc,
-            brier=state.validation_brier,
-            source="BACKTEST",
-        )
+            state = _fit_backtest_state(X, y, model_forward, train_end, horizon)
+        prediction = state.predict(X.iloc[[i]])
+        inputs = prediction.signal_inputs(source="BACKTEST")
         verdict = signal_verdict(inputs, threshold)
         position = verdict.decision
         gross = position * float(execution_forward.iloc[i])
@@ -218,11 +98,12 @@ def walk_forward_backtest(
             "ExitDate": price_row["ExitDate"],
             "EntryPrice": float(price_row["EntryPrice"]),
             "ExitPrice": float(price_row["ExitPrice"]),
-            "Probability": probability,
-            "ExpectedReturn": expected_return,
+            "Probability": prediction.probability_up,
+            "ExpectedReturn": prediction.expected_return,
             "Quality": state.quality,
-            "ValidationAUC": state.validation_auc,
-            "ValidationBrier": state.validation_brier,
+            "ValidationAUC": state.auc,
+            "ValidationBrier": state.brier,
+            "Skill": state.skill,
             "Position": position,
             "DecisionReason": verdict.reason,
             "DecisionLabel": verdict.label,

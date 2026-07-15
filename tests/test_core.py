@@ -6,10 +6,12 @@ from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CAT
 from market_oracle.engine import observation_label, risk_reward_metrics, scan_market_fast, setup_intelligence, signal_label
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
-from market_oracle.model import fit_forecast
+from market_oracle.model import fit_forecast, fit_forecast_state
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
 from market_oracle.risk import periods_per_year, risk_metrics
-from market_oracle.signals import DEFAULT_SIGNAL_THRESHOLD, SignalInputs, signal_decision, signal_inputs_from_forecast
+from market_oracle.signals import (
+    DEFAULT_SIGNAL_THRESHOLD, SignalInputs, signal_decision, signal_inputs_from_forecast, signal_verdict,
+)
 from market_oracle.validation import (
     ValidationConfig,
     _fold_ranges,
@@ -135,16 +137,36 @@ def test_aggregate_validation_keeps_rejected_observations(tmp_path):
     assert report["manifest"]["commit"] == "test"
     assert report["manifest"]["data_fingerprint"] == frame.attrs["data_fingerprint"]
     assert report["manifest"]["experiment_id"]
+    assert report["manifest"]["run_id"].startswith(report["manifest"]["experiment_id"])
     assert report["summary"]["observations"] < report["combined_summary"]["observations"]
     assert report["holdout_summary"]["observations"] > 0
     assert report["by_fold"]
     written = save_validation_artifacts(frame, report, tmp_path)
+    written_again = save_validation_artifacts(frame, report, tmp_path)
+    assert written_again["records"] != written["records"]
+    assert written["records_sha256"]
+    assert written["report_sha256"]
     assert pd.read_json(written["manifest_log"], lines=True).iloc[-1]["experiment_id"] == report["manifest"]["experiment_id"]
     fingerprint, ranges = data_fingerprint(histories)
     assert fingerprint == frame.attrs["data_fingerprint"]
     assert ranges["AAA"]["rows"] == len(histories["AAA"])
+    context_fingerprint, context_ranges = data_fingerprint(histories, {"AAA": synthetic_data(560)})
+    assert context_fingerprint != fingerprint
+    assert "context:AAA" in context_ranges
     by_market = group_summary(frame, "Market")
     assert set(by_market["Market"]) == {"USA", "ETF"}
+
+    row = frame[(frame["Symbol"] == "AAA") & (frame["FoldType"] == "WALK_FORWARD")].iloc[0]
+    X, y, model_return, _, _ = _supervised_execution_frame(histories["AAA"], horizon=int(row["Horizon"]))
+    train_end = X.index.get_loc(pd.Timestamp(row["TrainEndDate"])) + 1
+    state = fit_forecast_state(X.iloc[:train_end], y.iloc[:train_end], model_return.iloc[:train_end], int(row["Horizon"]))
+    prediction = state.predict(X.loc[[pd.Timestamp(row["Date"])]])
+    verdict = signal_verdict(prediction.signal_inputs(source="TEST"), config.threshold)
+    assert np.isclose(row["Probability"], prediction.probability_up)
+    assert np.isclose(row["ExpectedReturn"], prediction.expected_return)
+    assert np.isclose(row["Skill"], prediction.skill)
+    assert row["Quality"] == state.quality
+    assert row["DecisionReason"] == verdict.reason
 
 
 def test_fold_selection_is_evenly_distributed_before_holdout():
