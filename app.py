@@ -1045,9 +1045,27 @@ def render_signal_dashboard() -> None:
     completed, total = snapshot.get("completed", 0), snapshot.get("total", 0)
     auto_started = auto_start_signal_scan(snapshot, stale_snapshot)
     if status == "running":
+        progress_text = ""
+        try:
+            started_at = pd.Timestamp(snapshot.get("started_at"))
+            if started_at.tzinfo is None:
+                started_at = started_at.tz_localize("UTC")
+            elapsed_seconds = max(1.0, (pd.Timestamp.now(tz="UTC") - started_at).total_seconds())
+            if completed and total and completed < total:
+                seconds_per_symbol = elapsed_seconds / completed
+                remaining_seconds = max(0.0, (total - completed) * seconds_per_symbol)
+                progress_text = (
+                    f" Tempo: ok. **{seconds_per_symbol:.0f}s/instrument** · "
+                    f"szacunkowo zostało **{remaining_seconds / 60:.0f} min**."
+                )
+            elif completed:
+                progress_text = f" Czas pracy: **{elapsed_seconds / 60:.0f} min**."
+        except Exception:
+            progress_text = ""
         st.info(
             f"Monitor analizuje rynek w tle: **{completed}/{total}** instrumentów. "
-            "Poniżej widzisz ranking częściowy — pełny obraz pojawi się po zakończeniu skanu."
+            "Pełny skan liczy kilka horyzontów i modele ML, więc może potrwać kilka–kilkanaście minut. "
+            f"Poniżej widzisz ranking częściowy — pełny obraz pojawi się po zakończeniu skanu.{progress_text}"
         )
         st.progress(completed / total if total else 0)
     elif status == "error":
@@ -1368,6 +1386,11 @@ with radar:
     st.header("Automatyczny ranking rynku")
     st.write(f"Monitor śledzi **{len(default_universe())}** instrumentów z GPW, USA, ETF-ów i krypto oraz liczy kilka horyzontów: szybki ruch, swing i trend.")
     st.caption("To lista badawcza, nie automatyczna rekomendacja zakupu ani sprzedaży.")
+    st.warning(
+        "Pełny ranking uruchamia ciężką analizę ML dla wielu instrumentów. "
+        "Pierwszy lub świeży skan może potrwać kilka–kilkanaście minut; w trakcie dashboard pokazuje wynik częściowy.",
+        icon="⏳",
+    )
     render_signal_dashboard()
     radar_snapshot = load_snapshot()
     scan_running = bool(radar_snapshot and radar_snapshot.get("status") == "running")
@@ -1376,11 +1399,11 @@ with radar:
     if st.button(
         "Przelicz cały ranking teraz",
         key="signals_refresh",
-        help="Startuje jednorazowy skan w tle. Dashboard będzie pokazywał postęp.",
+        help="Startuje jednorazowy ciężki skan ML w tle. Może potrwać kilka–kilkanaście minut; dashboard będzie pokazywał postęp.",
         disabled=scan_running,
     ):
         start_signal_scan_background()
-        st.toast("Startuję przeliczenie rankingu w tle. Postęp pojawi się za chwilę.", icon="📡")
+        st.toast("Startuję pełny skan ML. To może potrwać kilka–kilkanaście minut — postęp pojawi się za chwilę.", icon="📡")
         st.rerun()
     with st.expander("Szybki skan własnych symboli"):
         st.write("Tu możesz sprawdzić instrumenty spoza głównego radaru, np. świeże krypto albo małe spółki.")

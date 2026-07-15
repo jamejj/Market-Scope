@@ -26,6 +26,8 @@ Wymagany jest Python 3.9–3.13.
 
 Na macOS można po prostu kliknąć dwukrotnie plik `Uruchom MarketScope.command`. Launcher uruchamia również monitor rynku pracujący w tle. Gdy ranking jest stary albo niepełny, zakładka **Sygnały** potrafi sama wystartować świeży skan.
 
+Pełny ranking uruchamia ciężką analizę ML dla wielu instrumentów i kilku horyzontów, więc pierwszy lub świeży skan może potrwać kilka–kilkanaście minut. W tym czasie dashboard pokazuje ranking częściowy i postęp monitora.
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
