@@ -36,6 +36,14 @@ Model w produkcji i backteście używa tej samej definicji targetu: kierunek clo
 
 Moduł Aggregate Validation jest przeznaczony do cięższego egzaminu systemu: chronologicznie przechodzi po wielu instrumentach i horyzontach, zapisuje każdą obserwację decyzyjną oraz powód odrzucenia sygnału. Produkcja, backtest i walidacja korzystają ze wspólnego `FittedForecastState`, więc probability, expected return, skill, quality i `SignalInputs` powstają tą samą ścieżką. Parametr `refit_every` kontroluje, jak często w foldzie model jest trenowany ponownie: `1` jest najbliżej codziennego zachowania aplikacji, większe wartości służą szybszym testom diagnostycznym. Foldy przed holdoutem są wybierane równomiernie po historii, a nie tylko z początku danych. Raport zachowuje metadane train/calibration/test, osobne summary WALK_FORWARD i HOLDOUT, fingerprint wszystkich wejść modelu — także kontekstów benchmarkowych — zakres dat symboli, benchmarki always-long, buy-hold proxy, momentum i Logistic Regression, stress kosztów 1×/2×/3× oraz koncentrację wyniku. Artefakty walidacji zapisują osobny `run_id`, checksum rekordów/raportu i append-only manifest log. To ma pomóc odpowiedzieć, czy przewaga utrzymuje się szerzej, a nie tylko na pojedynczym szczęśliwym tickerze.
 
+Pełny diagnostyczny run można uruchomić komendą poniżej. To jest ciężki test — przy `refit_every=5` może trwać długo, bo runner ponownie trenuje cały stan modelu w wielu punktach historii. Runner wypisuje postęp i zapisuje częściowe rekordy po każdym symbolu/horyzoncie do `outputs/validation/partial_*.csv`.
+
+```bash
+.venv/bin/python run_validation.py --holdout-size 0 --refit-every 5 --max-folds 4
+```
+
+Szybszy smoke-test techniczny można uruchomić np. z `--refit-every 20 --max-folds 1`, ale nie należy interpretować go jako dowodu przewagi.
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
