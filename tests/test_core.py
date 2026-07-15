@@ -3,11 +3,11 @@ import pandas as pd
 
 from market_oracle.backtest import walk_forward_backtest
 from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES
-from market_oracle.engine import observation_label, risk_reward_metrics, setup_intelligence, signal_label
+from market_oracle.engine import observation_label, risk_reward_metrics, scan_market_fast, setup_intelligence, signal_label
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast
-from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, snapshot_is_stale
+from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
 from market_oracle.risk import periods_per_year, risk_metrics
 
 
@@ -120,18 +120,49 @@ def test_setup_intelligence_explains_clean_setup():
     assert "momentum" in intelligence["thesis"] or "ML" in intelligence["thesis"]
 
 
+def test_fast_market_scan_creates_non_ml_rows(monkeypatch):
+    data = synthetic_data()
+    monkeypatch.setattr("market_oracle.engine.download_history", lambda symbol, years=2: data)
+    frame, errors = scan_market_fast(["TEST"], horizons=(1, 5), years=2)
+    assert errors == {}
+    assert set(frame["Horyzont"]) == {1, 5}
+    assert set(frame["Tryb analizy"]) == {"FAST"}
+    assert "Deep score" in frame
+    assert frame["Ocena"].eq("OBSERWUJ").all()
+
+
 def test_background_monitor_persists_snapshot(tmp_path, monkeypatch):
     sample = pd.DataFrame([{
-        "Symbol": "TEST", "Ocena": "OBSERWUJ", "Score": 1.5,
-        "P(wzrost)": 0.52, "Oczekiwany ruch": 0.01,
+        "Symbol": "TEST", "Klasa": "USA", "Horyzont": 5, "Ocena": "OBSERWUJ", "Score": 1.5,
+        "Deep score": 70.0, "Setup score": 68.0, "Radar score": 5.0,
+        "P(wzrost)": 0.52, "Oczekiwany ruch": 0.01, "Tryb analizy": "FAST",
     }])
-    monkeypatch.setattr("market_oracle.monitor.scan_market_multi", lambda symbols, horizons, years: (sample, {}))
+    ml_sample = sample.copy()
+    ml_sample["Tryb analizy"] = "ML"
+    monkeypatch.setattr("market_oracle.monitor.scan_market_fast", lambda symbols, horizons, years: (sample, {}))
+    monkeypatch.setattr("market_oracle.monitor.scan_market_multi", lambda symbols, horizons, years: (ml_sample, {}))
     path = tmp_path / "signals.json"
-    result = run_signal_scan(["TEST"], path=path)
+    result = run_signal_scan(["TEST"], path=path, deep_limit=1)
     loaded = load_snapshot(path)
     assert result["status"] == "complete"
+    assert result["scan_mode"] == "two_stage"
+    assert result["shortlist"] == ["TEST"]
     assert loaded["records"][0]["Symbol"] == "TEST"
+    assert loaded["records"][0]["Tryb analizy"] == "ML"
     assert len(default_universe()) >= 100
+
+
+def test_deep_shortlist_keeps_diverse_high_priority_symbols():
+    frame = pd.DataFrame([
+        {"Symbol": "A", "Klasa": "USA", "Deep score": 90, "Setup score": 80, "Radar score": 5, "Edge score": 3, "Risk control": 70},
+        {"Symbol": "B", "Klasa": "USA", "Deep score": 85, "Setup score": 76, "Radar score": 4, "Edge score": 2, "Risk control": 65},
+        {"Symbol": "C", "Klasa": "Krypto", "Deep score": 82, "Setup score": 74, "Radar score": 7, "Edge score": 1, "Risk control": 55},
+        {"Symbol": "D", "Klasa": "GPW", "Deep score": 78, "Setup score": 71, "Radar score": 3, "Edge score": 2, "Risk control": 60},
+    ])
+    shortlist = select_deep_shortlist(frame, limit=3)
+    assert len(shortlist) == 3
+    assert "A" in shortlist
+    assert len(set(shortlist)) == len(shortlist)
 
 
 def test_old_signal_snapshot_is_considered_stale():

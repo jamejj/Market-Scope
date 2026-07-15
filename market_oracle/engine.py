@@ -319,6 +319,62 @@ def setup_intelligence(symbol: str, forecast: dict, risk: dict, technical: dict)
     }
 
 
+def _fast_forecast_proxy(symbol: str, horizon: int, technical: dict, risk: dict) -> dict:
+    """Cheap directional proxy used only for first-pass ranking, not as a validated ML forecast."""
+    crypto = symbol.upper().endswith("-USD")
+    periods = 365 if crypto else 252
+    horizon_risk = max(float(risk.get("annual_volatility") or 0.0) * np.sqrt(max(horizon, 1) / periods), 0.006)
+    trend_bias = (
+        (0.012 if technical.get("above_sma_50") else -0.004)
+        + (0.010 if technical.get("above_sma_200") else 0.0)
+        + (0.008 if technical.get("near_20d_high") else 0.0)
+    )
+    if horizon <= 1:
+        raw_expected = (
+            float(technical.get("return_1d") or 0.0) * 0.28
+            + float(technical.get("return_5d") or 0.0) * 0.06
+            + trend_bias * 0.20
+        )
+    elif horizon <= 5:
+        raw_expected = (
+            float(technical.get("return_5d") or 0.0) * 0.24
+            + float(technical.get("return_20d") or 0.0) * 0.07
+            + trend_bias * 0.45
+        )
+    else:
+        raw_expected = (
+            float(technical.get("return_20d") or 0.0) * 0.18
+            + float(technical.get("return_60d") or 0.0) * 0.05
+            + trend_bias * 0.75
+        )
+    cap = 0.22 if crypto else 0.10
+    expected = float(max(-cap, min(cap, raw_expected)))
+    strength = max(-8.0, min(8.0, expected / horizon_risk))
+    probability = float(max(0.25, min(0.75, 1 / (1 + np.exp(-strength * 0.55)))))
+    interval = max(horizon_risk * 1.75, abs(expected) * 1.7, 0.012)
+    return {
+        "quality": "NISKA — FAST RADAR BEZ ML",
+        "probability_up": probability,
+        "expected_return": expected,
+        "lower_return": expected - interval,
+        "upper_return": expected + interval,
+        "auc": 0.50,
+        "brier": 0.25,
+    }
+
+
+def _fast_action(momentum_label: str, intelligence: dict, expected: float) -> str:
+    setup_score = float(intelligence.get("setup_score") or 0.0)
+    risk_control = float(intelligence.get("risk_control") or 0.0)
+    if momentum_label == "PANIKA / RYZYKO" or risk_control < 28 or expected < -0.025:
+        return "RYZYKO / UNIKAJ"
+    if setup_score >= 64:
+        return "FAST SHORTLIST"
+    if momentum_label in {"PEREŁKA MOMENTUM", "BREAKOUT WATCH", "MOMENTUM WATCH"}:
+        return "MOMENTUM DO SPRAWDZENIA"
+    return "OBSERWUJ"
+
+
 def _asset_class(symbol: str) -> str:
     if symbol.endswith("-USD"):
         return "Krypto"
@@ -366,6 +422,7 @@ def _row_from_result(symbol: str, result: dict, horizon: int) -> dict:
         "Radar momentum": momentum_radar_label(symbol, technical),
         "Radar score": momentum_radar_score(symbol, technical, r),
         "Risk/reward": rr["risk_reward"], "Edge score": rr["edge_score"], "Akcja radaru": rr["radar_action"],
+        "Tryb analizy": "ML", "Deep score": intelligence["setup_score"] * 0.75 + max(rr["edge_score"], 0) * 4,
         "Setup score": intelligence["setup_score"], "Setup grade": intelligence["setup_grade"],
         "Momentum score": intelligence["momentum_score"], "Trend score": intelligence["trend_score"],
         "Risk control": intelligence["risk_control"], "Liquidity score": intelligence["liquidity_score"],
@@ -378,6 +435,61 @@ def _row_from_result(symbol: str, result: dict, horizon: int) -> dict:
         "Jakość modelu": f["quality"], "Pewność": confidence * quality,
         "Zmienność roczna": r["annual_volatility"], "Max drawdown": r["max_drawdown"], "Score": score,
     }
+
+
+def _fast_row_from_result(symbol: str, result: dict, horizon: int) -> dict:
+    r = result["risk"]
+    technical = result["technical"]
+    f = _fast_forecast_proxy(symbol, horizon, technical, r)
+    rr = risk_reward_metrics(f, r, technical)
+    intelligence = setup_intelligence(symbol, f, r, technical)
+    momentum_label = momentum_radar_label(symbol, technical)
+    radar_score = momentum_radar_score(symbol, technical, r)
+    action = _fast_action(momentum_label, intelligence, f["expected_return"])
+    deep_score = intelligence["setup_score"] * 0.72 + _clip_score(50 + radar_score * 6) * 0.28
+    return {
+        "Symbol": symbol, "Klasa": _asset_class(symbol), "Horyzont": horizon,
+        "Data": str(result["last_date"].date()), "Setup": _setup_label(technical, horizon), "Cena": result["last_price"],
+        "Radar momentum": momentum_label, "Radar score": radar_score,
+        "Risk/reward": rr["risk_reward"], "Edge score": rr["edge_score"], "Akcja radaru": action,
+        "Tryb analizy": "FAST", "Deep score": deep_score,
+        "Setup score": intelligence["setup_score"], "Setup grade": intelligence["setup_grade"],
+        "Momentum score": intelligence["momentum_score"], "Trend score": intelligence["trend_score"],
+        "Risk control": intelligence["risk_control"], "Liquidity score": intelligence["liquidity_score"],
+        "Model edge": intelligence["ml_score"], "Teza radaru": intelligence["thesis"],
+        "Ocena": "OBSERWUJ", "Sygnał": "FAST RADAR",
+        "P(wzrost)": f["probability_up"], "Oczekiwany ruch": f["expected_return"],
+        "Dolna granica 90%": f["lower_return"], "Górna granica 90%": f["upper_return"],
+        "Zwrot 1d": technical["return_1d"], "Zwrot 5d": technical["return_5d"], "Zwrot 20d": technical["return_20d"],
+        "RSI 14": technical["rsi_14"], "AUC walidacji": f["auc"], "Brier": f["brier"],
+        "Jakość modelu": "FAST — BEZ ML", "Pewność": 0.0,
+        "Zmienność roczna": r["annual_volatility"], "Max drawdown": r["max_drawdown"], "Score": deep_score,
+    }
+
+
+def analyze_fast_asset(symbol: str, horizons: tuple[int, ...] = (1, 5, 20), years: int = 2) -> dict:
+    data = download_history(symbol, years)
+    return {
+        "symbol": symbol.upper(), "last_date": data.index[-1], "last_price": float(data["Close"].iloc[-1]),
+        "forecasts": {}, "risk": risk_metrics(data["Close"]), "history": data,
+        "benchmark": "fast radar — bez benchmarku ML", "technical": _technical_snapshot(data),
+    }
+
+
+def scan_market_fast(symbols: list[str], horizons: tuple[int, ...] = (1, 5, 20), years: int = 2) -> tuple[pd.DataFrame, dict[str, str]]:
+    rows, errors = [], {}
+    clean_symbols = dict.fromkeys(s.strip().upper() for s in symbols if s.strip())
+    for symbol in clean_symbols:
+        try:
+            result = analyze_fast_asset(symbol, horizons=horizons, years=years)
+            for horizon in horizons:
+                rows.append(_fast_row_from_result(symbol, result, horizon))
+        except Exception as exc:
+            errors[symbol] = str(exc)
+    frame = pd.DataFrame(rows)
+    if not frame.empty:
+        frame = frame.sort_values(["Horyzont", "Deep score"], ascending=[True, False]).reset_index(drop=True)
+    return frame, errors
 
 
 def scan_market(symbols: list[str], horizon: int = 5, years: int = 8) -> tuple[pd.DataFrame, dict[str, str]]:

@@ -14,6 +14,7 @@ Lokalny panel badawczy analizujący akcje, ETF-y i krypto. Generuje probabilisty
 - prawidłowa annualizacja 365 dni dla krypto i 252 sesji dla giełd;
 - Today’s Radar z priorytetami analizy, momentum, risk/reward i Edge score;
 - Setup Intelligence z rozbiciem na momentum, trend, kontrolę ryzyka, płynność, model edge i krótką tezę radaru;
+- dwustopniowy skaner: szybki FAST Radar całego rynku oraz Deep ML tylko dla shortlisty;
 - ranking rynku, analiza ryzyka i backtest walk-forward z kosztami transakcji;
 - Signal Journal i Performance Lab z paper portfolio, kosztami, sizingiem, equity curve i drawdown;
 - zakładka **Model**, która tłumaczy ustawienia oraz neutralne sygnały;
@@ -26,7 +27,7 @@ Wymagany jest Python 3.9–3.13.
 
 Na macOS można po prostu kliknąć dwukrotnie plik `Uruchom MarketScope.command`. Launcher uruchamia również monitor rynku pracujący w tle. Gdy ranking jest stary albo niepełny, zakładka **Sygnały** potrafi sama wystartować świeży skan.
 
-Pełny ranking uruchamia ciężką analizę ML dla wielu instrumentów i kilku horyzontów, więc pierwszy lub świeży skan może potrwać kilka–kilkanaście minut. W tym czasie dashboard pokazuje ranking częściowy i postęp monitora.
+Pełny ranking działa dwustopniowo. Najpierw szybki **FAST Radar** skanuje cały rynek technicznie, a następnie **Deep ML** odpala pełne modele tylko dla shortlisty najciekawszych instrumentów. W tym czasie dashboard pokazuje ranking częściowy i stopniowo zastępuje wiersze FAST wierszami ML.
 
 ```bash
 python3 -m venv .venv
