@@ -13,6 +13,7 @@ import pandas as pd
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
 from .backtest import _supervised_execution_frame
+from .cutoff import available_label_end, first_signal_position
 from .data import download_history
 from .model import fit_forecast_state
 from .signals import DEFAULT_SIGNAL_THRESHOLD, signal_verdict
@@ -30,6 +31,7 @@ class ValidationConfig:
     test_size: int = 90
     max_folds: int | None = 4
     holdout_size: int = 90
+    refit_every: int = 20
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,7 @@ def _fold_ranges(length: int, horizon: int, config: ValidationConfig) -> list[Fo
     minimum_train = max(250, config.initial_train)
     test_size = max(20, config.test_size)
     candidates: list[FoldSpec] = []
-    test_start = minimum_train + horizon
+    test_start = first_signal_position(minimum_train, horizon)
     fold_id = 1
     holdout_size = max(0, int(config.holdout_size))
     holdout_start: int | None = None
@@ -56,7 +58,7 @@ def _fold_ranges(length: int, horizon: int, config: ValidationConfig) -> list[Fo
         regular_end = max(minimum_train + horizon, holdout_start - horizon)
 
     while test_start < regular_end:
-        train_end = test_start - horizon
+        train_end = available_label_end(test_start, horizon)
         test_end = min(regular_end, test_start + test_size)
         if train_end >= 250 and test_end - test_start >= 20:
             candidates.append(FoldSpec(fold_id, train_end, test_start, test_end))
@@ -73,7 +75,7 @@ def _fold_ranges(length: int, horizon: int, config: ValidationConfig) -> list[Fo
     ranges: list[FoldSpec] = candidates
     fold_id = len(ranges) + 1
     if holdout_start is not None:
-        train_end = holdout_start - horizon
+        train_end = available_label_end(holdout_start, horizon)
         if train_end >= 250 and length - holdout_start >= 20:
             ranges.append(FoldSpec(fold_id, train_end, holdout_start, length, "HOLDOUT"))
     return ranges
@@ -92,6 +94,8 @@ def _signal_record(
     execution_forward: pd.Series,
     prices: pd.DataFrame,
     state,
+    available_train_end: int,
+    refit_every: int,
     threshold: float,
     total_cost: float,
 ) -> dict:
@@ -117,6 +121,8 @@ def _signal_record(
         "Fold": int(fold.fold_id),
         "FoldType": fold.fold_type,
         "TrainEndDate": X.index[state.history_end - 1],
+        "AvailableTrainEndDate": X.index[available_train_end - 1],
+        "RefitEvery": int(refit_every),
         "CoreEndDate": X.index[state.model_train_end - 1],
         "CalibrationStartDate": X.index[state.calibration_start] if state.calibration_start is not None else None,
         "CalibrationEndDate": X.index[state.calibration_end - 1] if state.calibration_end is not None else None,
@@ -177,16 +183,32 @@ def validate_history(
     for horizon in config.horizons:
         X, y, model_forward, execution_forward, prices = _supervised_execution_frame(data, horizon, context)
         for fold in _fold_ranges(len(X), horizon, config):
-            try:
-                state = fit_forecast_state(
-                    X.iloc[:fold.train_end],
-                    y.iloc[:fold.train_end],
-                    model_forward.iloc[:fold.train_end],
-                    horizon,
-                )
-            except ValueError:
-                continue
+            state = None
+            last_refit_position: int | None = None
+            last_train_end: int | None = None
             for i in range(fold.test_start, fold.test_end):
+                available_train = available_label_end(i, horizon)
+                if available_train < 250:
+                    continue
+                should_refit = (
+                    state is None
+                    or last_refit_position is None
+                    or i - last_refit_position >= max(1, int(config.refit_every))
+                )
+                if should_refit:
+                    try:
+                        state = fit_forecast_state(
+                            X.iloc[:available_train],
+                            y.iloc[:available_train],
+                            model_forward.iloc[:available_train],
+                            horizon,
+                        )
+                    except ValueError:
+                        continue
+                    last_refit_position = i
+                    last_train_end = available_train
+                if state is None or last_train_end is None:
+                    continue
                 records.append(
                     _signal_record(
                         symbol=symbol,
@@ -200,6 +222,8 @@ def validate_history(
                         execution_forward=execution_forward,
                         prices=prices,
                         state=state,
+                        available_train_end=available_train,
+                        refit_every=config.refit_every,
                         threshold=config.threshold,
                         total_cost=total_cost,
                     )

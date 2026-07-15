@@ -3,6 +3,7 @@ import pandas as pd
 
 from market_oracle.backtest import _supervised_execution_frame, walk_forward_backtest
 from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES
+from market_oracle.cutoff import available_label_end
 from market_oracle.engine import observation_label, risk_reward_metrics, scan_market_fast, setup_intelligence, signal_label
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
@@ -106,7 +107,7 @@ def test_signal_decision_is_shared_and_blocks_low_quality():
 
 def test_aggregate_validation_keeps_rejected_observations(tmp_path):
     histories = {"AAA": synthetic_data(560), "BBB": synthetic_data(580)}
-    config = ValidationConfig(horizons=(1,), initial_train=260, test_size=25, max_folds=1, holdout_size=25)
+    config = ValidationConfig(horizons=(1,), initial_train=260, test_size=25, max_folds=1, holdout_size=25, refit_every=25)
     assert config.threshold == DEFAULT_SIGNAL_THRESHOLD
     frame = aggregate_validate_histories(histories, markets={"AAA": "USA", "BBB": "ETF"}, config=config)
     assert not frame.empty
@@ -116,6 +117,8 @@ def test_aggregate_validation_keeps_rejected_observations(tmp_path):
     assert "HOLDOUT" in set(frame["FoldType"])
     assert "DecisionReason" in frame
     assert "TrainEndDate" in frame
+    assert "AvailableTrainEndDate" in frame
+    assert "RefitEvery" in frame
     assert "CalibrationStartDate" in frame
     assert "AlwaysLongReturn" in frame
     assert "MomentumReturn" in frame
@@ -156,7 +159,11 @@ def test_aggregate_validation_keeps_rejected_observations(tmp_path):
     by_market = group_summary(frame, "Market")
     assert set(by_market["Market"]) == {"USA", "ETF"}
 
-    row = frame[(frame["Symbol"] == "AAA") & (frame["FoldType"] == "WALK_FORWARD")].iloc[0]
+    row = frame[
+        (frame["Symbol"] == "AAA")
+        & (frame["FoldType"] == "WALK_FORWARD")
+        & (frame["TrainEndDate"] == frame["AvailableTrainEndDate"])
+    ].iloc[0]
     X, y, model_return, _, _ = _supervised_execution_frame(histories["AAA"], horizon=int(row["Horizon"]))
     train_end = X.index.get_loc(pd.Timestamp(row["TrainEndDate"])) + 1
     state = fit_forecast_state(X.iloc[:train_end], y.iloc[:train_end], model_return.iloc[:train_end], int(row["Horizon"]))
@@ -165,8 +172,29 @@ def test_aggregate_validation_keeps_rejected_observations(tmp_path):
     assert np.isclose(row["Probability"], prediction.probability_up)
     assert np.isclose(row["ExpectedReturn"], prediction.expected_return)
     assert np.isclose(row["Skill"], prediction.skill)
+    assert np.isclose(row["ValidationAUC"], state.auc)
+    assert np.isclose(row["ValidationBrier"], state.brier)
     assert row["Quality"] == state.quality
     assert row["DecisionReason"] == verdict.reason
+
+    raw_cutoff = pd.Timestamp(row["Date"])
+    truncated = histories["AAA"].loc[:raw_cutoff]
+    latest = build_features(truncated).dropna().loc[[raw_cutoff]]
+    X_cut, y_cut, returns_cut = supervised_frame(truncated, int(row["Horizon"]))
+    assert X_cut.index[-1] == pd.Timestamp(row["TrainEndDate"])
+    production_state = fit_forecast_state(X_cut, y_cut, returns_cut, int(row["Horizon"]))
+    production_prediction = production_state.predict(latest)
+    production_verdict = signal_verdict(production_prediction.signal_inputs(source="PRODUCTION_TEST"), config.threshold)
+    assert np.isclose(row["Probability"], production_prediction.probability_up)
+    assert np.isclose(row["ExpectedReturn"], production_prediction.expected_return)
+    assert np.isclose(row["Skill"], production_prediction.skill)
+    assert np.isclose(row["ValidationAUC"], production_state.auc)
+    assert np.isclose(row["ValidationBrier"], production_state.brier)
+    assert row["Quality"] == production_state.quality
+    assert row["DecisionReason"] == production_verdict.reason
+
+    date_position = X.index.get_loc(pd.Timestamp(row["Date"]))
+    assert train_end == available_label_end(date_position, int(row["Horizon"]))
 
 
 def test_fold_selection_is_evenly_distributed_before_holdout():

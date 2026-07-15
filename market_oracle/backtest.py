@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
+from .cutoff import available_label_end
 from .features import build_features
 from .model import FittedForecastState, fit_forecast_state
 from .risk import periods_per_year
@@ -80,7 +81,7 @@ def walk_forward_backtest(
     state: FittedForecastState | None = None
     for i in range(start, len(X)):
         if state is None or (i - start) % max(1, refit_every) == 0:
-            train_end = i - horizon - 1
+            train_end = available_label_end(i, horizon)
             if train_end < 250:
                 continue
             state = _fit_backtest_state(X, y, model_forward, train_end, horizon)
