@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import time
 from typing import Any
 
@@ -33,6 +34,24 @@ DEFAULT_SYMBOLS = {
     "QQQ": "ETF",
     "BTC-USD": "CRYPTO",
     "ETH-USD": "CRYPTO",
+}
+
+PIPELINE_FILES = (
+    "run_validation.py",
+    "market_oracle/model.py",
+    "market_oracle/features.py",
+    "market_oracle/validation.py",
+    "market_oracle/backtest.py",
+    "market_oracle/signals.py",
+    "market_oracle/cutoff.py",
+    "market_oracle/engine.py",
+)
+
+REQUIRED_RECORD_COLUMNS = {
+    "Date", "Symbol", "Market", "Horizon", "Fold", "FoldType",
+    "TrainEndDate", "AvailableTrainEndDate", "Position", "DecisionReason",
+    "Probability", "ExpectedReturn", "ValidationAUC", "ValidationBrier",
+    "Return", "ActualUp", "Target", "Execution",
 }
 
 
@@ -69,9 +88,15 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
+def _atomic_replace_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.{int(time.time() * 1_000_000)}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    _atomic_replace_text(path, json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -112,6 +137,53 @@ def _load_or_download_history(symbol: str, years: int, cache_dir: Path, refresh_
     return frame
 
 
+def _cache_metadata(symbol: str, years: int, cache_dir: Path) -> dict[str, Any]:
+    _, meta_path = _cache_paths(cache_dir, symbol, years)
+    meta = _read_json(meta_path) or {}
+    return {
+        "symbol": symbol,
+        "years": int(years),
+        "rows": meta.get("rows"),
+        "start": meta.get("start"),
+        "end": meta.get("end"),
+        "cached_at_utc": meta.get("cached_at_utc"),
+    }
+
+
+def _current_commit() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def _pipeline_fingerprint() -> dict[str, Any]:
+    root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    files: dict[str, str] = {}
+    for relative in PIPELINE_FILES:
+        path = root / relative
+        if not path.exists():
+            continue
+        data = path.read_bytes()
+        file_hash = hashlib.sha256(data).hexdigest()[:16]
+        files[relative] = file_hash
+        digest.update(relative.encode())
+        digest.update(data)
+    return {
+        "git_commit": _current_commit(),
+        "pipeline_hash": digest.hexdigest()[:24],
+        "files": files,
+    }
+
+
 def _job_key(symbol: str, horizon: int) -> str:
     return f"{_safe_name(symbol)}_h{horizon}"
 
@@ -127,9 +199,23 @@ def _records_frame(records: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def _write_records(path: Path, records: list[dict[str, Any]]) -> None:
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_records(path: Path, records: list[dict[str, Any]]) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    _records_frame(records).to_csv(path, index=False)
+    tmp = path.with_name(f".{path.name}.{int(time.time() * 1_000_000)}.tmp")
+    _records_frame(records).to_csv(tmp, index=False)
+    tmp.replace(path)
+    return {
+        "rows": int(len(records)),
+        "records_sha256": _file_sha256(path),
+    }
 
 
 def _write_status(path: Path, payload: dict[str, Any]) -> None:
@@ -149,19 +235,42 @@ def _write_jobs_index(job_dir: Path, statuses: dict[str, dict[str, Any]], experi
     return path
 
 
+def _read_and_validate_job_records(
+    path: Path, rows: int, expected_sha256: str | None,
+) -> tuple[bool, pd.DataFrame, str | None]:
+    if rows <= 0:
+        return True, pd.DataFrame(), None
+    if not path.exists():
+        return False, pd.DataFrame(), "records_missing"
+    if expected_sha256 and _file_sha256(path) != expected_sha256:
+        return False, pd.DataFrame(), "records_checksum_mismatch"
+    try:
+        frame = pd.read_csv(path)
+    except Exception as exc:
+        return False, pd.DataFrame(), f"records_unreadable:{exc}"
+    if len(frame) != rows:
+        return False, pd.DataFrame(), f"row_count_mismatch:status={rows}:file={len(frame)}"
+    missing = sorted(REQUIRED_RECORD_COLUMNS - set(frame.columns))
+    if missing:
+        return False, pd.DataFrame(), f"missing_columns:{','.join(missing)}"
+    return True, frame, None
+
+
 def _valid_completed_job(status: dict[str, Any] | None, records_path: Path, config_hash: str, fingerprint: str) -> bool:
     if not status or status.get("status") != "DONE":
         return False
     if status.get("config_hash") != config_hash or status.get("data_fingerprint") != fingerprint:
         return False
     rows = int(status.get("rows", 0))
-    return rows == 0 or records_path.exists()
+    ok, _, _ = _read_and_validate_job_records(records_path, rows, status.get("records_sha256"))
+    return ok
 
 
-def _read_job_records(path: Path, rows: int) -> pd.DataFrame:
-    if rows <= 0:
-        return pd.DataFrame()
-    return pd.read_csv(path)
+def _read_job_records(path: Path, rows: int, sha256: str | None) -> pd.DataFrame:
+    ok, frame, reason = _read_and_validate_job_records(path, rows, sha256)
+    if not ok:
+        raise RuntimeError(f"Nieprawidłowy plik joba {path}: {reason}")
+    return frame
 
 
 def _job_config(
@@ -171,6 +280,7 @@ def _job_config(
     years: int,
     benchmark: str | None,
     config: ValidationConfig,
+    pipeline: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "symbol": symbol,
@@ -179,6 +289,7 @@ def _job_config(
         "years": int(years),
         "benchmark": benchmark,
         "config": asdict(config),
+        "pipeline": pipeline,
     }
 
 
@@ -216,47 +327,61 @@ def main() -> None:
     )
     output_dir = Path(args.output_dir)
     cache_dir = Path(args.cache_dir) if args.cache_dir else output_dir / "cache"
+    pipeline = _pipeline_fingerprint()
     experiment = {
         "id": _json_hash({
             "symbols": symbols,
             "horizons": horizons,
             "years": args.years,
             "config": asdict(config),
+            "pipeline": pipeline,
         }),
         "requested_universe": symbols,
         "horizons": horizons,
         "years": int(args.years),
         "config": asdict(config),
+        "pipeline": pipeline,
     }
     job_dir = output_dir / "jobs" / experiment["id"]
     job_dir.mkdir(parents=True, exist_ok=True)
 
     print("EXPERIMENT", json.dumps(experiment, ensure_ascii=False, default=str), flush=True)
     print(
-        "UWAGA: refit_every=1/5 jest ciężki obliczeniowo. Runner ma cache, resume i zapisuje joby symbol×horizon.",
+        "UWAGA: refit_every=1/5 jest ciężki obliczeniowo. Runner ma cache i job-level resume dla jobów symbol×horizon.",
         flush=True,
     )
 
     histories: dict[str, pd.DataFrame] = {}
     contexts: dict[str, pd.DataFrame | None] = {}
     benchmarks: dict[str, str | None] = {}
+    context_required: dict[str, bool] = {}
+    context_ok: dict[str, bool] = {}
+    cache_metadata: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
     for symbol in symbols:
         try:
             histories[symbol] = _load_or_download_history(symbol, args.years, cache_dir, args.refresh_cache)
+            cache_metadata[symbol] = _cache_metadata(symbol, args.years, cache_dir)
             benchmark = _benchmark_for(symbol)
             benchmarks[symbol] = benchmark
+            context_required[symbol] = bool(benchmark)
             if benchmark:
                 try:
                     print(f"CONTEXT_START {symbol} benchmark={benchmark}", flush=True)
                     contexts[symbol] = _load_or_download_history(benchmark, args.years, cache_dir, args.refresh_cache)
+                    cache_metadata[f"context:{symbol}"] = _cache_metadata(benchmark, args.years, cache_dir)
+                    context_ok[symbol] = True
                 except Exception as exc:
                     contexts[symbol] = None
+                    context_ok[symbol] = False
                     errors[f"context:{symbol}"] = str(exc)
                     print(f"CONTEXT_ERROR {symbol} {exc}", flush=True)
             else:
                 contexts[symbol] = None
+                context_ok[symbol] = True
         except Exception as exc:
+            context_required[symbol] = False
+            context_ok[symbol] = False
             errors[symbol] = str(exc)
             print(f"DOWNLOAD_ERROR {symbol} {exc}", flush=True)
 
@@ -264,6 +389,76 @@ def main() -> None:
     statuses: dict[str, dict[str, Any]] = {}
     for symbol, market in symbols.items():
         if symbol not in histories:
+            for horizon in horizons:
+                cfg = ValidationConfig(
+                    horizons=(horizon,),
+                    initial_train=args.initial_train,
+                    test_size=args.test_size,
+                    max_folds=args.max_folds,
+                    holdout_size=args.holdout_size,
+                    refit_every=args.refit_every,
+                    cost_bps=args.cost_bps,
+                    slippage_bps=args.slippage_bps,
+                )
+                key = _job_key(symbol, horizon)
+                paths = _job_paths(job_dir, key)
+                status = {
+                    "job_key": key,
+                    "symbol": symbol,
+                    "market": market,
+                    "horizon": int(horizon),
+                    "status": "FAILED",
+                    "error": errors.get(symbol, "history_unavailable"),
+                    "reason": "HISTORY_UNAVAILABLE",
+                    "config_hash": _json_hash(_job_config(symbol, market, horizon, args.years, None, cfg, pipeline)),
+                    "data_fingerprint": None,
+                    "pipeline": pipeline,
+                    "records_path": str(paths["records"]),
+                    "status_path": str(paths["status"]),
+                    "rows": 0,
+                    "records_sha256": None,
+                }
+                statuses[key] = status
+                _write_status(paths["status"], status)
+            continue
+        if context_required.get(symbol) and not context_ok.get(symbol):
+            for horizon in horizons:
+                cfg = ValidationConfig(
+                    horizons=(horizon,),
+                    initial_train=args.initial_train,
+                    test_size=args.test_size,
+                    max_folds=args.max_folds,
+                    holdout_size=args.holdout_size,
+                    refit_every=args.refit_every,
+                    cost_bps=args.cost_bps,
+                    slippage_bps=args.slippage_bps,
+                )
+                fingerprint, ranges = data_fingerprint({symbol: histories[symbol]}, {})
+                key = _job_key(symbol, horizon)
+                paths = _job_paths(job_dir, key)
+                config_payload = _job_config(symbol, market, horizon, args.years, benchmarks.get(symbol), cfg, pipeline)
+                status = {
+                    "job_key": key,
+                    "symbol": symbol,
+                    "market": market,
+                    "horizon": int(horizon),
+                    "status": "FAILED",
+                    "error": errors.get(f"context:{symbol}", "context_unavailable"),
+                    "reason": "CONTEXT_UNAVAILABLE",
+                    "config_hash": _json_hash(config_payload),
+                    "data_fingerprint": fingerprint,
+                    "data_ranges": ranges,
+                    "data_as_of": str(histories[symbol].index.max().date()),
+                    "context_required": True,
+                    "context_available": False,
+                    "pipeline": pipeline,
+                    "records_path": str(paths["records"]),
+                    "status_path": str(paths["status"]),
+                    "rows": 0,
+                    "records_sha256": None,
+                }
+                statuses[key] = status
+                _write_status(paths["status"], status)
             continue
         for horizon in horizons:
             cfg = ValidationConfig(
@@ -277,7 +472,7 @@ def main() -> None:
                 slippage_bps=args.slippage_bps,
             )
             fingerprint, ranges = data_fingerprint({symbol: histories[symbol]}, {symbol: contexts.get(symbol)})
-            config_payload = _job_config(symbol, market, horizon, args.years, benchmarks.get(symbol), cfg)
+            config_payload = _job_config(symbol, market, horizon, args.years, benchmarks.get(symbol), cfg, pipeline)
             config_hash = _json_hash(config_payload)
             key = _job_key(symbol, horizon)
             paths = _job_paths(job_dir, key)
@@ -292,9 +487,22 @@ def main() -> None:
                 "config_hash": config_hash,
                 "data_fingerprint": fingerprint,
                 "data_ranges": ranges,
+                "data_as_of": str(histories[symbol].index.max().date()),
+                "context_as_of": (
+                    str(contexts[symbol].index.max().date())
+                    if contexts.get(symbol) is not None and not contexts[symbol].empty else None
+                ),
+                "context_required": bool(context_required.get(symbol)),
+                "context_available": bool(context_ok.get(symbol)),
+                "cache_metadata": {
+                    "symbol": cache_metadata.get(symbol),
+                    "context": cache_metadata.get(f"context:{symbol}"),
+                },
+                "pipeline": pipeline,
                 "records_path": str(paths["records"]),
                 "status_path": str(paths["status"]),
                 "rows": int(previous_status.get("rows", 0)) if completed_valid else 0,
+                "records_sha256": previous_status.get("records_sha256") if completed_valid else None,
             }
             jobs.append({
                 "symbol": symbol,
@@ -328,7 +536,6 @@ def main() -> None:
 
     validation_module.fit_forecast_state = logged_fit
     frames: list[pd.DataFrame] = []
-    completed_symbols: dict[str, str] = {}
     started = time.time()
     for job in jobs:
         symbol = str(job["symbol"])
@@ -340,10 +547,9 @@ def main() -> None:
         if not args.no_resume and _valid_completed_job(previous_status, paths["records"], job["config_hash"], job["fingerprint"]):
             rows = int(previous_status.get("rows", 0))
             print(f"RESUME_SKIP {key} rows={rows}", flush=True)
-            part = _read_job_records(paths["records"], rows)
+            part = _read_job_records(paths["records"], rows, previous_status.get("records_sha256"))
             if not part.empty:
                 frames.append(part)
-                completed_symbols[symbol] = market
             statuses[key] = {**statuses[key], **previous_status, "status": "DONE"}
             _write_jobs_index(job_dir, statuses, experiment)
             continue
@@ -357,24 +563,25 @@ def main() -> None:
             "status": "RUNNING",
             "started_at_utc": _utc_now(),
             "rows": 0,
+            "records_sha256": None,
             "error": None,
         })
-        statuses[key] = {**statuses[key], "status": "RUNNING", "rows": 0}
+        statuses[key] = {**statuses[key], "status": "RUNNING", "rows": 0, "records_sha256": None}
         _write_jobs_index(job_dir, statuses, experiment)
         print(f"VALIDATE_START {key} market={market}", flush=True)
 
         def on_record(record: dict[str, Any]) -> None:
             job_records.append(record)
             if len(job_records) % max(1, args.save_every_records) == 0:
-                _write_records(paths["records"], job_records)
-                _write_status(paths["status"], {"status": "RUNNING", "rows": len(job_records)})
+                record_meta = _write_records(paths["records"], job_records)
+                _write_status(paths["status"], {"status": "RUNNING", **record_meta})
 
         def on_refit(info: dict[str, Any]) -> None:
             if job_records:
-                _write_records(paths["records"], job_records)
+                record_meta = _write_records(paths["records"], job_records)
                 _write_status(paths["status"], {
                     "status": "RUNNING",
-                    "rows": len(job_records),
+                    **record_meta,
                     "last_refit": info,
                 })
             print(
@@ -393,58 +600,84 @@ def main() -> None:
                 refit_callback=on_refit,
             )
             job_records = part.to_dict("records")
-            _write_records(paths["records"], job_records)
+            record_meta = _write_records(paths["records"], job_records)
             _write_status(paths["status"], {
                 **statuses[key],
                 "status": "DONE",
-                "rows": int(len(part)),
+                **record_meta,
                 "seconds": round(time.time() - t0, 2),
                 "finished_at_utc": _utc_now(),
                 "error": None,
             })
-            statuses[key] = {**statuses[key], "status": "DONE", "rows": int(len(part))}
+            statuses[key] = {**statuses[key], "status": "DONE", **record_meta}
             if not part.empty:
                 frames.append(part)
-                completed_symbols[symbol] = market
             trades = int((part["Position"] != 0).sum()) if not part.empty else 0
             print(f"VALIDATE_DONE {key} rows={len(part)} trades={trades} seconds={time.time() - t0:.1f}", flush=True)
         except KeyboardInterrupt:
             if job_records:
-                _write_records(paths["records"], job_records)
+                record_meta = _write_records(paths["records"], job_records)
+            else:
+                record_meta = {"rows": 0, "records_sha256": None}
             _write_status(paths["status"], {
                 **statuses[key],
                 "status": "INTERRUPTED",
-                "rows": len(job_records),
+                **record_meta,
                 "interrupted_at_utc": _utc_now(),
             })
-            statuses[key] = {**statuses[key], "status": "INTERRUPTED", "rows": len(job_records)}
+            statuses[key] = {**statuses[key], "status": "INTERRUPTED", **record_meta}
             _write_jobs_index(job_dir, statuses, experiment)
             print(f"INTERRUPTED {key} rows_saved={len(job_records)}", flush=True)
             raise
         except Exception as exc:
             errors[f"{symbol}:{horizon}"] = str(exc)
+            if job_records:
+                record_meta = _write_records(paths["records"], job_records)
+            else:
+                record_meta = {"rows": 0, "records_sha256": None}
             _write_status(paths["status"], {
                 **statuses[key],
                 "status": "FAILED",
-                "rows": len(job_records),
+                **record_meta,
                 "error": str(exc),
                 "failed_at_utc": _utc_now(),
             })
-            statuses[key] = {**statuses[key], "status": "FAILED", "rows": len(job_records), "error": str(exc)}
+            statuses[key] = {**statuses[key], "status": "FAILED", **record_meta, "error": str(exc)}
             print(f"VALIDATE_ERROR {key} {exc}", flush=True)
         finally:
             _write_jobs_index(job_dir, statuses, experiment)
 
     frame = pd.concat([f for f in frames if not f.empty], ignore_index=True) if frames else pd.DataFrame()
-    completed_histories = {symbol: histories[symbol] for symbol in completed_symbols if symbol in histories}
-    completed_contexts = {symbol: contexts.get(symbol) for symbol in completed_symbols}
+    coverage: dict[str, dict[str, str]] = {
+        symbol: {str(horizon): statuses.get(_job_key(symbol, horizon), {}).get("status", "MISSING") for horizon in horizons}
+        for symbol in symbols
+    }
+    complete_symbols = {
+        symbol: market
+        for symbol, market in symbols.items()
+        if all(coverage.get(symbol, {}).get(str(horizon)) == "DONE" for horizon in horizons)
+    }
+    symbols_with_rows = (
+        {str(symbol): symbols.get(str(symbol), "Unknown") for symbol in sorted(frame["Symbol"].unique())}
+        if not frame.empty else {}
+    )
+    completed_histories = {symbol: histories[symbol] for symbol in symbols_with_rows if symbol in histories}
+    completed_contexts = {symbol: contexts.get(symbol) for symbol in symbols_with_rows}
     fingerprint, ranges = data_fingerprint(completed_histories, completed_contexts)
     frame.attrs["data_fingerprint"] = fingerprint
     frame.attrs["data_ranges"] = ranges
+    data_as_of = {
+        symbol: str(histories[symbol].index.max().date())
+        for symbol in histories
+    }
     runner_manifest = {
         "experiment": experiment,
         "requested_universe": symbols,
-        "completed_universe": completed_symbols,
+        "completed_universe": complete_symbols,
+        "symbols_with_rows": symbols_with_rows,
+        "job_coverage": coverage,
+        "data_as_of": data_as_of,
+        "cache_metadata": cache_metadata,
         "errors": errors,
         "job_index": str(index_path),
         "rows": int(len(frame)),
@@ -454,13 +687,25 @@ def main() -> None:
     runner_manifest_path = job_dir / "runner_manifest.json"
     _write_json(runner_manifest_path, runner_manifest)
     print("DOWNLOAD_OR_RUNTIME_ERRORS", json.dumps(errors, ensure_ascii=False, indent=2, default=str), flush=True)
-    print("COMPLETED_UNIVERSE", json.dumps(completed_symbols, ensure_ascii=False, default=str), flush=True)
+    print("COMPLETED_UNIVERSE", json.dumps(complete_symbols, ensure_ascii=False, default=str), flush=True)
+    print("JOB_COVERAGE", json.dumps(coverage, ensure_ascii=False, default=str), flush=True)
     print("ROWS", len(frame), "SECONDS", round(time.time() - started, 1), flush=True)
     print(f"RUNNER_MANIFEST {runner_manifest_path}", flush=True)
     if frame.empty:
         raise SystemExit("No validation rows produced.")
 
-    report = validation_report(frame, config, completed_symbols)
+    report = validation_report(frame, config, symbols_with_rows)
+    report["manifest"] = {
+        **report["manifest"],
+        "requested_universe": symbols,
+        "completed_universe": complete_symbols,
+        "symbols_with_rows": symbols_with_rows,
+        "job_coverage": coverage,
+        "runner_manifest": str(runner_manifest_path),
+        "data_as_of": data_as_of,
+        "cache_metadata": cache_metadata,
+        "pipeline": pipeline,
+    }
     written = save_validation_artifacts(frame, report, output_dir)
     summary = aggregate_summary(frame)
     print("ARTIFACTS", json.dumps(written, ensure_ascii=False, indent=2, default=str), flush=True)
