@@ -261,9 +261,20 @@ def test_validation_uses_all_valid_rows_without_holdout_and_freezes_between_refi
     config = ValidationConfig(
         horizons=(1,), initial_train=260, test_size=20, max_folds=1, holdout_size=0, refit_every=5,
     )
-    frame = validation_module.validate_history("AAA", synthetic_data(620), market="USA", config=config)
+    observed_records = []
+    observed_refits = []
+    frame = validation_module.validate_history(
+        "AAA",
+        synthetic_data(620),
+        market="USA",
+        config=config,
+        record_callback=observed_records.append,
+        refit_callback=observed_refits.append,
+    )
     walk = frame[frame["FoldType"] == "WALK_FORWARD"].sort_values("Date").reset_index(drop=True)
     assert len(walk) == 20
+    assert len(observed_records) == len(walk)
+    assert [event["available_train_end"] for event in observed_refits[:4]] == [260, 265, 270, 275]
     assert train_lengths[:4] == [260, 265, 270, 275]
     assert walk.loc[:4, "TrainEndDate"].nunique() == 1
     assert walk.loc[0, "TrainEndDate"] == walk.loc[0, "AvailableTrainEndDate"]

@@ -174,6 +174,8 @@ def validate_history(
     market: str = "Unknown",
     context: pd.DataFrame | None = None,
     config: ValidationConfig = ValidationConfig(),
+    record_callback: Callable[[dict], None] | None = None,
+    refit_callback: Callable[[dict], None] | None = None,
 ) -> pd.DataFrame:
     """Validate one instrument across horizons and chronological folds.
 
@@ -198,6 +200,19 @@ def validate_history(
                     or i - last_refit_position >= max(1, int(config.refit_every))
                 )
                 if should_refit:
+                    if refit_callback is not None:
+                        refit_callback({
+                            "symbol": symbol,
+                            "market": market,
+                            "horizon": int(horizon),
+                            "fold": int(fold.fold_id),
+                            "fold_type": fold.fold_type,
+                            "index_position": int(i),
+                            "date": X.index[i],
+                            "available_train_end": int(available_train),
+                            "available_train_end_date": X.index[available_train - 1],
+                            "refit_every": int(config.refit_every),
+                        })
                     try:
                         state = fit_forecast_state(
                             X.iloc[:available_train],
@@ -211,25 +226,26 @@ def validate_history(
                     last_train_end = available_train
                 if state is None or last_train_end is None:
                     continue
-                records.append(
-                    _signal_record(
-                        symbol=symbol,
-                        market=market,
-                        horizon=horizon,
-                        fold=fold,
-                        index_position=i,
-                        X=X,
-                        y=y,
-                        model_forward=model_forward,
-                        execution_forward=execution_forward,
-                        prices=prices,
-                        state=state,
-                        available_train_end=available_train,
-                        refit_every=config.refit_every,
-                        threshold=config.threshold,
-                        total_cost=total_cost,
-                    )
+                record = _signal_record(
+                    symbol=symbol,
+                    market=market,
+                    horizon=horizon,
+                    fold=fold,
+                    index_position=i,
+                    X=X,
+                    y=y,
+                    model_forward=model_forward,
+                    execution_forward=execution_forward,
+                    prices=prices,
+                    state=state,
+                    available_train_end=available_train,
+                    refit_every=config.refit_every,
+                    threshold=config.threshold,
+                    total_cost=total_cost,
                 )
+                records.append(record)
+                if record_callback is not None:
+                    record_callback(record)
     return pd.DataFrame(records)
 
 
