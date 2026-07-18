@@ -204,15 +204,9 @@ def run_signal_scan(
             except Exception:
                 # Journal is diagnostic; a write/evaluation issue should never destroy the market scan.
                 pass
-            try:
-                from .forward import record_snapshot_forward_signals
-
-                record_snapshot_forward_signals(payload)
-            except Exception as exc:
-                # Forward ledger is append-only evidence; recording issues should be visible via the CLI,
-                # but must not break the market scanner itself.
-                payload["forward_ledger_error"] = str(exc)
-                save_snapshot(payload, path)
+            payload["forward_ledger_status"] = "not_recorded_generic_two_stage_scan"
+            payload["forward_ledger_note"] = "Candidate v1 proof ledger uses run_candidate_forward.py with a frozen full-ML universe."
+            save_snapshot(payload, path)
         return payload
     finally:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

@@ -66,10 +66,16 @@ Po Reality Check Candidate v1 został zamrożony w `configs/marketscope_20d_long
 Forward Test Ledger zapisuje nowe sygnały jako append-only JSONL w `data/forward_ledger_candidate_v1.jsonl`. Stare rekordy nie są edytowane ani usuwane: każdy wpis ma `previous_event_hash` i `event_hash`, więc ręczna zmiana wcześniejszej linii jest wykrywana przy odczycie. Cykl zdarzeń to `SNAPSHOT_AUDIT`, `SIGNAL_OBSERVED`, potem `POSITION_ACCEPTED` albo `POSITION_SKIPPED`, następnie `ENTRY_FILLED`, a po 20 sesjach `POSITION_CLOSED`.
 
 ```bash
-.venv/bin/python run_forward_test.py --record-snapshot --refresh
+.venv/bin/python run_candidate_forward.py
 ```
 
-Pełny skan monitora dopisuje nowe sygnały Candidate v1 automatycznie po zakończeniu snapshotu. Forward ledger odrzuca snapshoty sprzed `frozen_at`, snapshoty bez zgodnego pipeline hash, brudne pliki modelu/decyzji oraz sygnały z dziennej świecy, która według czasu snapshotu nie jest jeszcze bezpiecznie zamknięta. Komenda powyżej jest przydatna do ręcznego dopisania sygnałów z ostatniego `data/signals.json` oraz do uzupełnienia wejść/wyjść, gdy nowe ceny są już dostępne.
+Ta komenda wykonuje właściwą kolejność dowodową: najpierw odświeża stare pozycje na dostępnych cenach `Open`, potem robi pełny skan ML Candidate v1 po zamknięciu świecy, a dopiero na końcu zapisuje nowe obserwacje i przydziela sloty. Zwykły dashboardowy monitor jest radarem użytkowym i nie karmi już proof ledgera, bo używa FAST shortlisty. Proof ledger korzysta z osobnego, zamrożonego `configs/forward_universe_v1.json`: dokładnie 5 symboli oryginalnego USA/ETF koszyka Candidate v1, tylko horyzont 20, pełne ML dla każdego symbolu, bez FAST shortlisty. Snapshot trafia do `data/candidate_v1_snapshot.json` i musi zawierać hash universe oraz pełne pokrycie `requested/completed/failed`.
+
+Forward ledger odrzuca snapshoty sprzed `frozen_at`, snapshoty bez zgodnego pipeline hash, brudne pliki modelu/decyzji/kontraktu, niepełny universe, brak jawnego `DecisionReason == LONG_CONFIRMED` dla kandydatów oraz sygnały z dziennej świecy, która według czasu snapshotu nie jest jeszcze bezpiecznie zamknięta. Jeśli chcesz tylko ręcznie uzupełnić wejścia/wyjścia dla istniejącego candidate snapshotu, użyj:
+
+```bash
+.venv/bin/python run_forward_test.py --record-snapshot --refresh
+```
 
 Osobny, wcześniej nieużywany koszyk USA/ETF do kolejnego testu jest zapisany i zahashowany w `configs/unseen_usa_etf_v1.json`. Nie należy zmieniać modeli, cech ani progów Candidate v1 po zobaczeniu jego wyników. Runner unseen zapisuje preflight manifest i odpala walidację do osobnego folderu:
 

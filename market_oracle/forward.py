@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 
 from .data import download_history
-from .signals import SignalInputs, signal_verdict
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,7 +22,9 @@ CONFIG_DIR = ROOT / "configs"
 DATA_DIR = ROOT / "data"
 CANDIDATE_MANIFEST_PATH = CONFIG_DIR / "marketscope_20d_long_candidate_v1.json"
 UNSEEN_UNIVERSE_PATH = CONFIG_DIR / "unseen_usa_etf_v1.json"
+FORWARD_UNIVERSE_PATH = CONFIG_DIR / "forward_universe_v1.json"
 FORWARD_LEDGER_PATH = DATA_DIR / "forward_ledger_candidate_v1.jsonl"
+CANDIDATE_SNAPSHOT_PATH = DATA_DIR / "candidate_v1_snapshot.json"
 
 SIGNAL_EVENT = "SIGNAL_OBSERVED"
 SNAPSHOT_AUDIT_EVENT = "SNAPSHOT_AUDIT"
@@ -42,6 +43,7 @@ PIPELINE_FILES = (
 )
 CONTRACT_FILES = PIPELINE_FILES + (
     "configs/marketscope_20d_long_candidate_v1.json",
+    "configs/forward_universe_v1.json",
     "configs/unseen_usa_etf_v1.json",
 )
 WARSAW = ZoneInfo("Europe/Warsaw")
@@ -134,6 +136,10 @@ def load_candidate_manifest(path: Path = CANDIDATE_MANIFEST_PATH) -> dict[str, A
 
 
 def load_unseen_universe(path: Path = UNSEEN_UNIVERSE_PATH) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_forward_universe(path: Path = FORWARD_UNIVERSE_PATH) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -345,6 +351,29 @@ def snapshot_has_closed_daily_bars(
     return True
 
 
+def validate_forward_universe_snapshot(snapshot: dict[str, Any], universe: dict[str, Any]) -> None:
+    if not verify_frozen_hash(universe, "universe_hash"):
+        raise ValueError("Forward universe hash mismatch.")
+    meta = snapshot.get("forward_universe") or {}
+    if meta.get("universe_hash") != universe.get("universe_hash"):
+        raise ValueError("Snapshot forward universe hash is missing or different from frozen forward_universe_v1.")
+    if snapshot.get("scan_mode") != "candidate_v1_full_ml":
+        raise ValueError("Snapshot was not produced by the full Candidate v1 ML scanner.")
+    expected = {str(symbol).upper() for symbol in universe.get("symbols") or []}
+    requested = {str(symbol).upper() for symbol in meta.get("requested_symbols") or []}
+    completed = {str(symbol).upper() for symbol in meta.get("completed_symbols") or []}
+    failed = {str(symbol).upper() for symbol in meta.get("failed_symbols") or []}
+    if requested != expected:
+        raise ValueError("Snapshot requested universe does not equal frozen forward_universe_v1.")
+    if failed:
+        raise ValueError(f"Snapshot has failed Candidate v1 symbols: {sorted(failed)}")
+    if completed != expected:
+        missing = sorted(expected - completed)
+        raise ValueError(f"Snapshot does not cover every Candidate v1 symbol: missing={missing}")
+    if not bool(meta.get("full_coverage")):
+        raise ValueError("Snapshot forward universe does not declare full_coverage=true.")
+
+
 def _symbol_is_candidate_scope(symbol: str, asset_class: str, manifest: dict[str, Any]) -> bool:
     symbol = symbol.strip().upper()
     asset_class = asset_class.strip()
@@ -360,23 +389,15 @@ def row_decision_reason(row: dict[str, Any], manifest: dict[str, Any]) -> tuple[
     explicit = row.get("DecisionReason")
     if explicit:
         return str(explicit), "SNAPSHOT_EXPLICIT"
-    contract = manifest.get("decision_contract", {})
-    verdict = signal_verdict(
-        SignalInputs(
-            probability=_float(row, "P(wzrost)", 0.5),
-            expected_return=_float(row, "Oczekiwany ruch", 0.0),
-            quality=_text(row, "Jakość modelu", "NISKA — BRAK PRZEWAGI"),
-            auc=_float(row, "AUC walidacji", 0.5),
-            brier=_float(row, "Brier", 0.25),
-            source=_text(row, "Tryb analizy", "ML"),
-        ),
-        threshold=float(contract.get("threshold", 0.55)),
-        min_expected_return=float(contract.get("min_expected_return", 0.0)),
-    )
-    return verdict.reason, "DERIVED_FROM_SIGNAL_INPUTS"
+    return None, "MISSING_DECISION_REASON"
 
 
-def is_candidate_row(row: dict[str, Any], manifest: dict[str, Any] | None = None) -> bool:
+def _base_candidate_row_checks(
+    row: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    check_decision_reason: bool,
+) -> bool:
     manifest = manifest or load_candidate_manifest()
     contract = manifest.get("decision_contract", {})
     scope = manifest.get("scope", {})
@@ -404,11 +425,23 @@ def is_candidate_row(row: dict[str, Any], manifest: dict[str, Any] | None = None
         return False
     if expected < float(contract.get("min_expected_return", 0.0)):
         return False
-    reason, _ = row_decision_reason(row, manifest)
-    required_reason = contract.get("required_decision_reason")
-    if required_reason and reason != required_reason:
-        return False
+    if check_decision_reason:
+        reason, _ = row_decision_reason(row, manifest)
+        required_reason = contract.get("required_decision_reason")
+        if required_reason and reason != required_reason:
+            return False
     return _symbol_is_candidate_scope(symbol, _text(row, "Klasa"), manifest)
+
+
+def is_candidate_row(row: dict[str, Any], manifest: dict[str, Any] | None = None) -> bool:
+    manifest = manifest or load_candidate_manifest()
+    return _base_candidate_row_checks(row, manifest, check_decision_reason=True)
+
+
+def is_candidate_row_missing_explicit_reason(row: dict[str, Any], manifest: dict[str, Any]) -> bool:
+    if row.get("DecisionReason"):
+        return False
+    return _base_candidate_row_checks(row, manifest, check_decision_reason=False)
 
 
 def forward_signal_id(row: dict[str, Any], manifest: dict[str, Any], signal_date: str) -> str:
@@ -469,10 +502,12 @@ def record_snapshot_forward_signals(
     *,
     path: Path = FORWARD_LEDGER_PATH,
     manifest_path: Path = CANDIDATE_MANIFEST_PATH,
+    universe_path: Path = FORWARD_UNIVERSE_PATH,
     allow_historical: bool = False,
     enforce_pipeline: bool = True,
     require_clean_tree: bool = True,
     require_closed_bar: bool = True,
+    require_full_universe: bool = True,
 ) -> int:
     """Append new Candidate v1 signals from a completed monitor snapshot.
 
@@ -488,6 +523,8 @@ def record_snapshot_forward_signals(
         require_clean_tree=require_clean_tree,
         enforce_pipeline=enforce_pipeline,
     )
+    if require_full_universe:
+        validate_forward_universe_snapshot(snapshot, load_forward_universe(universe_path))
     if not allow_historical and not snapshot_after_freeze(snapshot, manifest):
         raise ValueError("Snapshot is older than Candidate v1 frozen_at; refusing historical backfill.")
     current_pipeline = pipeline_fingerprint()
@@ -496,6 +533,13 @@ def record_snapshot_forward_signals(
         raise ValueError("Snapshot pipeline hash missing or different from the frozen Candidate v1 pipeline.")
 
     raw_rows = [row for row in snapshot.get("records") or [] if isinstance(row, dict)]
+    missing_reason = [
+        _text(row, "Symbol").strip().upper()
+        for row in raw_rows
+        if is_candidate_row_missing_explicit_reason(row, manifest)
+    ]
+    if missing_reason:
+        raise ValueError(f"Candidate v1 rows missing explicit DecisionReason: {sorted(missing_reason)}")
     candidate_rows = [row for row in raw_rows if is_candidate_row(row, manifest)]
     if not allow_historical:
         candidate_rows = [
@@ -523,6 +567,7 @@ def record_snapshot_forward_signals(
         state = reconstruct_forward_state(events)
 
         if not audit_exists:
+            universe_meta = snapshot.get("forward_universe") or {}
             _append_forward_event_unlocked({
                 "event_type": SNAPSHOT_AUDIT_EVENT,
                 "candidate_id": manifest["candidate_id"],
@@ -533,6 +578,12 @@ def record_snapshot_forward_signals(
                 "snapshot_schema_version": snapshot.get("schema_version"),
                 "snapshot_pipeline_hash": snapshot_pipeline.get("pipeline_hash"),
                 "current_pipeline_hash": current_pipeline["pipeline_hash"],
+                "universe_id": universe_meta.get("universe_id"),
+                "universe_hash": universe_meta.get("universe_hash"),
+                "requested_symbols": universe_meta.get("requested_symbols"),
+                "completed_symbols": universe_meta.get("completed_symbols"),
+                "failed_symbols": universe_meta.get("failed_symbols"),
+                "full_universe_coverage": bool(universe_meta.get("full_coverage")),
                 "records_total": len(raw_rows),
                 "candidate_rows": len(candidate_rows),
                 "errors": snapshot.get("errors") or {},
@@ -667,6 +718,15 @@ def portfolio_gate(signal: dict[str, Any], state: dict[str, dict[str, Any]], man
     contract = manifest.get("portfolio_contract", {})
     active = _active_forward_positions(state)
     symbol = str(signal.get("symbol", "")).upper()
+    signal_date = _date_text(signal.get("signal_date"))
+    if not contract.get("allow_same_day_reentry", False) and signal_date:
+        if any(
+            item.get("status") == "CLOSED"
+            and str(item.get("symbol", "")).upper() == symbol
+            and _date_text(item.get("exit_date")) == signal_date
+            for item in state.values()
+        ):
+            return False, "POSITION_SKIPPED_SAME_DAY_REENTRY", None
     if contract.get("one_position_per_symbol", True):
         if any(str(item.get("symbol", "")).upper() == symbol for item in active):
             return False, "POSITION_SKIPPED_SYMBOL_OPEN", None

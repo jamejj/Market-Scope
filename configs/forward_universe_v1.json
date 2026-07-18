@@ -1,0 +1,37 @@
+{
+  "universe_id": "forward_universe_v1",
+  "candidate_id": "marketscope_20d_long_candidate_v1",
+  "purpose": "Frozen live-forward proof universe for Candidate v1, matching the original USA/ETF diagnostic basket.",
+  "created_at": "2026-07-18T18:00:00+02:00",
+  "frozen_before_first_snapshot": true,
+  "hash_method": "sha256(canonical_json(universe_without_universe_hash))",
+  "universe_hash": "ac0332c1fdfd84fe4770b82af444da239c57ded890b57e084df26fbfbad32ba3",
+  "config": {
+    "markets": [
+      "USA",
+      "ETF"
+    ],
+    "horizons": [
+      20
+    ],
+    "full_ml_for_every_symbol": true,
+    "fast_shortlist_allowed": false,
+    "threshold": 0.55,
+    "execution": "NEXT_OPEN",
+    "models_features_thresholds_locked_to_candidate_v1": true
+  },
+  "symbols": [
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "SPY",
+    "QQQ"
+  ],
+  "markets": {
+    "AAPL": "USA",
+    "MSFT": "USA",
+    "NVDA": "USA",
+    "SPY": "ETF",
+    "QQQ": "ETF"
+  }
+}

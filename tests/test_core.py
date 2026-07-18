@@ -7,8 +7,11 @@ from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CAT
 from market_oracle.cutoff import available_label_end
 from market_oracle.engine import observation_label, risk_reward_metrics, scan_market_fast, setup_intelligence, signal_label
 from market_oracle.features import build_features, supervised_frame
+from market_oracle.candidate import build_candidate_snapshot, run_candidate_forward_cycle
 from market_oracle.forward import (
     assert_forward_contract_ready,
+    append_forward_event,
+    load_forward_universe,
     load_candidate_manifest,
     load_forward_events,
     load_unseen_universe,
@@ -596,7 +599,7 @@ def test_signal_journal_records_and_evaluates(tmp_path, monkeypatch):
                 "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
                 "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62,
                 "Brier": 0.22, "Jakość modelu": "WYSOKA", "Score": 4.2,
-                "Tryb analizy": "ML",
+                "Tryb analizy": "ML", "DecisionReason": "LONG_CONFIRMED",
             },
             {
                 "Symbol": "FAST", "Klasa": "USA", "Horyzont": 5, "Data": "2026-01-10",
@@ -677,6 +680,7 @@ def test_paper_portfolio_applies_sizing_and_costs():
 
 def test_candidate_manifest_is_frozen_and_hash_verified():
     manifest = load_candidate_manifest()
+    forward_universe = load_forward_universe()
     unseen = load_unseen_universe()
     assert manifest["candidate_id"] == "marketscope_20d_long_candidate_v1"
     assert manifest["frozen_commit"] == "60f0a8b"
@@ -686,6 +690,8 @@ def test_candidate_manifest_is_frozen_and_hash_verified():
     assert manifest["portfolio_contract"]["max_positions"] == 5
     assert verify_frozen_hash(manifest, "manifest_hash")
     assert verify_pipeline_contract(manifest)
+    assert verify_frozen_hash(forward_universe, "universe_hash")
+    assert forward_universe["symbols"] == ["AAPL", "MSFT", "NVDA", "SPY", "QQQ"]
     assert verify_frozen_hash(unseen, "universe_hash")
     assert len(unseen["symbols"]) == 30
 
@@ -702,7 +708,7 @@ def test_forward_ledger_records_only_candidate_rows_and_is_append_only(tmp_path)
                 "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
                 "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62,
                 "Brier": 0.22, "Jakość modelu": "WYSOKA", "Score": 4.2,
-                "Tryb analizy": "ML",
+                "Tryb analizy": "ML", "DecisionReason": "LONG_CONFIRMED",
             },
             {
                 "Symbol": "FAST", "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-01-10",
@@ -734,6 +740,7 @@ def test_forward_ledger_records_only_candidate_rows_and_is_append_only(tmp_path)
         enforce_pipeline=False,
         require_clean_tree=False,
         require_closed_bar=False,
+        require_full_universe=False,
     ) == 1
     assert record_snapshot_forward_signals(
         snapshot,
@@ -742,6 +749,7 @@ def test_forward_ledger_records_only_candidate_rows_and_is_append_only(tmp_path)
         enforce_pipeline=False,
         require_clean_tree=False,
         require_closed_bar=False,
+        require_full_universe=False,
     ) == 0
     events = load_forward_events(path)
     assert len(events) == 3
@@ -754,7 +762,7 @@ def test_forward_ledger_records_only_candidate_rows_and_is_append_only(tmp_path)
     assert events[1]["execution"] == "NEXT_OPEN"
     assert events[1]["probability_up"] == 0.61
     assert events[1]["decision_reason"] == "LONG_CONFIRMED"
-    assert events[1]["decision_reason_source"] == "DERIVED_FROM_SIGNAL_INPUTS"
+    assert events[1]["decision_reason_source"] == "SNAPSHOT_EXPLICIT"
     assert events[2]["status"] == "ACCEPTED"
     assert events[2]["slot"] == 1
     assert verify_frozen_hash(load_candidate_manifest(), "manifest_hash")
@@ -771,7 +779,7 @@ def test_forward_ledger_fills_next_open_and_closes_after_horizon(tmp_path):
             "Ocena": "SILNY KANDYDAT WZROSTOWY", "P(wzrost)": 0.66,
             "Oczekiwany ruch": 0.04, "AUC walidacji": 0.67,
             "Brier": 0.21, "Jakość modelu": "WYSOKA", "Score": 5.0,
-            "Tryb analizy": "ML",
+            "Tryb analizy": "ML", "DecisionReason": "LONG_CONFIRMED",
         }],
     }
     path = tmp_path / "forward.jsonl"
@@ -782,6 +790,7 @@ def test_forward_ledger_fills_next_open_and_closes_after_horizon(tmp_path):
         enforce_pipeline=False,
         require_clean_tree=False,
         require_closed_bar=False,
+        require_full_universe=False,
     ) == 1
     dates = pd.bdate_range("2026-01-02", periods=26)
     prices = np.linspace(99.0, 125.0, len(dates))
@@ -839,7 +848,7 @@ def test_forward_ledger_rejects_old_and_unclosed_snapshots(tmp_path):
             "Symbol": "GOOD", "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-07-17",
             "Cena": 100.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
             "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62, "Brier": 0.22,
-            "Jakość modelu": "WYSOKA", "Tryb analizy": "ML",
+            "Jakość modelu": "WYSOKA", "Tryb analizy": "ML", "DecisionReason": "LONG_CONFIRMED",
         }],
     }
     with pytest.raises(ValueError, match="older than Candidate"):
@@ -848,6 +857,7 @@ def test_forward_ledger_rejects_old_and_unclosed_snapshots(tmp_path):
             path=tmp_path / "old.jsonl",
             enforce_pipeline=False,
             require_clean_tree=False,
+            require_full_universe=False,
         )
 
     intraday_snapshot = {
@@ -859,6 +869,85 @@ def test_forward_ledger_rejects_old_and_unclosed_snapshots(tmp_path):
         record_snapshot_forward_signals(
             intraday_snapshot,
             path=tmp_path / "intraday.jsonl",
+            enforce_pipeline=False,
+            require_clean_tree=False,
+            require_full_universe=False,
+        )
+
+
+def test_forward_ledger_requires_full_universe_and_explicit_reason(tmp_path):
+    universe = load_forward_universe()
+    row = {
+        "Symbol": "AAPL", "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-07-20",
+        "Cena": 100.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
+        "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62, "Brier": 0.22,
+        "Jakość modelu": "WYSOKA", "Tryb analizy": "ML", "DecisionReason": "LONG_CONFIRMED",
+    }
+    snapshot = {
+        "status": "complete",
+        "schema_version": 1,
+        "scan_mode": "candidate_v1_full_ml",
+        "updated_at": "2026-07-20T22:30:00+02:00",
+        "records": [row],
+    }
+    with pytest.raises(ValueError, match="forward universe hash"):
+        record_snapshot_forward_signals(
+            snapshot,
+            path=tmp_path / "missing_universe.jsonl",
+            enforce_pipeline=False,
+            require_clean_tree=False,
+        )
+
+    full_snapshot = {
+        **snapshot,
+        "forward_universe": {
+            "universe_id": universe["universe_id"],
+            "universe_hash": universe["universe_hash"],
+            "requested_symbols": universe["symbols"],
+            "completed_symbols": universe["symbols"][:-1],
+            "failed_symbols": [universe["symbols"][-1]],
+            "full_coverage": False,
+        },
+    }
+    with pytest.raises(ValueError, match="failed Candidate"):
+        record_snapshot_forward_signals(
+            full_snapshot,
+            path=tmp_path / "failed_universe.jsonl",
+            enforce_pipeline=False,
+            require_clean_tree=False,
+        )
+
+    no_full_coverage_snapshot = {
+        **full_snapshot,
+        "forward_universe": {
+            **full_snapshot["forward_universe"],
+            "completed_symbols": universe["symbols"],
+            "failed_symbols": [],
+            "full_coverage": False,
+        },
+    }
+    with pytest.raises(ValueError, match="full_coverage"):
+        record_snapshot_forward_signals(
+            no_full_coverage_snapshot,
+            path=tmp_path / "no_full_coverage.jsonl",
+            enforce_pipeline=False,
+            require_clean_tree=False,
+        )
+
+    missing_reason_snapshot = {
+        **full_snapshot,
+        "forward_universe": {
+            **full_snapshot["forward_universe"],
+            "completed_symbols": universe["symbols"],
+            "failed_symbols": [],
+            "full_coverage": True,
+        },
+        "records": [{key: value for key, value in row.items() if key != "DecisionReason"}],
+    }
+    with pytest.raises(ValueError, match="missing explicit DecisionReason"):
+        record_snapshot_forward_signals(
+            missing_reason_snapshot,
+            path=tmp_path / "missing_reason.jsonl",
             enforce_pipeline=False,
             require_clean_tree=False,
         )
@@ -890,7 +979,7 @@ def test_forward_ledger_portfolio_gate_and_priority_are_frozen(tmp_path):
             "Symbol": symbol, "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-07-20",
             "Cena": 100.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": probability,
             "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62, "Brier": 0.22,
-            "Jakość modelu": "WYSOKA", "Tryb analizy": "ML",
+            "Jakość modelu": "WYSOKA", "Tryb analizy": "ML", "DecisionReason": "LONG_CONFIRMED",
         })
     snapshot = {
         "status": "complete",
@@ -904,6 +993,7 @@ def test_forward_ledger_portfolio_gate_and_priority_are_frozen(tmp_path):
         path=path,
         enforce_pipeline=False,
         require_clean_tree=False,
+        require_full_universe=False,
     ) == 6
     events = load_forward_events(path)
     accepted = [event for event in events if event["event_type"] == "POSITION_ACCEPTED"]
@@ -923,13 +1013,148 @@ def test_forward_ledger_hash_chain_detects_tampering(tmp_path):
             "Symbol": "GOOD", "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-07-20",
             "Cena": 100.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
             "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62, "Brier": 0.22,
-            "Jakość modelu": "WYSOKA", "Tryb analizy": "ML",
+            "Jakość modelu": "WYSOKA", "Tryb analizy": "ML", "DecisionReason": "LONG_CONFIRMED",
         }],
     }
     path = tmp_path / "tamper.jsonl"
-    record_snapshot_forward_signals(snapshot, path=path, enforce_pipeline=False, require_clean_tree=False)
+    record_snapshot_forward_signals(
+        snapshot,
+        path=path,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_full_universe=False,
+    )
     lines = path.read_text(encoding="utf-8").splitlines()
     tampered = lines[1].replace('"signal_price":100.0', '"signal_price":101.0')
     path.write_text("\n".join([lines[0], tampered, *lines[2:]]) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="event hash mismatch"):
         load_forward_events(path)
+
+
+def test_candidate_snapshot_scans_full_frozen_universe_without_fast_shortlist():
+    universe = load_forward_universe()
+
+    def fake_scan(symbols, horizon, years):
+        symbol = symbols[0]
+        frame = pd.DataFrame([{
+            "Symbol": symbol, "Klasa": "USA / ETF", "Horyzont": horizon, "Data": "2026-07-20",
+            "Cena": 100.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
+            "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62, "Brier": 0.22,
+            "Jakość modelu": "WYSOKA", "Tryb analizy": "ML",
+        }])
+        return frame, {}
+
+    snapshot = build_candidate_snapshot(scan_fn=fake_scan, updated_at="2026-07-20T22:30:00+02:00")
+    assert snapshot["status"] == "complete"
+    assert snapshot["scan_mode"] == "candidate_v1_full_ml"
+    assert snapshot["forward_universe"]["universe_hash"] == universe["universe_hash"]
+    assert snapshot["forward_universe"]["requested_symbols"] == universe["symbols"]
+    assert snapshot["forward_universe"]["completed_symbols"] == universe["symbols"]
+    assert snapshot["forward_universe"]["failed_symbols"] == []
+    assert len(snapshot["records"]) == len(universe["symbols"])
+    assert {row["DecisionReason"] for row in snapshot["records"]} == {"LONG_CONFIRMED"}
+    assert {row["Tryb analizy"] for row in snapshot["records"]} == {"ML"}
+
+
+def test_candidate_cycle_refreshes_before_record_and_blocks_same_day_reentry(tmp_path):
+    manifest = load_candidate_manifest()
+    ledger = tmp_path / "cycle.jsonl"
+
+    def seed_open(symbol: str, slot: int) -> None:
+        signal_id = f"{symbol.lower()}_seed"
+        append_forward_event({
+            "event_type": "SIGNAL_OBSERVED",
+            "candidate_id": manifest["candidate_id"],
+            "candidate_manifest_hash": manifest["manifest_hash"],
+            "signal_id": signal_id,
+            "status": "OBSERVED",
+            "symbol": symbol,
+            "asset_class": "USA / ETF",
+            "horizon": 20,
+            "direction": "LONG",
+            "execution": "NEXT_OPEN",
+            "signal_date": "2026-06-23",
+            "decision_label": "KANDYDAT WZROSTOWY",
+            "decision_reason": "LONG_CONFIRMED",
+            "signal_price": 100.0,
+            "probability_up": 0.61,
+            "expected_return": 0.03,
+            "quality": "WYSOKA",
+        }, ledger)
+        append_forward_event({
+            "event_type": "POSITION_ACCEPTED",
+            "candidate_id": manifest["candidate_id"],
+            "candidate_manifest_hash": manifest["manifest_hash"],
+            "signal_id": signal_id,
+            "status": "ACCEPTED",
+            "symbol": symbol,
+            "direction": "LONG",
+            "signal_date": "2026-06-23",
+            "slot": slot,
+        }, ledger)
+        append_forward_event({
+            "event_type": "ENTRY_FILLED",
+            "candidate_id": manifest["candidate_id"],
+            "candidate_manifest_hash": manifest["manifest_hash"],
+            "signal_id": signal_id,
+            "status": "OPEN",
+            "symbol": symbol,
+            "direction": "LONG",
+            "signal_date": "2026-06-23",
+            "slot": slot,
+            "entry_date": "2026-06-24",
+            "entry_price": 100.0,
+            "price_source": "Open",
+        }, ledger)
+
+    for slot, symbol in enumerate(["AAPL", "OLD1", "OLD2", "OLD3", "OLD4"], start=1):
+        seed_open(symbol, slot)
+
+    close_dates = pd.bdate_range("2026-06-23", periods=22)
+    close_prices = np.linspace(99.0, 121.0, len(close_dates))
+    close_prices[1] = 100.0
+    close_prices[21] = 110.0
+    close_history = pd.DataFrame({"Open": close_prices}, index=close_dates)
+    short_dates = pd.bdate_range("2026-06-23", periods=10)
+    short_history = pd.DataFrame({"Open": np.linspace(100.0, 105.0, len(short_dates))}, index=short_dates)
+    histories = {"AAPL": close_history, "OLD1": short_history, "OLD2": short_history, "OLD3": short_history, "OLD4": short_history}
+
+    def fake_scan(symbols, horizon, years):
+        symbol = symbols[0]
+        is_signal = symbol in {"AAPL", "MSFT"}
+        frame = pd.DataFrame([{
+            "Symbol": symbol, "Klasa": "USA / ETF", "Horyzont": horizon, "Data": "2026-07-22",
+            "Cena": 100.0, "Ocena": "KANDYDAT WZROSTOWY" if is_signal else "OBSERWUJ",
+            "P(wzrost)": 0.61 if is_signal else 0.50,
+            "Oczekiwany ruch": 0.03 if is_signal else 0.0,
+            "AUC walidacji": 0.62, "Brier": 0.22,
+            "Jakość modelu": "WYSOKA", "Tryb analizy": "ML",
+        }])
+        return frame, {}
+
+    snapshot, result = run_candidate_forward_cycle(
+        ledger_path=ledger,
+        snapshot_path=tmp_path / "candidate_snapshot.json",
+        scan_fn=fake_scan,
+        refresh_histories=histories,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+        updated_at="2026-07-22T22:30:00+02:00",
+    )
+    assert snapshot["status"] == "complete"
+    assert result["added_signals"] == 2
+    events = load_forward_events(ledger)
+    state = reconstruct_forward_state(events)
+    aapl_new = [
+        item for item in state.values()
+        if item.get("symbol") == "AAPL" and item.get("signal_date") == "2026-07-22"
+    ][0]
+    msft_new = [
+        item for item in state.values()
+        if item.get("symbol") == "MSFT" and item.get("signal_date") == "2026-07-22"
+    ][0]
+    assert aapl_new["status"] == "SKIPPED"
+    assert aapl_new["skip_reason"] == "POSITION_SKIPPED_SAME_DAY_REENTRY"
+    assert msft_new["status"] == "ACCEPTED"
+    assert msft_new["slot"] == 1
