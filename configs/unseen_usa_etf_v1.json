@@ -1,0 +1,67 @@
+{
+  "universe_id": "unseen_usa_etf_v1",
+  "candidate_id": "marketscope_20d_long_candidate_v1",
+  "purpose": "Pre-registered unseen USA/ETF basket for Candidate v1 diagnostics.",
+  "created_at": "2026-07-18T18:00:00+02:00",
+  "frozen_before_first_run": true,
+  "hash_method": "sha256(canonical_json(universe_without_universe_hash))",
+  "universe_hash": "abda390bf6a79eb35713fdd6eb5b0e7101189c798a3edce293806b92fe686c57",
+  "excluded_prior_diagnostic_symbols": [
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "SPY",
+    "QQQ",
+    "BTC-USD",
+    "ETH-USD"
+  ],
+  "config": {
+    "markets": [
+      "USA",
+      "ETF"
+    ],
+    "horizons": [
+      20
+    ],
+    "threshold": 0.55,
+    "cost_bps": 10.0,
+    "slippage_bps": 5.0,
+    "execution": "NEXT_OPEN",
+    "one_position_per_symbol": true,
+    "portfolio_slots": 5,
+    "max_positions": 5,
+    "models_features_thresholds_locked_to_candidate_v1": true
+  },
+  "symbols": [
+    "AMZN",
+    "GOOGL",
+    "META",
+    "AVGO",
+    "AMD",
+    "CRM",
+    "ORCL",
+    "LLY",
+    "UNH",
+    "JPM",
+    "V",
+    "MA",
+    "COST",
+    "HD",
+    "XOM",
+    "CAT",
+    "GE",
+    "BA",
+    "PEP",
+    "KO",
+    "MCD",
+    "WMT",
+    "TLT",
+    "IWM",
+    "DIA",
+    "XLK",
+    "XLF",
+    "XLV",
+    "XLE",
+    "XLY"
+  ]
+}

@@ -7,6 +7,15 @@ from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CAT
 from market_oracle.cutoff import available_label_end
 from market_oracle.engine import observation_label, risk_reward_metrics, scan_market_fast, setup_intelligence, signal_label
 from market_oracle.features import build_features, supervised_frame
+from market_oracle.forward import (
+    load_candidate_manifest,
+    load_forward_events,
+    record_snapshot_forward_signals,
+    reconstruct_forward_state,
+    refresh_forward_ledger,
+    forward_summary,
+    verify_frozen_hash,
+)
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast, fit_forecast_state
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
@@ -660,3 +669,117 @@ def test_paper_portfolio_applies_sizing_and_costs():
     assert summary["final_capital"] < 10_195
     assert summary["total_return"] > 0
     assert summary["max_drawdown"] < 0
+
+
+def test_candidate_manifest_is_frozen_and_hash_verified():
+    manifest = load_candidate_manifest()
+    assert manifest["candidate_id"] == "marketscope_20d_long_candidate_v1"
+    assert manifest["frozen_commit"] == "60f0a8b"
+    assert manifest["decision_contract"]["threshold"] == DEFAULT_SIGNAL_THRESHOLD
+    assert manifest["scope"]["horizon_sessions"] == 20
+    assert manifest["portfolio_contract"]["portfolio_slots"] == 5
+    assert manifest["portfolio_contract"]["max_positions"] == 5
+    assert verify_frozen_hash(manifest, "manifest_hash")
+
+
+def test_forward_ledger_records_only_candidate_rows_and_is_append_only(tmp_path):
+    snapshot = {
+        "status": "complete",
+        "schema_version": 6,
+        "updated_at": "2026-01-10T21:00:00+00:00",
+        "records": [
+            {
+                "Symbol": "GOOD", "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-01-10",
+                "Cena": 100.0, "Setup": "Trend continuation",
+                "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
+                "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62,
+                "Brier": 0.22, "Jakość modelu": "WYSOKA", "Score": 4.2,
+                "Tryb analizy": "ML",
+            },
+            {
+                "Symbol": "FAST", "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-01-10",
+                "Cena": 50.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.70,
+                "Oczekiwany ruch": 0.05, "Jakość modelu": "WYSOKA", "Tryb analizy": "FAST",
+            },
+            {
+                "Symbol": "BTC-USD", "Klasa": "Krypto", "Horyzont": 20, "Data": "2026-01-10",
+                "Cena": 100_000.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.70,
+                "Oczekiwany ruch": 0.05, "Jakość modelu": "WYSOKA", "Tryb analizy": "ML",
+            },
+            {
+                "Symbol": "PKO.WA", "Klasa": "GPW", "Horyzont": 20, "Data": "2026-01-10",
+                "Cena": 70.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.70,
+                "Oczekiwany ruch": 0.05, "Jakość modelu": "WYSOKA", "Tryb analizy": "ML",
+            },
+            {
+                "Symbol": "SHORTER", "Klasa": "USA / ETF", "Horyzont": 5, "Data": "2026-01-10",
+                "Cena": 80.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.70,
+                "Oczekiwany ruch": 0.05, "Jakość modelu": "WYSOKA", "Tryb analizy": "ML",
+            },
+        ],
+    }
+    path = tmp_path / "forward.jsonl"
+    assert record_snapshot_forward_signals(snapshot, path=path) == 1
+    assert record_snapshot_forward_signals(snapshot, path=path) == 0
+    events = load_forward_events(path)
+    assert len(events) == 1
+    assert events[0]["event_type"] == "SIGNAL_OBSERVED"
+    assert events[0]["status"] == "PENDING"
+    assert events[0]["symbol"] == "GOOD"
+    assert events[0]["horizon"] == 20
+    assert events[0]["direction"] == "LONG"
+    assert events[0]["execution"] == "NEXT_OPEN"
+    assert events[0]["probability_up"] == 0.61
+    assert verify_frozen_hash(load_candidate_manifest(), "manifest_hash")
+
+
+def test_forward_ledger_fills_next_open_and_closes_after_horizon(tmp_path):
+    snapshot = {
+        "status": "complete",
+        "schema_version": 6,
+        "updated_at": "2026-01-02T21:00:00+00:00",
+        "records": [{
+            "Symbol": "GOOD", "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-01-02",
+            "Cena": 100.0, "Setup": "Trend continuation",
+            "Ocena": "SILNY KANDYDAT WZROSTOWY", "P(wzrost)": 0.66,
+            "Oczekiwany ruch": 0.04, "AUC walidacji": 0.67,
+            "Brier": 0.21, "Jakość modelu": "WYSOKA", "Score": 5.0,
+            "Tryb analizy": "ML",
+        }],
+    }
+    path = tmp_path / "forward.jsonl"
+    assert record_snapshot_forward_signals(snapshot, path=path) == 1
+    dates = pd.bdate_range("2026-01-02", periods=26)
+    prices = np.linspace(99.0, 125.0, len(dates))
+    prices[1] = 100.0
+    prices[21] = 110.0
+    history = pd.DataFrame({
+        "Open": prices,
+        "High": prices + 1,
+        "Low": prices - 1,
+        "Close": prices,
+        "Volume": 1_000_000,
+    }, index=dates)
+    events, state, errors = refresh_forward_ledger(path=path, histories={"GOOD": history})
+    assert errors == {}
+    assert len(events) == 3
+    event_types = [event["event_type"] for event in events]
+    assert event_types == ["SIGNAL_OBSERVED", "ENTRY_FILLED", "POSITION_CLOSED"]
+    signal_id = events[0]["signal_id"]
+    assert state[signal_id]["status"] == "CLOSED"
+    assert state[signal_id]["entry_date"] == "2026-01-05"
+    assert state[signal_id]["exit_date"] == "2026-02-02"
+    assert state[signal_id]["entry_price"] == 100.0
+    assert state[signal_id]["exit_price"] == 110.0
+    assert state[signal_id]["gross_return"] == pytest.approx(0.10)
+    assert state[signal_id]["strategy_return"] == pytest.approx(0.10 - 0.0015)
+    assert state[signal_id]["hit"] is True
+
+    events_again, state_again, errors_again = refresh_forward_ledger(path=path, histories={"GOOD": history})
+    assert errors_again == {}
+    assert len(events_again) == 3
+    assert reconstruct_forward_state(events_again) == state_again
+    summary = forward_summary(events_again)
+    assert summary["signals"] == 1
+    assert summary["closed"] == 1
+    assert summary["closed_hit_rate"] == 1.0

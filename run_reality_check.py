@@ -163,7 +163,12 @@ def main() -> None:
     parser.add_argument("--horizons", default="20", help="Comma list. Default focuses on the candidate 20d edge.")
     parser.add_argument("--symbols", help="Optional comma list of symbols.")
     parser.add_argument("--markets", help="Optional comma list of markets/classes.")
-    parser.add_argument("--max-positions", type=int, default=5, help="Global concurrent-position cap. Use 0 to disable.")
+    parser.add_argument(
+        "--max-positions",
+        type=int,
+        default=5,
+        help="Global concurrent-position cap. Use 0 for no extra cap beyond the number of capital slots.",
+    )
     parser.add_argument("--portfolio-slots", type=int, default=5, help="Fixed capital slots; 5 means 20% per new position.")
     parser.add_argument("--benchmark-symbol", default="SPY", help="Use SPY for USA/ETF, BTC-USD for crypto-only checks.")
     parser.add_argument("--annualization-days", type=int, help="Override inferred Sharpe annualization.")

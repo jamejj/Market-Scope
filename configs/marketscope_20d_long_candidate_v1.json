@@ -1,0 +1,95 @@
+{
+  "candidate_id": "marketscope_20d_long_candidate_v1",
+  "candidate_name": "MarketScope 20D LONG Candidate v1",
+  "status": "FROZEN_FOR_FORWARD_TEST",
+  "frozen_at": "2026-07-18T18:00:00+02:00",
+  "frozen_commit": "60f0a8b",
+  "hash_method": "sha256(canonical_json(manifest_without_manifest_hash))",
+  "manifest_hash": "146a6d58994df31a3074c297be21f516c617198d812d6e236391d2e63d6071ea",
+  "research_note": "Candidate v1 is frozen after Reality Lab diagnostics. This is not a confirmed investment edge; it is a locked hypothesis for forward testing.",
+  "scope": {
+    "markets": [
+      "USA",
+      "ETF"
+    ],
+    "accepted_snapshot_asset_classes": [
+      "USA / ETF"
+    ],
+    "excluded_symbol_patterns": [
+      "*-USD",
+      "*.WA",
+      "^*",
+      "*.*"
+    ],
+    "direction": "LONG",
+    "horizon_sessions": 20,
+    "target": "close_to_close",
+    "execution": "NEXT_OPEN"
+  },
+  "decision_contract": {
+    "threshold": 0.55,
+    "min_expected_return": 0.0,
+    "accepted_labels": [
+      "KANDYDAT WZROSTOWY",
+      "SILNY KANDYDAT WZROSTOWY"
+    ],
+    "required_analysis_mode": "ML",
+    "reject_low_quality": true,
+    "required_decision_reason": "LONG_CONFIRMED",
+    "same_day_priority_rule_frozen_v1": [
+      "EntryDate ascending",
+      "Date ascending",
+      "Symbol ascending",
+      "Horizon ascending",
+      "Probability descending",
+      "ExpectedReturn descending"
+    ]
+  },
+  "execution_contract": {
+    "signal_timing": "after daily close t",
+    "entry": "next available session open after signal date",
+    "exit": "open after 20 sessions from entry",
+    "cost_bps": 10.0,
+    "slippage_bps": 5.0,
+    "round_trip_cost": 0.0015,
+    "position_side": "long_only"
+  },
+  "portfolio_contract": {
+    "one_position_per_symbol": true,
+    "allow_same_day_reentry": false,
+    "portfolio_slots": 5,
+    "max_positions": 5,
+    "slot_weight": 0.2,
+    "ledger": "fixed cash/slot ledger; no daily rebalancing between active and cash slots"
+  },
+  "model_contract": {
+    "state": "market_oracle.model.FittedForecastState",
+    "features": "market_oracle.features.build_features",
+    "classification_models": [
+      "LogisticRegression(C=0.35, class_weight=balanced)",
+      "HistGradientBoostingClassifier(learning_rate=0.04, max_iter=180, max_leaf_nodes=15, min_samples_leaf=24, l2_regularization=2.5)",
+      "ExtraTreesClassifier(n_estimators=180, max_depth=7, min_samples_leaf=10, max_features=0.65, bootstrap=True)"
+    ],
+    "regression_models": [
+      "Ridge(alpha=18.0)",
+      "RandomForestRegressor(n_estimators=120, max_depth=6, min_samples_leaf=12, max_features=0.65)",
+      "HistGradientBoostingRegressor(learning_rate=0.04, max_iter=160, max_leaf_nodes=15, min_samples_leaf=24, l2_regularization=2.0)",
+      "ExtraTreesRegressor(n_estimators=160, max_depth=7, min_samples_leaf=10, max_features=0.65, bootstrap=True)"
+    ],
+    "probability_calibration": "walk-forward OOF logistic calibrator when available; fallback chronological calibration block",
+    "probability_shrinkage": "toward 0.5 according to validation skill",
+    "decision_inputs": [
+      "probability_up",
+      "expected_return",
+      "quality",
+      "auc",
+      "brier"
+    ]
+  },
+  "diagnostic_reference": {
+    "validation_mode": "WALK_FORWARD_DIAGNOSTIC_ONLY",
+    "holdout_used": false,
+    "reality_lab_status": "candidate survived overlap, fixed-slot ledger and benchmark checks on a small sample",
+    "warning": "Historical result used to define Candidate v1. Do not tune v1 after this freeze."
+  }
+}

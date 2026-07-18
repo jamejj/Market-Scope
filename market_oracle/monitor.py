@@ -197,6 +197,14 @@ def run_signal_scan(
             except Exception:
                 # Journal is diagnostic; a write/evaluation issue should never destroy the market scan.
                 pass
+            try:
+                from .forward import record_snapshot_forward_signals
+
+                record_snapshot_forward_signals(payload)
+            except Exception:
+                # Forward ledger is append-only evidence; recording issues should be visible via the CLI,
+                # but must not break the market scanner itself.
+                pass
         return payload
     finally:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
