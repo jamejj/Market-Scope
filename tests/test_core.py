@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from market_oracle.backtest import _supervised_execution_frame, walk_forward_backtest
 from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES
@@ -255,7 +256,11 @@ def test_reality_check_filters_overlap_and_builds_daily_curve():
     capped = select_non_overlapping_trades(records, RealityConfig(horizons=(20,), max_positions=1))
     assert list(capped["Symbol"]) == ["AAA", "AAA"]
 
-    report, selected, curve = reality_check_report(records, histories, RealityConfig(horizons=(20,), benchmark_symbol="SPY"))
+    report, selected, curve = reality_check_report(
+        records,
+        histories,
+        RealityConfig(horizons=(20,), benchmark_symbol="SPY", strict_history=False),
+    )
     assert report["summary"]["observations"] == len(records)
     assert report["summary"]["raw_signals"] == 4
     assert report["summary"]["selected_trades"] == 3
@@ -266,6 +271,84 @@ def test_reality_check_filters_overlap_and_builds_daily_curve():
     assert curve["Equity"].iloc[-1] > 1
     assert {row["Symbol"] for row in report["by_symbol"]} == {"AAA", "BBB", "CCC"}
     assert next(row for row in report["by_symbol"] if row["Symbol"] == "CCC")["selected_trades"] == 0
+
+
+def test_reality_check_uses_fixed_slots_costs_and_same_slot_benchmark():
+    records = pd.DataFrame([
+        {
+            "Date": "2024-01-01", "Symbol": "AAA", "Market": "USA", "Horizon": 20, "Fold": 1,
+            "Position": 1, "EntryDate": "2024-01-02", "ExitDate": "2024-01-04",
+            "EntryPrice": 100.0, "ExitPrice": 121.0, "Return": 0.20, "RoundTripCost": 0.01,
+            "BuyHoldReturn": 0.21, "ActualUp": 1, "ExecutionUp": 1,
+            "Probability": 0.62, "ExpectedReturn": 0.04, "ValidationAUC": 0.67, "ValidationBrier": 0.22,
+            "DecisionReason": "LONG_CONFIRMED",
+        },
+        {
+            "Date": "2024-01-02", "Symbol": "BBB", "Market": "USA", "Horizon": 20, "Fold": 1,
+            "Position": 1, "EntryDate": "2024-01-03", "ExitDate": "2024-01-04",
+            "EntryPrice": 50.0, "ExitPrice": 45.0, "Return": -0.11, "RoundTripCost": 0.01,
+            "BuyHoldReturn": -0.10, "ActualUp": 0, "ExecutionUp": 0,
+            "Probability": 0.59, "ExpectedReturn": 0.02, "ValidationAUC": 0.61, "ValidationBrier": 0.23,
+            "DecisionReason": "LONG_CONFIRMED",
+        },
+    ])
+    histories = {
+        "AAA": pd.DataFrame({"Open": [100.0, 110.0, 121.0]}, index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])),
+        "BBB": pd.DataFrame({"Open": [50.0, 45.0]}, index=pd.to_datetime(["2024-01-03", "2024-01-04"])),
+        "SPY": pd.DataFrame({"Open": [200.0, 220.0, 242.0]}, index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])),
+    }
+    report, selected, curve = reality_check_report(
+        records,
+        histories,
+        RealityConfig(horizons=(20,), max_positions=2, portfolio_slots=2, benchmark_symbol="SPY"),
+    )
+    daily = curve.set_index("Date")
+    assert selected["Symbol"].tolist() == ["AAA", "BBB"]
+    assert np.isclose(daily.loc[pd.Timestamp("2024-01-02"), "StrategyReturn"], -0.005)
+    assert np.isclose(daily.loc[pd.Timestamp("2024-01-03"), "StrategyReturn"], 0.045)
+    assert np.isclose(daily.loc[pd.Timestamp("2024-01-04"), "StrategyReturn"], 0.0)
+    assert daily.loc[pd.Timestamp("2024-01-02"), "GrossExposure"] == 0.5
+    assert daily.loc[pd.Timestamp("2024-01-03"), "GrossExposure"] == 1.0
+    assert curve["Equity"].iloc[-1] == pytest.approx(0.995 * 1.045)
+    assert curve["BenchmarkEquity"].iloc[-1] > curve["Equity"].iloc[-1]
+    assert report["summary"]["portfolio_slots"] == 2
+    assert report["summary"]["max_active_positions"] == 2
+    assert report["summary"]["selection_counts"] == {"SELECTED": 2}
+    assert report["price_issues"] == []
+
+
+def test_reality_check_keeps_weekend_exposure_and_fails_on_bad_cache():
+    records = pd.DataFrame([{
+        "Date": "2024-01-04", "Symbol": "AAA", "Market": "USA", "Horizon": 1, "Fold": 1,
+        "Position": 1, "EntryDate": "2024-01-05", "ExitDate": "2024-01-08",
+        "EntryPrice": 100.0, "ExitPrice": 105.0, "Return": 0.05, "RoundTripCost": 0.0,
+        "BuyHoldReturn": 0.05, "ActualUp": 1, "ExecutionUp": 1,
+        "Probability": 0.62, "ExpectedReturn": 0.03, "ValidationAUC": 0.62, "ValidationBrier": 0.22,
+        "DecisionReason": "LONG_CONFIRMED",
+    }])
+    history = pd.DataFrame({"Open": [100.0, 105.0]}, index=pd.to_datetime(["2024-01-05", "2024-01-08"]))
+    report, _, curve = reality_check_report(
+        records,
+        {"AAA": history, "SPY": history},
+        RealityConfig(horizons=(1,), max_positions=1, portfolio_slots=1, benchmark_symbol="SPY"),
+    )
+    daily = curve.set_index("Date")
+    assert daily.loc[pd.Timestamp("2024-01-06"), "ActivePositions"] == 1
+    assert daily.loc[pd.Timestamp("2024-01-07"), "ActivePositions"] == 1
+    assert daily.loc[pd.Timestamp("2024-01-06"), "StrategyReturn"] == 0
+    assert report["summary"]["annualization_days"] == 252
+
+    with pytest.raises(ValueError, match="MISSING_HISTORY"):
+        reality_check_report(records, {}, RealityConfig(horizons=(1,), strict_history=True))
+
+    bad_records = records.copy()
+    bad_records.loc[0, "EntryPrice"] = 90.0
+    with pytest.raises(ValueError, match="PRICE_MISMATCH"):
+        reality_check_report(
+            bad_records,
+            {"AAA": history},
+            RealityConfig(horizons=(1,), benchmark_symbol=None, strict_history=True),
+        )
 
 
 def test_fold_selection_is_evenly_distributed_before_holdout():
