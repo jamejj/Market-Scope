@@ -305,11 +305,11 @@ def test_reality_check_uses_fixed_slots_costs_and_same_slot_benchmark():
     daily = curve.set_index("Date")
     assert selected["Symbol"].tolist() == ["AAA", "BBB"]
     assert np.isclose(daily.loc[pd.Timestamp("2024-01-02"), "StrategyReturn"], -0.005)
-    assert np.isclose(daily.loc[pd.Timestamp("2024-01-03"), "StrategyReturn"], 0.045)
-    assert np.isclose(daily.loc[pd.Timestamp("2024-01-04"), "StrategyReturn"], 0.0)
-    assert daily.loc[pd.Timestamp("2024-01-02"), "GrossExposure"] == 0.5
+    assert daily.loc[pd.Timestamp("2024-01-03"), "StrategyReturn"] == pytest.approx(1.0395 / 0.995 - 1)
+    assert daily.loc[pd.Timestamp("2024-01-04"), "StrategyReturn"] == pytest.approx(1.04445 / 1.0395 - 1)
+    assert daily.loc[pd.Timestamp("2024-01-02"), "GrossExposure"] == pytest.approx(0.495 / 0.995)
     assert daily.loc[pd.Timestamp("2024-01-03"), "GrossExposure"] == 1.0
-    assert curve["Equity"].iloc[-1] == pytest.approx(0.995 * 1.045)
+    assert curve["Equity"].iloc[-1] == pytest.approx(1.04445)
     assert curve["BenchmarkEquity"].iloc[-1] > curve["Equity"].iloc[-1]
     assert report["summary"]["portfolio_slots"] == 2
     assert report["summary"]["max_active_positions"] == 2
@@ -317,7 +317,27 @@ def test_reality_check_uses_fixed_slots_costs_and_same_slot_benchmark():
     assert report["price_issues"] == []
 
 
-def test_reality_check_keeps_weekend_exposure_and_fails_on_bad_cache():
+def test_reality_check_ledger_does_not_rebalance_winning_slot():
+    records = pd.DataFrame([{
+        "Date": "2024-01-01", "Symbol": "AAA", "Market": "USA", "Horizon": 20, "Fold": 1,
+        "Position": 1, "EntryDate": "2024-01-02", "ExitDate": "2024-01-04",
+        "EntryPrice": 100.0, "ExitPrice": 121.0, "Return": 0.21, "RoundTripCost": 0.0,
+        "BuyHoldReturn": 0.21, "ActualUp": 1, "ExecutionUp": 1,
+        "Probability": 0.62, "ExpectedReturn": 0.04, "ValidationAUC": 0.67, "ValidationBrier": 0.22,
+        "DecisionReason": "LONG_CONFIRMED",
+    }])
+    history = pd.DataFrame({"Open": [100.0, 110.0, 121.0]}, index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]))
+    report, _, curve = reality_check_report(
+        records,
+        {"AAA": history},
+        RealityConfig(horizons=(20,), max_positions=1, portfolio_slots=5, benchmark_symbol=None),
+    )
+    assert curve["Equity"].iloc[-1] == pytest.approx(0.8 + 0.2 * 1.10 * 1.10)
+    assert report["summary"]["portfolio_slots"] == 5
+    assert report["summary"]["max_gross_exposure"] == pytest.approx(0.2 * 1.10 / 1.02)
+
+
+def test_reality_check_uses_session_calendar_and_fails_on_bad_cache():
     records = pd.DataFrame([{
         "Date": "2024-01-04", "Symbol": "AAA", "Market": "USA", "Horizon": 1, "Fold": 1,
         "Position": 1, "EntryDate": "2024-01-05", "ExitDate": "2024-01-08",
@@ -333,9 +353,8 @@ def test_reality_check_keeps_weekend_exposure_and_fails_on_bad_cache():
         RealityConfig(horizons=(1,), max_positions=1, portfolio_slots=1, benchmark_symbol="SPY"),
     )
     daily = curve.set_index("Date")
-    assert daily.loc[pd.Timestamp("2024-01-06"), "ActivePositions"] == 1
-    assert daily.loc[pd.Timestamp("2024-01-07"), "ActivePositions"] == 1
-    assert daily.loc[pd.Timestamp("2024-01-06"), "StrategyReturn"] == 0
+    assert pd.Timestamp("2024-01-06") not in daily.index
+    assert pd.Timestamp("2024-01-07") not in daily.index
     assert report["summary"]["annualization_days"] == 252
 
     with pytest.raises(ValueError, match="MISSING_HISTORY"):

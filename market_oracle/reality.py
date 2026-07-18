@@ -62,8 +62,14 @@ def filter_records(records: pd.DataFrame, config: RealityConfig) -> pd.DataFrame
 
 
 def _portfolio_slots(config: RealityConfig) -> int:
-    slots = config.max_positions if config.max_positions is not None else config.portfolio_slots
-    return max(1, int(slots or 1))
+    return max(1, int(config.portfolio_slots or 1))
+
+
+def _position_cap(config: RealityConfig) -> int:
+    slots = _portfolio_slots(config)
+    if config.max_positions is None:
+        return slots
+    return max(0, min(int(config.max_positions), slots))
 
 
 def _closed_before(exit_date: pd.Timestamp, entry_date: pd.Timestamp, config: RealityConfig) -> bool:
@@ -78,6 +84,7 @@ def audit_trade_selection(records: pd.DataFrame, config: RealityConfig = Reality
         return active.assign(
             ActiveSignalId=pd.Series(dtype=int),
             RealityTradeId=pd.Series(dtype=object),
+            RealitySlot=pd.Series(dtype=object),
             RealitySelection=pd.Series(dtype=object),
         )
 
@@ -87,19 +94,22 @@ def audit_trade_selection(records: pd.DataFrame, config: RealityConfig = Reality
     ).reset_index(drop=True)
     active["ActiveSignalId"] = np.arange(1, len(active) + 1)
     active["RealityTradeId"] = None
+    active["RealitySlot"] = None
     active["RealitySelection"] = "PENDING"
 
     open_by_symbol: dict[str, pd.Timestamp] = {}
-    open_portfolio: list[tuple[str, pd.Timestamp]] = []
+    open_portfolio: list[tuple[str, pd.Timestamp, int]] = []
     trade_id = 0
+    slots = _portfolio_slots(config)
+    position_cap = _position_cap(config)
 
     for idx, row in active.iterrows():
         symbol = str(row["Symbol"])
         entry = pd.Timestamp(row["EntryDate"])
         exit_date = pd.Timestamp(row["ExitDate"])
         open_portfolio = [
-            (open_symbol, open_exit)
-            for open_symbol, open_exit in open_portfolio
+            (open_symbol, open_exit, open_slot)
+            for open_symbol, open_exit, open_slot in open_portfolio
             if not _closed_before(open_exit, entry, config)
         ]
         if config.one_position_per_symbol and symbol in open_by_symbol:
@@ -107,14 +117,21 @@ def audit_trade_selection(records: pd.DataFrame, config: RealityConfig = Reality
             if not _closed_before(last_exit, entry, config):
                 active.at[idx, "RealitySelection"] = "SYMBOL_OVERLAP"
                 continue
-        if config.max_positions is not None and len(open_portfolio) >= config.max_positions:
+        if len(open_portfolio) >= position_cap:
             active.at[idx, "RealitySelection"] = "GLOBAL_POSITION_CAP"
             continue
+        occupied_slots = {open_slot for _, _, open_slot in open_portfolio}
+        free_slots = [slot for slot in range(1, slots + 1) if slot not in occupied_slots]
+        if not free_slots:
+            active.at[idx, "RealitySelection"] = "NO_FREE_SLOT"
+            continue
+        slot = free_slots[0]
         trade_id += 1
         active.at[idx, "RealityTradeId"] = trade_id
+        active.at[idx, "RealitySlot"] = slot
         active.at[idx, "RealitySelection"] = "SELECTED"
         open_by_symbol[symbol] = exit_date
-        open_portfolio.append((symbol, exit_date))
+        open_portfolio.append((symbol, exit_date, slot))
 
     return active
 
@@ -130,6 +147,7 @@ def select_non_overlapping_trades(records: pd.DataFrame, config: RealityConfig =
     if selected.empty:
         return selected
     selected["RealityTradeId"] = selected["RealityTradeId"].astype(int)
+    selected["RealitySlot"] = selected["RealitySlot"].astype(int)
     selected["RejectedByReality"] = False
     return selected.reset_index(drop=True)
 
@@ -199,20 +217,53 @@ def validate_trade_price_alignment(
     return issues
 
 
-def _calendar_returns(history: pd.DataFrame, entry: pd.Timestamp, exit_date: pd.Timestamp) -> pd.Series:
+def _curve_calendar(
+    trades: pd.DataFrame,
+    histories: dict[str, pd.DataFrame],
+    benchmark_history: pd.DataFrame | None = None,
+) -> pd.DatetimeIndex:
+    if trades.empty:
+        return pd.DatetimeIndex([])
+    entry = pd.to_datetime(trades["EntryDate"]).min().normalize()
+    exit_date = pd.to_datetime(trades["ExitDate"]).max().normalize()
+    markets = {str(value).upper() for value in trades.get("Market", pd.Series(dtype=object)).dropna().unique()}
+    if "CRYPTO" in markets or "KRYPTO" in markets or not markets:
+        return pd.date_range(entry, exit_date, freq="D")
+
+    dates: list[pd.Timestamp] = []
+    for symbol in sorted({str(value) for value in trades["Symbol"].dropna().unique()}):
+        history = histories.get(symbol)
+        if history is None or history.empty:
+            continue
+        index = _open_series(history).index
+        dates.extend(index[(index >= entry) & (index <= exit_date)])
+    if benchmark_history is not None and not benchmark_history.empty:
+        index = _open_series(benchmark_history).index
+        dates.extend(index[(index >= entry) & (index <= exit_date)])
+    if not dates:
+        return pd.date_range(entry, exit_date, freq="D")
+    return pd.DatetimeIndex(sorted(set(pd.to_datetime(dates).normalize())))
+
+
+def _calendar_returns(
+    history: pd.DataFrame,
+    entry: pd.Timestamp,
+    exit_date: pd.Timestamp,
+    calendar: pd.DatetimeIndex,
+) -> pd.Series:
     opens = _open_window(history, entry, exit_date)
     returns = opens.pct_change().dropna()
-    calendar = pd.date_range(entry, exit_date, freq="D")
-    return returns.reindex(calendar).fillna(0.0).astype(float)
+    window = calendar[(calendar >= entry) & (calendar <= exit_date)]
+    return returns.reindex(window).fillna(0.0).astype(float)
 
 
-def trade_daily_returns(trade: pd.Series, history: pd.DataFrame) -> pd.DataFrame:
+def trade_daily_returns(trade: pd.Series, history: pd.DataFrame, calendar: pd.DatetimeIndex) -> pd.DataFrame:
     """Open-to-open daily path for one selected trade, with cost charged once at entry."""
     entry = pd.Timestamp(trade["EntryDate"]).normalize()
     exit_date = pd.Timestamp(trade["ExitDate"]).normalize()
     position = int(trade["Position"])
     cost = abs(position) * float(trade.get("RoundTripCost", 0.0) or 0.0)
-    daily = _calendar_returns(history, entry, exit_date)
+    daily = _calendar_returns(history, entry, exit_date, calendar)
     rows: list[dict] = []
     for date, value in daily.items():
         is_entry = pd.Timestamp(date).normalize() == entry
@@ -221,6 +272,7 @@ def trade_daily_returns(trade: pd.Series, history: pd.DataFrame) -> pd.DataFrame
         rows.append({
             "Date": pd.Timestamp(date).normalize(),
             "RealityTradeId": int(trade["RealityTradeId"]),
+            "RealitySlot": int(trade["RealitySlot"]),
             "Symbol": str(trade["Symbol"]),
             "Horizon": int(trade["Horizon"]),
             "Fold": int(trade["Fold"]),
@@ -233,20 +285,85 @@ def trade_daily_returns(trade: pd.Series, history: pd.DataFrame) -> pd.DataFrame
     return pd.DataFrame(rows)
 
 
-def benchmark_daily_returns(trade: pd.Series, benchmark_history: pd.DataFrame) -> pd.DataFrame:
+def benchmark_daily_returns(
+    trade: pd.Series,
+    benchmark_history: pd.DataFrame,
+    calendar: pd.DatetimeIndex,
+) -> pd.DataFrame:
     """Benchmark path using the same slot, dates and cost as the MarketScope trade."""
     entry = pd.Timestamp(trade["EntryDate"]).normalize()
     exit_date = pd.Timestamp(trade["ExitDate"]).normalize()
     cost = abs(int(trade["Position"])) * float(trade.get("RoundTripCost", 0.0) or 0.0)
-    daily = _calendar_returns(benchmark_history, entry, exit_date)
+    daily = _calendar_returns(benchmark_history, entry, exit_date, calendar)
     rows = []
     for date, value in daily.items():
         is_entry = pd.Timestamp(date).normalize() == entry
         rows.append({
             "Date": pd.Timestamp(date).normalize(),
             "RealityTradeId": int(trade["RealityTradeId"]),
+            "RealitySlot": int(trade["RealitySlot"]),
             "BenchmarkSlotReturn": float(value) - (cost if is_entry else 0.0),
         })
+    return pd.DataFrame(rows)
+
+
+def _compound(values: pd.Series) -> float:
+    array = values.astype(float).to_numpy()
+    if len(array) == 0:
+        return 0.0
+    return float(np.prod(1.0 + array) - 1.0)
+
+
+def _active_slots_after_date(trades: pd.DataFrame, date: pd.Timestamp) -> set[int]:
+    day = pd.Timestamp(date).normalize()
+    active = trades[
+        (pd.to_datetime(trades["EntryDate"]).dt.normalize() <= day)
+        & (pd.to_datetime(trades["ExitDate"]).dt.normalize() > day)
+    ]
+    if active.empty:
+        return set()
+    return {int(slot) for slot in active["RealitySlot"].dropna().astype(int)}
+
+
+def _ledger_series(
+    daily_positions: pd.DataFrame,
+    trades: pd.DataFrame,
+    calendar: pd.DatetimeIndex,
+    *,
+    slots: int,
+    return_column: str,
+) -> pd.DataFrame:
+    """Track each capital slot as a dollar ledger, not as a rebalanced return stream."""
+    slot_values = {slot: 1.0 / slots for slot in range(1, slots + 1)}
+    if daily_positions.empty:
+        grouped_returns = pd.Series(dtype=float)
+    else:
+        grouped_returns = daily_positions.groupby(["Date", "RealitySlot"])[return_column].apply(_compound)
+    rows: list[dict] = []
+    previous_equity = 1.0
+    for date in calendar:
+        day = pd.Timestamp(date).normalize()
+        if not grouped_returns.empty and day in grouped_returns.index.get_level_values(0):
+            day_returns = grouped_returns.loc[day]
+            if isinstance(day_returns, pd.Series):
+                iterator = day_returns.items()
+            else:
+                iterator = [(int(day_returns.name[1]), float(day_returns))]
+            for slot, value in iterator:
+                slot_values[int(slot)] *= 1.0 + float(value)
+        equity = float(sum(slot_values.values()))
+        active_slots = _active_slots_after_date(trades, day)
+        cash = float(sum(value for slot, value in slot_values.items() if slot not in active_slots))
+        gross_exposure = float((equity - cash) / equity) if equity else 0.0
+        rows.append({
+            "Date": day,
+            "Return": equity / previous_equity - 1.0 if previous_equity else 0.0,
+            "Equity": equity,
+            "Cash": cash,
+            "GrossExposure": gross_exposure,
+            "ActivePositions": len(active_slots),
+        })
+        previous_equity = equity
     return pd.DataFrame(rows)
 
 
@@ -262,13 +379,16 @@ def build_daily_curve(
     """Build a fixed-slot portfolio curve from selected trades and cached Open prices."""
     empty_columns = [
         "Date", "StrategyReturn", "UnderlyingSameTradesReturn", "BenchmarkReturn",
-        "ActivePositions", "Entries", "Exits", "GrossExposure", "CashWeight",
+        "ActivePositions", "Entries", "Exits", "GrossExposure", "CashWeight", "Cash",
         "Equity", "UnderlyingSameTradesEquity", "BenchmarkEquity",
     ]
     if trades.empty:
         return pd.DataFrame(columns=empty_columns), []
 
     slots = max(1, int(portfolio_slots))
+    if "RealitySlot" not in trades:
+        trades = trades.copy()
+        trades["RealitySlot"] = ((np.arange(len(trades)) % slots) + 1).astype(int)
     price_issues = validate_trade_price_alignment(
         trades,
         histories,
@@ -280,14 +400,15 @@ def build_daily_curve(
 
     pieces: list[pd.DataFrame] = []
     benchmark_pieces: list[pd.DataFrame] = []
+    calendar = _curve_calendar(trades, histories, benchmark_history)
     for _, trade in trades.iterrows():
         symbol = str(trade["Symbol"])
         history = histories.get(symbol)
         if history is None or history.empty:
             continue
-        pieces.append(trade_daily_returns(trade, history))
+        pieces.append(trade_daily_returns(trade, history, calendar))
         if benchmark_history is not None and not benchmark_history.empty:
-            benchmark_pieces.append(benchmark_daily_returns(trade, benchmark_history))
+            benchmark_pieces.append(benchmark_daily_returns(trade, benchmark_history, calendar))
     if not pieces:
         if strict_history:
             raise ValueError("Reality Check has selected trades but no usable cached histories.")
@@ -295,39 +416,33 @@ def build_daily_curve(
 
     daily_positions = pd.concat(pieces, ignore_index=True)
     daily_positions["Date"] = pd.to_datetime(daily_positions["Date"]).dt.normalize()
-    grouped = daily_positions.groupby("Date").agg(
-        StrategyGross=("PositionReturn", "sum"),
-        UnderlyingGross=("UnderlyingLongReturn", "sum"),
-        ActivePositions=("RealityTradeId", "nunique"),
-        Entries=("Entry", "sum"),
-        Exits=("Exit", "sum"),
-    ).sort_index()
-    grouped["StrategyReturn"] = grouped["StrategyGross"] / slots
-    grouped["UnderlyingSameTradesReturn"] = grouped["UnderlyingGross"] / slots
-
-    all_days = pd.date_range(grouped.index.min(), grouped.index.max(), freq="D")
-    grouped = grouped.reindex(all_days, fill_value=0.0)
-    grouped.index.name = "Date"
-    grouped["ActivePositions"] = grouped["ActivePositions"].astype(int)
-    grouped["Entries"] = grouped["Entries"].astype(int)
-    grouped["Exits"] = grouped["Exits"].astype(int)
-    grouped["GrossExposure"] = grouped["ActivePositions"] / slots
-    grouped["CashWeight"] = (1.0 - grouped["GrossExposure"]).clip(lower=0.0)
-
+    strategy = _ledger_series(daily_positions, trades, calendar, slots=slots, return_column="PositionReturn")
+    underlying = _ledger_series(daily_positions, trades, calendar, slots=slots, return_column="UnderlyingLongReturn")
     if benchmark_pieces:
         daily_benchmark = pd.concat(benchmark_pieces, ignore_index=True)
         daily_benchmark["Date"] = pd.to_datetime(daily_benchmark["Date"]).dt.normalize()
-        bench = daily_benchmark.groupby("Date").agg(BenchmarkGross=("BenchmarkSlotReturn", "sum")).sort_index()
-        bench = bench.reindex(grouped.index, fill_value=0.0)
-        grouped["BenchmarkReturn"] = bench["BenchmarkGross"] / slots
+        benchmark = _ledger_series(daily_benchmark, trades, calendar, slots=slots, return_column="BenchmarkSlotReturn")
     else:
-        grouped["BenchmarkReturn"] = grouped["UnderlyingSameTradesReturn"]
+        benchmark = underlying.copy()
 
-    grouped["Equity"] = (1 + grouped["StrategyReturn"]).cumprod()
-    grouped["UnderlyingSameTradesEquity"] = (1 + grouped["UnderlyingSameTradesReturn"]).cumprod()
-    grouped["BenchmarkEquity"] = (1 + grouped["BenchmarkReturn"]).cumprod()
-    grouped = grouped.reset_index()
-    return grouped, price_issues
+    entries = daily_positions.groupby("Date")["Entry"].sum().reindex(calendar, fill_value=0).astype(int)
+    exits = daily_positions.groupby("Date")["Exit"].sum().reindex(calendar, fill_value=0).astype(int)
+    curve = pd.DataFrame({
+        "Date": calendar,
+        "StrategyReturn": strategy["Return"].to_numpy(),
+        "UnderlyingSameTradesReturn": underlying["Return"].to_numpy(),
+        "BenchmarkReturn": benchmark["Return"].to_numpy(),
+        "ActivePositions": strategy["ActivePositions"].astype(int).to_numpy(),
+        "Entries": entries.to_numpy(),
+        "Exits": exits.to_numpy(),
+        "GrossExposure": strategy["GrossExposure"].to_numpy(),
+        "CashWeight": (strategy["Cash"] / strategy["Equity"]).clip(lower=0.0).to_numpy(),
+        "Cash": strategy["Cash"].to_numpy(),
+        "Equity": strategy["Equity"].to_numpy(),
+        "UnderlyingSameTradesEquity": underlying["Equity"].to_numpy(),
+        "BenchmarkEquity": benchmark["Equity"].to_numpy(),
+    })
+    return curve, price_issues
 
 
 def _profit_factor(returns: pd.Series) -> float | None:
@@ -549,6 +664,7 @@ def reality_check_report(
     selected = audit[audit["RealitySelection"] == "SELECTED"].copy()
     if not selected.empty:
         selected["RealityTradeId"] = selected["RealityTradeId"].astype(int)
+        selected["RealitySlot"] = selected["RealitySlot"].astype(int)
         selected["RejectedByReality"] = False
         selected = selected.reset_index(drop=True)
 
@@ -589,9 +705,10 @@ def reality_check_report(
         "price_issues": _json_scalar(price_issues),
         "methodology": (
             "Reality Check selects active signals chronologically, removes same-symbol overlap, and can cap global "
-            "concurrent positions. The equity curve uses fixed capital slots assigned at entry; existing positions "
-            "are not freely rebalanced when other positions open or close. Benchmark slots use the same entry/exit "
-            "dates and round-trip costs. This is a diagnostic audit, not a live trading proof."
+            "concurrent positions. The equity curve uses a cash/slot ledger: every slot has its own dollar value, "
+            "an entry receives that slot's current cash value, the position evolves without daily portfolio "
+            "rebalancing, and the full slot value returns to cash at exit. Benchmark slots use the same entry/exit "
+            "dates, slot assignments and round-trip costs. This is a diagnostic audit, not a live trading proof."
         ),
     }
     return _json_scalar(report), selected, curve

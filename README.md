@@ -20,7 +20,7 @@ Lokalny panel badawczy analizujący akcje, ETF-y i krypto. Generuje probabilisty
 - ranking rynku, analiza ryzyka i backtest walk-forward z kosztami transakcji;
 - Signal Journal i Performance Lab z paper portfolio, kosztami, sizingiem, equity curve i drawdown;
 - Aggregate Validation do zbiorczego sprawdzania edge według symbolu, rynku, horyzontu i folda, z osobnym holdoutem, fingerprintem danych, benchmarkami, stress testem kosztów i zapisem również odrzuconych sygnałów;
-- Reality Check / Validation Lab, który z gotowych rekordów walidacji buduje konserwatywniejszy test: jedna pozycja na symbol, globalny limit pozycji, stałe sloty kapitału, dzienna krzywa kapitału, benchmark na tych samych datach/slotach oraz bootstrap przedziałów ufności;
+- Reality Check / Validation Lab, który z gotowych rekordów walidacji buduje konserwatywniejszy test: jedna pozycja na symbol, globalny limit pozycji, ledger gotówki i stałych slotów kapitału, dzienna krzywa kapitału, benchmark na tych samych datach/slotach oraz bootstrap przedziałów ufności;
 - zakładka **Model**, która tłumaczy ustawienia oraz neutralne sygnały;
 - automatyczny monitor rynku zapisujący gotowy ranking domyślnie co 6 godzin;
 - adaptacyjny ensemble, który dobiera udział modelu liniowego i nieliniowego na osobnym okresie kalibracji.
@@ -51,7 +51,7 @@ Po Aggregate Validation można odpalić konserwatywniejszy Reality Check na zapi
 .venv/bin/python run_reality_check.py --records outputs/validation/records_...csv --horizons 20
 ```
 
-Ten raport nie trenuje niczego od nowa i nie optymalizuje progów. Bierze wyłącznie zapisane decyzje, wybiera pierwsze chronologiczne sygnały, odrzuca overlap na tym samym symbolu i domyślnie ogranicza portfel do 5 pozycji po 20% kapitału. Istniejące pozycje nie są codziennie darmowo rebalansowane — zwolniony slot wraca do gotówki. Benchmark używa tych samych dat wejścia/wyjścia, slotów kapitału i kosztów, a runner sprawdza, czy ceny `EntryPrice`/`ExitPrice` z CSV zgadzają się z cache `Open`. Przy brakach danych Reality Check domyślnie kończy się błędem, bo lepiej zatrzymać audyt niż policzyć fałszywie gładką krzywą.
+Ten raport nie trenuje niczego od nowa i nie optymalizuje progów. Bierze wyłącznie zapisane decyzje, wybiera pierwsze chronologiczne sygnały, odrzuca overlap na tym samym symbolu i domyślnie ogranicza portfel do 5 pozycji po 20% kapitału. Każdy slot ma własną wartość gotówki/pozycji: przy wejściu przypisywana jest konkretna kwota slotu, pozycja zmienia wartość bez codziennego rebalancingu, a po wyjściu cały slot wraca do gotówki. `portfolio_slots` określa wielkość slotu, a `max_positions` tylko maksymalną liczbę aktywnych pozycji, więc można testować np. 5 slotów po 20% przy limicie 3 pozycji. Benchmark używa tych samych dat wejścia/wyjścia, slotów kapitału i kosztów, a runner sprawdza, czy ceny `EntryPrice`/`ExitPrice` z CSV zgadzają się z cache `Open`. Przy brakach danych Reality Check domyślnie kończy się błędem, bo lepiej zatrzymać audyt niż policzyć fałszywie gładką krzywą.
 
 Dla czystszego odczytu warto liczyć osobno rynek USA/ETF i krypto, bo mają inne kalendarze oraz annualizację:
 
