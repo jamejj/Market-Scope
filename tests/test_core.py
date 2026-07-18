@@ -10,6 +10,7 @@ from market_oracle.journal import journal_summary, load_journal, paper_portfolio
 from market_oracle.model import fit_forecast, fit_forecast_state
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
 from market_oracle.risk import periods_per_year, risk_metrics
+from market_oracle.reality import RealityConfig, reality_check_report, select_non_overlapping_trades
 from market_oracle.signals import (
     DEFAULT_SIGNAL_THRESHOLD, SignalInputs, signal_decision, signal_inputs_from_forecast, signal_verdict,
 )
@@ -196,6 +197,75 @@ def test_aggregate_validation_keeps_rejected_observations(tmp_path):
 
     date_position = X.index.get_loc(pd.Timestamp(row["Date"]))
     assert train_end == available_label_end(date_position, int(row["Horizon"]))
+
+
+def test_reality_check_filters_overlap_and_builds_daily_curve():
+    records = pd.DataFrame([
+        {
+            "Date": "2024-01-01", "Symbol": "AAA", "Market": "USA", "Horizon": 20, "Fold": 1,
+            "Position": 1, "EntryDate": "2024-01-02", "ExitDate": "2024-01-30",
+            "EntryPrice": 100.0, "ExitPrice": 106.0, "Return": 0.0585, "RoundTripCost": 0.0015,
+            "BuyHoldReturn": 0.06, "ActualUp": 1, "ExecutionUp": 1,
+            "Probability": 0.62, "ExpectedReturn": 0.04, "ValidationAUC": 0.67, "ValidationBrier": 0.22,
+            "DecisionReason": "LONG_CONFIRMED",
+        },
+        {
+            "Date": "2024-01-05", "Symbol": "AAA", "Market": "USA", "Horizon": 20, "Fold": 1,
+            "Position": 1, "EntryDate": "2024-01-08", "ExitDate": "2024-02-05",
+            "EntryPrice": 102.0, "ExitPrice": 108.0, "Return": 0.0573, "RoundTripCost": 0.0015,
+            "BuyHoldReturn": 0.0588, "ActualUp": 1, "ExecutionUp": 1,
+            "Probability": 0.65, "ExpectedReturn": 0.05, "ValidationAUC": 0.69, "ValidationBrier": 0.21,
+            "DecisionReason": "LONG_CONFIRMED",
+        },
+        {
+            "Date": "2024-01-02", "Symbol": "BBB", "Market": "ETF", "Horizon": 20, "Fold": 1,
+            "Position": 1, "EntryDate": "2024-01-03", "ExitDate": "2024-01-31",
+            "EntryPrice": 50.0, "ExitPrice": 51.0, "Return": 0.0185, "RoundTripCost": 0.0015,
+            "BuyHoldReturn": 0.02, "ActualUp": 1, "ExecutionUp": 1,
+            "Probability": 0.59, "ExpectedReturn": 0.02, "ValidationAUC": 0.61, "ValidationBrier": 0.23,
+            "DecisionReason": "LONG_CONFIRMED",
+        },
+        {
+            "Date": "2024-01-31", "Symbol": "AAA", "Market": "USA", "Horizon": 20, "Fold": 2,
+            "Position": 1, "EntryDate": "2024-02-01", "ExitDate": "2024-02-29",
+            "EntryPrice": 107.0, "ExitPrice": 112.0, "Return": 0.0452, "RoundTripCost": 0.0015,
+            "BuyHoldReturn": 0.0467, "ActualUp": 1, "ExecutionUp": 1,
+            "Probability": 0.61, "ExpectedReturn": 0.03, "ValidationAUC": 0.66, "ValidationBrier": 0.22,
+            "DecisionReason": "LONG_CONFIRMED",
+        },
+        {
+            "Date": "2024-02-01", "Symbol": "CCC", "Market": "CRYPTO", "Horizon": 20, "Fold": 2,
+            "Position": 0, "EntryDate": "2024-02-02", "ExitDate": "2024-03-01",
+            "EntryPrice": 10.0, "ExitPrice": 9.0, "Return": -0.10, "RoundTripCost": 0.0015,
+            "BuyHoldReturn": -0.10, "ActualUp": 0, "ExecutionUp": 0,
+            "Probability": 0.51, "ExpectedReturn": 0.0, "ValidationAUC": 0.49, "ValidationBrier": 0.25,
+            "DecisionReason": "LOW_QUALITY",
+        },
+    ])
+    dates = pd.bdate_range("2024-01-01", "2024-03-05")
+    histories = {
+        "AAA": pd.DataFrame({"Open": np.linspace(100, 115, len(dates))}, index=dates),
+        "BBB": pd.DataFrame({"Open": np.linspace(50, 52, len(dates))}, index=dates),
+        "SPY": pd.DataFrame({"Open": np.linspace(480, 500, len(dates))}, index=dates),
+    }
+    selected = select_non_overlapping_trades(records, RealityConfig(horizons=(20,)))
+    assert list(selected["Symbol"]) == ["AAA", "BBB", "AAA"]
+    assert selected["RealityTradeId"].tolist() == [1, 2, 3]
+
+    capped = select_non_overlapping_trades(records, RealityConfig(horizons=(20,), max_positions=1))
+    assert list(capped["Symbol"]) == ["AAA", "AAA"]
+
+    report, selected, curve = reality_check_report(records, histories, RealityConfig(horizons=(20,), benchmark_symbol="SPY"))
+    assert report["summary"]["observations"] == len(records)
+    assert report["summary"]["raw_signals"] == 4
+    assert report["summary"]["selected_trades"] == 3
+    assert report["summary"]["hit_rate"] == 1.0
+    assert report["summary"]["avg_validation_auc"] > 0.6
+    assert report["summary"]["exposure_days"] > 0
+    assert not curve.empty
+    assert curve["Equity"].iloc[-1] > 1
+    assert {row["Symbol"] for row in report["by_symbol"]} == {"AAA", "BBB", "CCC"}
+    assert next(row for row in report["by_symbol"] if row["Symbol"] == "CCC")["selected_trades"] == 0
 
 
 def test_fold_selection_is_evenly_distributed_before_holdout():

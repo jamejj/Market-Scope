@@ -20,6 +20,7 @@ Lokalny panel badawczy analizujący akcje, ETF-y i krypto. Generuje probabilisty
 - ranking rynku, analiza ryzyka i backtest walk-forward z kosztami transakcji;
 - Signal Journal i Performance Lab z paper portfolio, kosztami, sizingiem, equity curve i drawdown;
 - Aggregate Validation do zbiorczego sprawdzania edge według symbolu, rynku, horyzontu i folda, z osobnym holdoutem, fingerprintem danych, benchmarkami, stress testem kosztów i zapisem również odrzuconych sygnałów;
+- Reality Check / Validation Lab, który z gotowych rekordów walidacji buduje konserwatywniejszy test: jedna pozycja na symbol, odfiltrowanie overlapu, dzienna krzywa kapitału, benchmark tej samej ekspozycji i bootstrap przedziałów ufności;
 - zakładka **Model**, która tłumaczy ustawienia oraz neutralne sygnały;
 - automatyczny monitor rynku zapisujący gotowy ranking domyślnie co 6 godzin;
 - adaptacyjny ensemble, który dobiera udział modelu liniowego i nieliniowego na osobnym okresie kalibracji.
@@ -43,6 +44,14 @@ Pełny diagnostyczny run można uruchomić komendą poniżej. To jest ciężki t
 ```
 
 Szybszy smoke-test techniczny można uruchomić np. z `--refit-every 20 --max-folds 1`, ale nie należy interpretować go jako dowodu przewagi. Jeśli chcesz wymusić świeże dane, dodaj `--refresh-cache`; jeśli chcesz przeliczyć wszystko mimo gotowych jobów, dodaj `--no-resume`.
+
+Po Aggregate Validation można odpalić konserwatywniejszy Reality Check na zapisanym CSV. Domyślnie skupia się na horyzoncie 20 dni, bo to był pierwszy kandydat na edge po wstępnym runie diagnostycznym:
+
+```bash
+.venv/bin/python run_reality_check.py --records outputs/validation/records_...csv --horizons 20
+```
+
+Ten raport nie trenuje niczego od nowa i nie optymalizuje progów. Bierze wyłącznie zapisane decyzje, wybiera niepokrywające się pozycje, liczy dzienną equity curve po cenach `Open` z cache oraz pokazuje wyniki według symbolu, folda i horyzontu. To jest kolejny filtr uczciwości przed holdoutem / forward testem.
 
 ```bash
 python3 -m venv .venv
