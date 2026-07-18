@@ -134,9 +134,16 @@ def run_signal_scan(
     started = datetime.now(timezone.utc)
     rows_by_key: dict[tuple[str, int], dict] = {}
     errors: dict[str, str] = {}
+    try:
+        from .forward import pipeline_fingerprint
+
+        candidate_pipeline = pipeline_fingerprint()
+    except Exception as exc:
+        candidate_pipeline = {"error": str(exc)}
     payload = {
         "status": "running", "started_at": started.isoformat(), "updated_at": None,
         "schema_version": SCAN_SCHEMA_VERSION,
+        "candidate_pipeline": candidate_pipeline,
         "scan_mode": "two_stage", "scan_phase": "fast_radar",
         "deep_limit": deep_limit, "shortlist": [], "universe_total": len(universe),
         "fast_completed": 0, "ml_completed": 0, "ml_total": 0,
@@ -201,10 +208,11 @@ def run_signal_scan(
                 from .forward import record_snapshot_forward_signals
 
                 record_snapshot_forward_signals(payload)
-            except Exception:
+            except Exception as exc:
                 # Forward ledger is append-only evidence; recording issues should be visible via the CLI,
                 # but must not break the market scanner itself.
-                pass
+                payload["forward_ledger_error"] = str(exc)
+                save_snapshot(payload, path)
         return payload
     finally:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

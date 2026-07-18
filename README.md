@@ -63,15 +63,20 @@ Dla czystszego odczytu warto liczyć osobno rynek USA/ETF i krypto, bo mają inn
 
 Po Reality Check Candidate v1 został zamrożony w `configs/marketscope_20d_long_candidate_v1.json`. Kontrakt v1 obejmuje: USA/ETF, tylko LONG, horyzont 20 sesji, próg `P(wzrost) >= 0.55`, dodatni expected return, jakość inną niż `NISKA — BRAK PRZEWAGI`, wejście po następnym open, 10 bps kosztu, 5 bps poślizgu, jedną pozycję na symbol, 5 slotów i maksymalnie 5 aktywnych pozycji. To jest zamrożona hipoteza badawcza — nie potwierdzony edge.
 
-Forward Test Ledger zapisuje nowe sygnały jako append-only JSONL w `data/forward_ledger_candidate_v1.jsonl`. Stare rekordy nie są edytowane ani usuwane: najpierw pojawia się `SIGNAL_OBSERVED`, później `ENTRY_FILLED`, a po 20 sesjach `POSITION_CLOSED`.
+Forward Test Ledger zapisuje nowe sygnały jako append-only JSONL w `data/forward_ledger_candidate_v1.jsonl`. Stare rekordy nie są edytowane ani usuwane: każdy wpis ma `previous_event_hash` i `event_hash`, więc ręczna zmiana wcześniejszej linii jest wykrywana przy odczycie. Cykl zdarzeń to `SNAPSHOT_AUDIT`, `SIGNAL_OBSERVED`, potem `POSITION_ACCEPTED` albo `POSITION_SKIPPED`, następnie `ENTRY_FILLED`, a po 20 sesjach `POSITION_CLOSED`.
 
 ```bash
 .venv/bin/python run_forward_test.py --record-snapshot --refresh
 ```
 
-Pełny skan monitora dopisuje nowe sygnały Candidate v1 automatycznie po zakończeniu snapshotu. Komenda powyżej jest przydatna do ręcznego dopisania sygnałów z ostatniego `data/signals.json` oraz do uzupełnienia wejść/wyjść, gdy nowe ceny są już dostępne.
+Pełny skan monitora dopisuje nowe sygnały Candidate v1 automatycznie po zakończeniu snapshotu. Forward ledger odrzuca snapshoty sprzed `frozen_at`, snapshoty bez zgodnego pipeline hash, brudne pliki modelu/decyzji oraz sygnały z dziennej świecy, która według czasu snapshotu nie jest jeszcze bezpiecznie zamknięta. Komenda powyżej jest przydatna do ręcznego dopisania sygnałów z ostatniego `data/signals.json` oraz do uzupełnienia wejść/wyjść, gdy nowe ceny są już dostępne.
 
-Osobny, wcześniej nieużywany koszyk USA/ETF do kolejnego testu jest zapisany i zahashowany w `configs/unseen_usa_etf_v1.json`. Nie należy zmieniać modeli, cech ani progów Candidate v1 po zobaczeniu jego wyników.
+Osobny, wcześniej nieużywany koszyk USA/ETF do kolejnego testu jest zapisany i zahashowany w `configs/unseen_usa_etf_v1.json`. Nie należy zmieniać modeli, cech ani progów Candidate v1 po zobaczeniu jego wyników. Runner unseen zapisuje preflight manifest i odpala walidację do osobnego folderu:
+
+```bash
+.venv/bin/python run_unseen_validation.py --dry-run
+.venv/bin/python run_unseen_validation.py
+```
 
 ```bash
 python3 -m venv .venv

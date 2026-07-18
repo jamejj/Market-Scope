@@ -5,7 +5,7 @@
   "frozen_at": "2026-07-18T18:00:00+02:00",
   "frozen_commit": "60f0a8b",
   "hash_method": "sha256(canonical_json(manifest_without_manifest_hash))",
-  "manifest_hash": "146a6d58994df31a3074c297be21f516c617198d812d6e236391d2e63d6071ea",
+  "manifest_hash": "ad98e4b3576d3b6465e7f5c29dba7c735f4a2cf81e1dc2f5c0fbc47ade178aac",
   "research_note": "Candidate v1 is frozen after Reality Lab diagnostics. This is not a confirmed investment edge; it is a locked hypothesis for forward testing.",
   "scope": {
     "markets": [
@@ -52,6 +52,7 @@
     "cost_bps": 10.0,
     "slippage_bps": 5.0,
     "round_trip_cost": 0.0015,
+    "usa_etf_close_buffer_minutes": 20,
     "position_side": "long_only"
   },
   "portfolio_contract": {
@@ -85,6 +86,17 @@
       "auc",
       "brier"
     ]
+  },
+  "frozen_pipeline": {
+    "hash_method": "sha256(relative_path + file_sha256 for model/features/signals/cutoff/engine)",
+    "pipeline_hash": "c71166483d0c59227843410cfe468522829238e27896990dbddbae248b9a3c80",
+    "files": {
+      "market_oracle/model.py": "0411818f807a5d5417d604109e6578e9ca59e681c7dedaf7c84366cfbaebf616",
+      "market_oracle/features.py": "48541f5181e6bcfe3a6bbea845c3c639b9318b19470ea53b73c130a26ac460e0",
+      "market_oracle/signals.py": "9b1d52f01495f39366ee13feec318654bbc91ca2d7c97913d747143e233a3378",
+      "market_oracle/cutoff.py": "0f1e18d4977f18f137a65425eddb7f7d599ec63f301fc2000aa7a4a49318f9be",
+      "market_oracle/engine.py": "f2e98adc101c7ef29d0956602efc064a0cefed832c3b75a4b6e938bf5bd39738"
+    }
   },
   "diagnostic_reference": {
     "validation_mode": "WALK_FORWARD_DIAGNOSTIC_ONLY",

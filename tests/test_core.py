@@ -8,14 +8,18 @@ from market_oracle.cutoff import available_label_end
 from market_oracle.engine import observation_label, risk_reward_metrics, scan_market_fast, setup_intelligence, signal_label
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.forward import (
+    assert_forward_contract_ready,
     load_candidate_manifest,
     load_forward_events,
+    load_unseen_universe,
     record_snapshot_forward_signals,
     reconstruct_forward_state,
     refresh_forward_ledger,
     forward_summary,
     verify_frozen_hash,
+    verify_pipeline_contract,
 )
+import market_oracle.forward as forward_module
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast, fit_forecast_state
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
@@ -673,6 +677,7 @@ def test_paper_portfolio_applies_sizing_and_costs():
 
 def test_candidate_manifest_is_frozen_and_hash_verified():
     manifest = load_candidate_manifest()
+    unseen = load_unseen_universe()
     assert manifest["candidate_id"] == "marketscope_20d_long_candidate_v1"
     assert manifest["frozen_commit"] == "60f0a8b"
     assert manifest["decision_contract"]["threshold"] == DEFAULT_SIGNAL_THRESHOLD
@@ -680,6 +685,9 @@ def test_candidate_manifest_is_frozen_and_hash_verified():
     assert manifest["portfolio_contract"]["portfolio_slots"] == 5
     assert manifest["portfolio_contract"]["max_positions"] == 5
     assert verify_frozen_hash(manifest, "manifest_hash")
+    assert verify_pipeline_contract(manifest)
+    assert verify_frozen_hash(unseen, "universe_hash")
+    assert len(unseen["symbols"]) == 30
 
 
 def test_forward_ledger_records_only_candidate_rows_and_is_append_only(tmp_path):
@@ -719,17 +727,36 @@ def test_forward_ledger_records_only_candidate_rows_and_is_append_only(tmp_path)
         ],
     }
     path = tmp_path / "forward.jsonl"
-    assert record_snapshot_forward_signals(snapshot, path=path) == 1
-    assert record_snapshot_forward_signals(snapshot, path=path) == 0
+    assert record_snapshot_forward_signals(
+        snapshot,
+        path=path,
+        allow_historical=True,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+    ) == 1
+    assert record_snapshot_forward_signals(
+        snapshot,
+        path=path,
+        allow_historical=True,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+    ) == 0
     events = load_forward_events(path)
-    assert len(events) == 1
-    assert events[0]["event_type"] == "SIGNAL_OBSERVED"
-    assert events[0]["status"] == "PENDING"
-    assert events[0]["symbol"] == "GOOD"
-    assert events[0]["horizon"] == 20
-    assert events[0]["direction"] == "LONG"
-    assert events[0]["execution"] == "NEXT_OPEN"
-    assert events[0]["probability_up"] == 0.61
+    assert len(events) == 3
+    assert [event["event_type"] for event in events] == ["SNAPSHOT_AUDIT", "SIGNAL_OBSERVED", "POSITION_ACCEPTED"]
+    assert events[0]["candidate_rows"] == 1
+    assert events[1]["status"] == "OBSERVED"
+    assert events[1]["symbol"] == "GOOD"
+    assert events[1]["horizon"] == 20
+    assert events[1]["direction"] == "LONG"
+    assert events[1]["execution"] == "NEXT_OPEN"
+    assert events[1]["probability_up"] == 0.61
+    assert events[1]["decision_reason"] == "LONG_CONFIRMED"
+    assert events[1]["decision_reason_source"] == "DERIVED_FROM_SIGNAL_INPUTS"
+    assert events[2]["status"] == "ACCEPTED"
+    assert events[2]["slot"] == 1
     assert verify_frozen_hash(load_candidate_manifest(), "manifest_hash")
 
 
@@ -748,7 +775,14 @@ def test_forward_ledger_fills_next_open_and_closes_after_horizon(tmp_path):
         }],
     }
     path = tmp_path / "forward.jsonl"
-    assert record_snapshot_forward_signals(snapshot, path=path) == 1
+    assert record_snapshot_forward_signals(
+        snapshot,
+        path=path,
+        allow_historical=True,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+    ) == 1
     dates = pd.bdate_range("2026-01-02", periods=26)
     prices = np.linspace(99.0, 125.0, len(dates))
     prices[1] = 100.0
@@ -760,13 +794,19 @@ def test_forward_ledger_fills_next_open_and_closes_after_horizon(tmp_path):
         "Close": prices,
         "Volume": 1_000_000,
     }, index=dates)
-    events, state, errors = refresh_forward_ledger(path=path, histories={"GOOD": history})
+    events, state, errors = refresh_forward_ledger(
+        path=path,
+        histories={"GOOD": history},
+        enforce_pipeline=False,
+        require_clean_tree=False,
+    )
     assert errors == {}
-    assert len(events) == 3
+    assert len(events) == 5
     event_types = [event["event_type"] for event in events]
-    assert event_types == ["SIGNAL_OBSERVED", "ENTRY_FILLED", "POSITION_CLOSED"]
-    signal_id = events[0]["signal_id"]
+    assert event_types == ["SNAPSHOT_AUDIT", "SIGNAL_OBSERVED", "POSITION_ACCEPTED", "ENTRY_FILLED", "POSITION_CLOSED"]
+    signal_id = events[1]["signal_id"]
     assert state[signal_id]["status"] == "CLOSED"
+    assert state[signal_id]["slot"] == 1
     assert state[signal_id]["entry_date"] == "2026-01-05"
     assert state[signal_id]["exit_date"] == "2026-02-02"
     assert state[signal_id]["entry_price"] == 100.0
@@ -775,11 +815,121 @@ def test_forward_ledger_fills_next_open_and_closes_after_horizon(tmp_path):
     assert state[signal_id]["strategy_return"] == pytest.approx(0.10 - 0.0015)
     assert state[signal_id]["hit"] is True
 
-    events_again, state_again, errors_again = refresh_forward_ledger(path=path, histories={"GOOD": history})
+    events_again, state_again, errors_again = refresh_forward_ledger(
+        path=path,
+        histories={"GOOD": history},
+        enforce_pipeline=False,
+        require_clean_tree=False,
+    )
     assert errors_again == {}
-    assert len(events_again) == 3
+    assert len(events_again) == 5
     assert reconstruct_forward_state(events_again) == state_again
     summary = forward_summary(events_again)
     assert summary["signals"] == 1
     assert summary["closed"] == 1
     assert summary["closed_hit_rate"] == 1.0
+
+
+def test_forward_ledger_rejects_old_and_unclosed_snapshots(tmp_path):
+    old_snapshot = {
+        "status": "complete",
+        "schema_version": 6,
+        "updated_at": "2026-07-17T23:00:00+02:00",
+        "records": [{
+            "Symbol": "GOOD", "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-07-17",
+            "Cena": 100.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
+            "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62, "Brier": 0.22,
+            "Jakość modelu": "WYSOKA", "Tryb analizy": "ML",
+        }],
+    }
+    with pytest.raises(ValueError, match="older than Candidate"):
+        record_snapshot_forward_signals(
+            old_snapshot,
+            path=tmp_path / "old.jsonl",
+            enforce_pipeline=False,
+            require_clean_tree=False,
+        )
+
+    intraday_snapshot = {
+        **old_snapshot,
+        "updated_at": "2026-07-20T20:30:00+02:00",
+        "records": [{**old_snapshot["records"][0], "Data": "2026-07-20"}],
+    }
+    with pytest.raises(ValueError, match="before the daily bar"):
+        record_snapshot_forward_signals(
+            intraday_snapshot,
+            path=tmp_path / "intraday.jsonl",
+            enforce_pipeline=False,
+            require_clean_tree=False,
+        )
+
+
+def test_forward_contract_blocks_dirty_tree_and_changed_pipeline(monkeypatch):
+    manifest = load_candidate_manifest()
+    monkeypatch.setattr(forward_module, "git_dirty_paths", lambda: [" M market_oracle/model.py"])
+    with pytest.raises(ValueError, match="dirty"):
+        assert_forward_contract_ready(manifest, enforce_pipeline=False, require_clean_tree=True)
+
+    monkeypatch.setattr(forward_module, "git_dirty_paths", lambda: [])
+    original = forward_module.pipeline_fingerprint
+
+    def changed_pipeline():
+        payload = original()
+        payload["pipeline_hash"] = "changed"
+        return payload
+
+    monkeypatch.setattr(forward_module, "pipeline_fingerprint", changed_pipeline)
+    with pytest.raises(ValueError, match="pipeline hash mismatch"):
+        assert_forward_contract_ready(manifest, enforce_pipeline=True, require_clean_tree=False)
+
+
+def test_forward_ledger_portfolio_gate_and_priority_are_frozen(tmp_path):
+    rows = []
+    for symbol, probability in [("CCC", 0.90), ("AAA", 0.56), ("BBB", 0.70), ("DDD", 0.60), ("EEE", 0.59), ("FFF", 0.95)]:
+        rows.append({
+            "Symbol": symbol, "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-07-20",
+            "Cena": 100.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": probability,
+            "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62, "Brier": 0.22,
+            "Jakość modelu": "WYSOKA", "Tryb analizy": "ML",
+        })
+    snapshot = {
+        "status": "complete",
+        "schema_version": 6,
+        "updated_at": "2026-07-20T22:30:00+02:00",
+        "records": rows,
+    }
+    path = tmp_path / "portfolio.jsonl"
+    assert record_snapshot_forward_signals(
+        snapshot,
+        path=path,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+    ) == 6
+    events = load_forward_events(path)
+    accepted = [event for event in events if event["event_type"] == "POSITION_ACCEPTED"]
+    skipped = [event for event in events if event["event_type"] == "POSITION_SKIPPED"]
+    assert [event["symbol"] for event in accepted] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
+    assert [event["slot"] for event in accepted] == [1, 2, 3, 4, 5]
+    assert skipped[0]["symbol"] == "FFF"
+    assert skipped[0]["skip_reason"] == "POSITION_SKIPPED_NO_FREE_SLOT"
+
+
+def test_forward_ledger_hash_chain_detects_tampering(tmp_path):
+    snapshot = {
+        "status": "complete",
+        "schema_version": 6,
+        "updated_at": "2026-07-20T22:30:00+02:00",
+        "records": [{
+            "Symbol": "GOOD", "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-07-20",
+            "Cena": 100.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
+            "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62, "Brier": 0.22,
+            "Jakość modelu": "WYSOKA", "Tryb analizy": "ML",
+        }],
+    }
+    path = tmp_path / "tamper.jsonl"
+    record_snapshot_forward_signals(snapshot, path=path, enforce_pipeline=False, require_clean_tree=False)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    tampered = lines[1].replace('"signal_price":100.0', '"signal_price":101.0')
+    path.write_text("\n".join([lines[0], tampered, *lines[2:]]) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="event hash mismatch"):
+        load_forward_events(path)
