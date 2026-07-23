@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -11,6 +13,8 @@ from market_oracle.candidate import build_candidate_snapshot, run_candidate_forw
 from market_oracle.forward import (
     assert_forward_contract_ready,
     append_forward_event,
+    format_forward_cli_summary,
+    load_forward_cockpit,
     load_forward_universe,
     load_candidate_manifest,
     load_forward_events,
@@ -1029,6 +1033,130 @@ def test_forward_ledger_hash_chain_detects_tampering(tmp_path):
     path.write_text("\n".join([lines[0], tampered, *lines[2:]]) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="event hash mismatch"):
         load_forward_events(path)
+
+
+def test_forward_cockpit_reads_open_skipped_and_corrupt_ledger(tmp_path):
+    manifest = load_candidate_manifest()
+    ledger = tmp_path / "cockpit.jsonl"
+    snapshot_path = tmp_path / "candidate_snapshot.json"
+    universe = load_forward_universe()
+    snapshot = {
+        "status": "complete",
+        "updated_at": "2026-07-22T22:31:00+02:00",
+        "records": [{"Symbol": "SPY"}, {"Symbol": "AAPL"}],
+        "errors": {},
+        "pre_scan_refresh_errors": {},
+        "forward_universe": {
+            "universe_id": universe["universe_id"],
+            "universe_hash": universe["universe_hash"],
+            "requested_symbols": universe["symbols"],
+            "completed_symbols": universe["symbols"],
+            "failed_symbols": [],
+            "full_coverage": True,
+        },
+    }
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    append_forward_event({
+        "event_type": "SNAPSHOT_AUDIT",
+        "candidate_id": manifest["candidate_id"],
+        "candidate_manifest_hash": manifest["manifest_hash"],
+        "snapshot_hash": "snapshot-1",
+        "status": "AUDITED",
+    }, ledger)
+    append_forward_event({
+        "event_type": "SIGNAL_OBSERVED",
+        "candidate_id": manifest["candidate_id"],
+        "candidate_manifest_hash": manifest["manifest_hash"],
+        "signal_id": "spy-2026-07-20",
+        "status": "OBSERVED",
+        "symbol": "SPY",
+        "asset_class": "USA / ETF",
+        "horizon": 20,
+        "direction": "LONG",
+        "signal_date": "2026-07-20",
+        "decision_reason": "LONG_CONFIRMED",
+        "probability_up": 0.57,
+        "expected_return": 0.01,
+        "quality": "WYSOKA",
+    }, ledger)
+    append_forward_event({
+        "event_type": "POSITION_ACCEPTED",
+        "candidate_id": manifest["candidate_id"],
+        "candidate_manifest_hash": manifest["manifest_hash"],
+        "signal_id": "spy-2026-07-20",
+        "status": "ACCEPTED",
+        "symbol": "SPY",
+        "direction": "LONG",
+        "signal_date": "2026-07-20",
+        "slot": 1,
+    }, ledger)
+    append_forward_event({
+        "event_type": "ENTRY_FILLED",
+        "candidate_id": manifest["candidate_id"],
+        "candidate_manifest_hash": manifest["manifest_hash"],
+        "signal_id": "spy-2026-07-20",
+        "status": "OPEN",
+        "symbol": "SPY",
+        "direction": "LONG",
+        "signal_date": "2026-07-20",
+        "slot": 1,
+        "entry_date": "2026-07-21",
+        "entry_price": 746.29,
+    }, ledger)
+    append_forward_event({
+        "event_type": "SIGNAL_OBSERVED",
+        "candidate_id": manifest["candidate_id"],
+        "candidate_manifest_hash": manifest["manifest_hash"],
+        "signal_id": "spy-2026-07-22",
+        "status": "OBSERVED",
+        "symbol": "SPY",
+        "asset_class": "USA / ETF",
+        "horizon": 20,
+        "direction": "LONG",
+        "signal_date": "2026-07-22",
+        "decision_reason": "LONG_CONFIRMED",
+        "probability_up": 0.576,
+        "expected_return": 0.008,
+        "quality": "WYSOKA",
+    }, ledger)
+    append_forward_event({
+        "event_type": "POSITION_SKIPPED",
+        "candidate_id": manifest["candidate_id"],
+        "candidate_manifest_hash": manifest["manifest_hash"],
+        "signal_id": "spy-2026-07-22",
+        "status": "SKIPPED",
+        "symbol": "SPY",
+        "direction": "LONG",
+        "signal_date": "2026-07-22",
+        "skip_reason": "POSITION_SKIPPED_SYMBOL_OPEN",
+    }, ledger)
+
+    cockpit = load_forward_cockpit(path=ledger, snapshot_path=snapshot_path, now="2026-07-22")
+    assert cockpit["healthy"] is True
+    assert cockpit["coverage"]["completed"] == 5
+    assert cockpit["portfolio"]["open"] == 1
+    assert cockpit["portfolio"]["free_slots"] == 4
+    assert cockpit["latest_signal_date"] == "2026-07-22"
+    assert cockpit["open_positions"][0]["Symbol"] == "SPY"
+    assert cockpit["open_positions"][0]["Sesje do wyjścia"] == 19
+    assert cockpit["latest_observations"][0]["Status"] == "SKIPPED"
+    assert cockpit["latest_observations"][0]["Powód pominięcia"] == "POSITION_SKIPPED_SYMBOL_OPEN"
+
+    summary_text = format_forward_cli_summary(
+        snapshot,
+        {"added_signals": 1, "refresh_errors": {}, "snapshot_path": str(snapshot_path)},
+        path=ledger,
+    )
+    assert "Candidate v1 forward run: OK" in summary_text
+    assert "Universe coverage: 5/5" in summary_text
+    assert "Skipped: SPY — POSITION_SKIPPED_SYMBOL_OPEN" in summary_text
+
+    broken = tmp_path / "broken.jsonl"
+    broken.write_text("{not-json}\n", encoding="utf-8")
+    broken_view = load_forward_cockpit(path=broken, snapshot_path=snapshot_path)
+    assert broken_view["healthy"] is False
+    assert any("Ledger error" in problem for problem in broken_view["problems"])
 
 
 def test_candidate_snapshot_scans_full_frozen_universe_without_fast_shortlist():

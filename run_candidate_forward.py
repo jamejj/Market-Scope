@@ -10,6 +10,7 @@ from market_oracle.forward import (
     CANDIDATE_SNAPSHOT_PATH,
     FORWARD_LEDGER_PATH,
     FORWARD_UNIVERSE_PATH,
+    format_forward_cli_summary,
 )
 
 
@@ -35,7 +36,7 @@ def main() -> None:
         refresh_first=not args.no_refresh_first,
         require_closed_bar=not args.allow_before_close,
     )
-    print(json.dumps({
+    payload = {
         "snapshot": args.snapshot,
         "ledger": args.ledger,
         "status": snapshot.get("status"),
@@ -43,7 +44,14 @@ def main() -> None:
         "records": len(snapshot.get("records") or []),
         "errors": snapshot.get("errors") or {},
         **result,
-    }, ensure_ascii=False, indent=2, default=str))
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    print(format_forward_cli_summary(
+        snapshot,
+        {**result, "snapshot_path": args.snapshot},
+        path=Path(args.ledger),
+        manifest_path=Path(args.candidate),
+    ))
 
 
 if __name__ == "__main__":

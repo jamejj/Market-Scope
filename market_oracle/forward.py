@@ -914,3 +914,306 @@ def forward_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
         "closed_hit_rate": float((closed_returns > 0).mean()) if len(closed_returns) else None,
         "candidate_ids": sorted({str(event.get("candidate_id")) for event in events if event.get("candidate_id")}),
     }
+
+
+def _business_session_progress(entry_date: Any, horizon: int, as_of_date: Any | None = None) -> dict[str, Any]:
+    entry = pd.to_datetime(entry_date, errors="coerce")
+    if pd.isna(entry):
+        return {"planned_exit_date": None, "sessions_elapsed": None, "sessions_remaining": None}
+    entry = pd.Timestamp(entry).tz_localize(None).normalize()
+    as_of = pd.to_datetime(as_of_date, errors="coerce") if as_of_date is not None else pd.Timestamp.now(tz=WARSAW)
+    if pd.isna(as_of):
+        as_of = pd.Timestamp.now(tz=WARSAW)
+    as_of = pd.Timestamp(as_of).tz_localize(None).normalize()
+    planned_exit = entry + pd.offsets.BDay(int(horizon))
+    if as_of < entry:
+        elapsed = 0
+    else:
+        elapsed = max(0, len(pd.bdate_range(entry, as_of)) - 1)
+    remaining = max(0, int(horizon) - elapsed)
+    return {
+        "planned_exit_date": planned_exit.date().isoformat(),
+        "sessions_elapsed": int(elapsed),
+        "sessions_remaining": int(remaining),
+    }
+
+
+def _load_json_optional(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except FileNotFoundError:
+        return None, f"Brak pliku: {path}"
+    except json.JSONDecodeError as exc:
+        return None, f"Uszkodzony JSON: {path}:{exc.lineno}"
+    except OSError as exc:
+        return None, str(exc)
+
+
+def _local_timestamp_text(value: Any) -> str:
+    timestamp = _aware_timestamp(value)
+    if timestamp is None:
+        return "—"
+    return timestamp.tz_convert(WARSAW).strftime("%Y-%m-%d %H:%M")
+
+
+def _decision_text(item: dict[str, Any]) -> str:
+    status = item.get("status")
+    if status == "OPEN":
+        return "OPEN — pozycja aktywna"
+    if status == "ACCEPTED":
+        return "ACCEPTED — czeka na next open"
+    if status == "SKIPPED":
+        reason = str(item.get("skip_reason") or "")
+        labels = {
+            "POSITION_SKIPPED_SYMBOL_OPEN": "pominięto — symbol już otwarty",
+            "POSITION_SKIPPED_NO_FREE_SLOT": "pominięto — brak wolnego slotu",
+            "POSITION_SKIPPED_MAX_POSITIONS": "pominięto — limit pozycji",
+            "POSITION_SKIPPED_SAME_DAY_REENTRY": "pominięto — blokada same-day reentry",
+        }
+        return labels.get(reason, f"pominięto — {reason or 'brak powodu'}")
+    if status == "CLOSED":
+        return "CLOSED — pozycja rozliczona"
+    return str(status or "OBSERVED")
+
+
+def _position_row(item: dict[str, Any], *, as_of_date: Any | None = None) -> dict[str, Any]:
+    horizon = int(item.get("horizon") or 20)
+    progress = _business_session_progress(item.get("entry_date"), horizon, as_of_date) if item.get("entry_date") else {
+        "planned_exit_date": None,
+        "sessions_elapsed": None,
+        "sessions_remaining": horizon,
+    }
+    return {
+        "Symbol": item.get("symbol"),
+        "Status": item.get("status"),
+        "Slot": item.get("slot"),
+        "Data sygnału": item.get("signal_date"),
+        "Data wejścia": item.get("entry_date"),
+        "Cena wejścia": item.get("entry_price"),
+        "Planowane wyjście": item.get("exit_date") or progress.get("planned_exit_date"),
+        "Sesje minęły": progress.get("sessions_elapsed"),
+        "Sesje do wyjścia": progress.get("sessions_remaining"),
+        "P(wzrost)": item.get("probability_up"),
+        "Oczekiwany ruch": item.get("expected_return"),
+        "Jakość": item.get("quality"),
+        "Decyzja": _decision_text(item),
+        "Powód pominięcia": item.get("skip_reason"),
+        "Zwrot netto": item.get("strategy_return"),
+    }
+
+
+def _event_row(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "Czas eventu": _local_timestamp_text(event.get("event_time_utc")),
+        "Event": event.get("event_type"),
+        "Symbol": event.get("symbol"),
+        "Status": event.get("status"),
+        "Data sygnału": event.get("signal_date"),
+        "Slot": event.get("slot"),
+        "Wejście": event.get("entry_date"),
+        "Cena wejścia": event.get("entry_price"),
+        "Wyjście": event.get("exit_date"),
+        "Cena wyjścia": event.get("exit_price"),
+        "Powód/Decyzja": event.get("skip_reason") or event.get("portfolio_decision") or event.get("decision_reason"),
+    }
+
+
+def build_forward_cockpit(
+    events: list[dict[str, Any]],
+    *,
+    snapshot: dict[str, Any] | None = None,
+    manifest: dict[str, Any] | None = None,
+    ledger_error: str | None = None,
+    snapshot_error: str | None = None,
+    now: Any | None = None,
+) -> dict[str, Any]:
+    """Read-only product view of the Candidate v1 proof flow.
+
+    It intentionally does not mutate the ledger, snapshot or candidate contract.
+    """
+    manifest = manifest or {}
+    state = reconstruct_forward_state(events) if not ledger_error else {}
+    summary = forward_summary(events) if not ledger_error else {
+        "events": 0, "signals": 0, "observed_only": 0, "accepted_pending_entry": 0,
+        "skipped": 0, "open": 0, "closed": 0, "event_counts": {},
+    }
+    problems: list[str] = []
+    if ledger_error:
+        problems.append(f"Ledger error: {ledger_error}")
+    if snapshot_error:
+        problems.append(f"Snapshot error: {snapshot_error}")
+    if not events and not ledger_error:
+        problems.append("Forward ledger jest pusty — uruchom pierwszy Candidate v1 forward run.")
+
+    snapshot = snapshot or {}
+    universe = snapshot.get("forward_universe") or {}
+    requested = list(universe.get("requested_symbols") or [])
+    completed = list(universe.get("completed_symbols") or [])
+    failed = list(universe.get("failed_symbols") or [])
+    if snapshot:
+        if snapshot.get("status") != "complete":
+            problems.append(f"Ostatni snapshot nie jest complete: {snapshot.get('status')}")
+        if failed:
+            problems.append(f"Niepoliczone symbole Candidate v1: {', '.join(map(str, failed))}")
+        if requested and completed and len(completed) != len(requested):
+            problems.append(f"Niepełne pokrycie universe: {len(completed)}/{len(requested)}")
+        if universe and not bool(universe.get("full_coverage")):
+            problems.append("Snapshot nie deklaruje full_coverage=true.")
+        if snapshot.get("errors"):
+            problems.append(f"Snapshot ma błędy danych: {len(snapshot.get('errors') or {})}")
+        if snapshot.get("pre_scan_refresh_errors"):
+            problems.append(f"Refresh ledger zgłosił błędy: {len(snapshot.get('pre_scan_refresh_errors') or {})}")
+
+    signal_dates = sorted({
+        date for event in events
+        if event.get("event_type") == SIGNAL_EVENT and (date := _date_text(event.get("signal_date")))
+    })
+    latest_signal_date = signal_dates[-1] if signal_dates else None
+    latest_signal_ids = {
+        event.get("signal_id") for event in events
+        if event.get("event_type") == SIGNAL_EVENT and _date_text(event.get("signal_date")) == latest_signal_date
+    }
+
+    active_items = [
+        item for item in state.values()
+        if item.get("status") in {"ACCEPTED", "OPEN"}
+    ]
+    open_positions = [_position_row(item, as_of_date=now or latest_signal_date) for item in active_items]
+    latest_observations = [
+        _position_row(item, as_of_date=now or latest_signal_date)
+        for item in state.values()
+        if item.get("signal_id") in latest_signal_ids
+    ]
+    closed_positions = [
+        _position_row(item, as_of_date=now or latest_signal_date)
+        for item in state.values()
+        if item.get("status") == "CLOSED"
+    ]
+    recent_events = [_event_row(event) for event in events[-30:]]
+    snapshots = int((pd.Series([event.get("event_type") for event in events], dtype=object) == SNAPSHOT_AUDIT_EVENT).sum()) if events else 0
+    slots = int((manifest.get("portfolio_contract") or {}).get("portfolio_slots", 5) or 5)
+    occupied_slots = sorted({
+        int(item.get("slot")) for item in active_items
+        if item.get("slot") is not None
+    })
+    health = "Proof flow zdrowy" if not problems else "Wymaga uwagi"
+    return {
+        "healthy": not problems,
+        "health": health,
+        "problems": problems,
+        "summary": summary,
+        "snapshot": {
+            "status": snapshot.get("status"),
+            "updated_at": snapshot.get("updated_at"),
+            "updated_at_local": _local_timestamp_text(snapshot.get("updated_at")),
+            "records": len(snapshot.get("records") or []),
+            "errors": snapshot.get("errors") or {},
+            "refresh_errors": snapshot.get("pre_scan_refresh_errors") or {},
+        },
+        "coverage": {
+            "requested": len(requested),
+            "completed": len(completed),
+            "failed": len(failed),
+            "full_coverage": bool(universe.get("full_coverage")),
+            "requested_symbols": requested,
+            "completed_symbols": completed,
+            "failed_symbols": failed,
+        },
+        "portfolio": {
+            "slots": slots,
+            "open": int(summary.get("open", 0)),
+            "accepted_pending_entry": int(summary.get("accepted_pending_entry", 0)),
+            "occupied_slots": occupied_slots,
+            "free_slots": max(0, slots - len(occupied_slots)),
+        },
+        "latest_signal_date": latest_signal_date,
+        "forward_days": len(signal_dates),
+        "open_positions": open_positions,
+        "latest_observations": sorted(latest_observations, key=lambda row: (str(row.get("Symbol")), str(row.get("Status")))),
+        "closed_positions": closed_positions,
+        "recent_events": recent_events,
+    }
+
+
+def load_forward_cockpit(
+    *,
+    path: Path = FORWARD_LEDGER_PATH,
+    snapshot_path: Path = CANDIDATE_SNAPSHOT_PATH,
+    manifest_path: Path = CANDIDATE_MANIFEST_PATH,
+    now: Any | None = None,
+) -> dict[str, Any]:
+    ledger_error = None
+    try:
+        events = load_forward_events(path)
+    except Exception as exc:
+        events = []
+        ledger_error = str(exc)
+    snapshot, snapshot_error = _load_json_optional(snapshot_path)
+    try:
+        manifest = load_candidate_manifest(manifest_path)
+    except Exception:
+        manifest = {}
+    return build_forward_cockpit(
+        events,
+        snapshot=snapshot,
+        manifest=manifest,
+        ledger_error=ledger_error,
+        snapshot_error=snapshot_error,
+        now=now,
+    )
+
+
+def format_forward_cli_summary(
+    snapshot: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    path: Path = FORWARD_LEDGER_PATH,
+    manifest_path: Path = CANDIDATE_MANIFEST_PATH,
+) -> str:
+    cockpit = load_forward_cockpit(path=path, snapshot_path=Path(result.get("snapshot_path") or CANDIDATE_SNAPSHOT_PATH), manifest_path=manifest_path)
+    coverage = snapshot.get("forward_universe") or {}
+    completed = len(coverage.get("completed_symbols") or [])
+    requested = len(coverage.get("requested_symbols") or [])
+    latest = cockpit.get("latest_observations") or []
+    new_positions = [
+        row for row in latest
+        if row.get("Status") in {"ACCEPTED", "OPEN"}
+    ]
+    skipped = [
+        row for row in latest
+        if row.get("Status") == "SKIPPED"
+    ]
+    errors = snapshot.get("errors") or {}
+    refresh_errors = result.get("refresh_errors") or {}
+    portfolio = cockpit.get("portfolio") or {}
+    open_rows = cockpit.get("open_positions") or []
+    status = "OK" if cockpit.get("healthy") else "PROBLEM"
+    lines = [
+        "",
+        f"Candidate v1 forward run: {status}",
+        f"Universe coverage: {completed}/{requested}",
+        f"New observations: {int(result.get('added_signals') or 0)}",
+        f"New positions: {len(new_positions)}",
+    ]
+    if skipped:
+        for row in skipped:
+            reason = row.get("Powód pominięcia") or row.get("Decyzja") or "skipped"
+            lines.append(f"Skipped: {row.get('Symbol')} — {reason}")
+    else:
+        lines.append("Skipped: none")
+    lines.append(f"Open portfolio: {portfolio.get('open', 0) + portfolio.get('accepted_pending_entry', 0)}/{portfolio.get('slots', 5)}")
+    if open_rows:
+        for row in open_rows:
+            entry = row.get("Data wejścia") or "pending next open"
+            price = row.get("Cena wejścia")
+            price_text = "—" if price is None else f"{float(price):.2f}"
+            remaining = row.get("Sesje do wyjścia")
+            remaining_text = "—" if remaining is None else str(remaining)
+            lines.append(f"Open: {row.get('Symbol')} · entry {entry} @ {price_text} · {remaining_text} sessions left")
+    if errors or refresh_errors or cockpit.get("problems"):
+        lines.append(f"Errors: snapshot={len(errors)}, refresh={len(refresh_errors)}, cockpit={len(cockpit.get('problems') or [])}")
+        for problem in (cockpit.get("problems") or [])[:4]:
+            lines.append(f"- {problem}")
+    else:
+        lines.append("Errors: none")
+    return "\n".join(lines)

@@ -17,6 +17,7 @@ from market_oracle.catalog import (
 )
 from market_oracle.data import download_history, download_profile
 from market_oracle.engine import analyze_asset, scan_market_multi, signal_label
+from market_oracle.forward import load_forward_cockpit
 from market_oracle.journal import (
     journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results,
 )
@@ -1042,6 +1043,100 @@ def render_signal_journal() -> None:
             )
 
 
+def render_forward_cockpit() -> None:
+    st.header("Live Forward Cockpit")
+    st.write(
+        "Read-only podgląd Candidate v1. Ta zakładka niczego nie zapisuje i nie zmienia — tylko czyta "
+        "zamrożony proof ledger, ostatni snapshot i pokazuje, co realnie stało się z sygnałami."
+    )
+    cockpit = load_forward_cockpit()
+    coverage = cockpit["coverage"]
+    portfolio = cockpit["portfolio"]
+    snapshot = cockpit["snapshot"]
+    summary = cockpit["summary"]
+
+    if cockpit["healthy"]:
+        st.success("✅ Proof flow zdrowy — ledger, snapshot i pokrycie universe wyglądają poprawnie.")
+    else:
+        st.error("⚠️ Forward proof wymaga uwagi.")
+        for problem in cockpit["problems"]:
+            st.write(f"- {problem}")
+
+    metric_cols = st.columns(6)
+    requested = coverage["requested"] or 0
+    completed = coverage["completed"] or 0
+    metric_cols[0].metric("Ostatni snapshot", snapshot["updated_at_local"])
+    metric_cols[1].metric("Universe coverage", f"{completed}/{requested}" if requested else "—")
+    metric_cols[2].metric("Forward dni", cockpit["forward_days"])
+    metric_cols[3].metric("Otwarte pozycje", f"{portfolio['open']}/{portfolio['slots']}")
+    metric_cols[4].metric("Czeka na wejście", portfolio["accepted_pending_entry"])
+    metric_cols[5].metric("Wolne sloty", portfolio["free_slots"])
+
+    event_cols = st.columns(5)
+    event_cols[0].metric("Eventy", summary.get("events", 0))
+    event_cols[1].metric("Obserwacje", summary.get("signals", 0), help="SIGNAL_OBSERVED, czyli sygnały zauważone przez model.")
+    event_cols[2].metric("Pominięte", summary.get("skipped", 0))
+    event_cols[3].metric("Zamknięte", summary.get("closed", 0))
+    event_cols[4].metric("Snapshot errors", len(snapshot.get("errors") or {}))
+
+    formats = {
+        "Cena wejścia": "{:.2f}",
+        "P(wzrost)": "{:.1%}",
+        "Oczekiwany ruch": "{:+.1%}",
+        "Zwrot netto": "{:+.1%}",
+        "Cena wyjścia": "{:.2f}",
+    }
+
+    st.subheader("Aktywne pozycje i sloty")
+    open_frame = pd.DataFrame(cockpit["open_positions"])
+    if open_frame.empty:
+        st.info("Brak aktywnych pozycji Candidate v1. To też jest poprawny stan — system nie wymusza transakcji.")
+    else:
+        columns = [
+            "Symbol", "Status", "Slot", "Data sygnału", "Data wejścia", "Cena wejścia",
+            "Planowane wyjście", "Sesje minęły", "Sesje do wyjścia",
+            "P(wzrost)", "Oczekiwany ruch", "Jakość", "Decyzja",
+        ]
+        present = [column for column in columns if column in open_frame]
+        st.dataframe(open_frame[present].style.format(formats), use_container_width=True, hide_index=True)
+
+    st.subheader("Ostatni dzień forward testu")
+    latest = pd.DataFrame(cockpit["latest_observations"])
+    if latest.empty:
+        st.info("Nie ma jeszcze obserwacji sygnałów w ledgerze.")
+    else:
+        st.caption(f"Najnowsza data sygnału: **{cockpit['latest_signal_date']}**")
+        columns = [
+            "Symbol", "Status", "Slot", "Data sygnału", "P(wzrost)", "Oczekiwany ruch",
+            "Jakość", "Decyzja", "Powód pominięcia",
+        ]
+        present = [column for column in columns if column in latest]
+        st.dataframe(latest[present].style.format(formats), use_container_width=True, hide_index=True)
+
+    st.subheader("Historia eventów")
+    events = pd.DataFrame(cockpit["recent_events"])
+    if events.empty:
+        st.info("Ledger jest pusty.")
+    else:
+        columns = [
+            "Czas eventu", "Event", "Symbol", "Status", "Data sygnału", "Slot",
+            "Wejście", "Cena wejścia", "Wyjście", "Cena wyjścia", "Powód/Decyzja",
+        ]
+        present = [column for column in columns if column in events]
+        st.dataframe(events[present].style.format(formats), use_container_width=True, hide_index=True)
+
+    with st.expander("Co oznaczają eventy?"):
+        st.markdown("""
+        - **SNAPSHOT_AUDIT** — MarketScope zapisał dowód, że pełny Candidate v1 universe został sprawdzony.
+        - **SIGNAL_OBSERVED** — model zobaczył sygnał spełniający warunki Candidate v1.
+        - **POSITION_ACCEPTED** — bramka portfela przydzieliła wolny slot.
+        - **ENTRY_FILLED** — wejście zostało uzupełnione po następnym `Open`.
+        - **POSITION_SKIPPED** — sygnał był realny, ale portfolio go nie przyjęło, np. symbol już był otwarty.
+        - **POSITION_CLOSED** — po 20 sesjach pozycja została rozliczona.
+        """)
+        st.caption("Forward Cockpit jest tylko do odczytu. Główny run nadal odpalamy raz dziennie po 22:20.")
+
+
 @st.fragment(run_every="30s")
 def render_signal_dashboard() -> None:
     snapshot = load_snapshot()
@@ -1336,8 +1431,8 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-home, stocks, etfs, crypto, radar, journal, backtest, settings, method = st.tabs([
-    "Start", "Spółki", "ETF-y", "Krypto", "Sygnały", "Journal", "Backtest", "Model", "Metodologia",
+home, stocks, etfs, crypto, radar, forward_tab, journal, backtest, settings, method = st.tabs([
+    "Start", "Spółki", "ETF-y", "Krypto", "Sygnały", "Forward", "Journal", "Backtest", "Model", "Metodologia",
 ])
 
 with home:
@@ -1349,6 +1444,7 @@ with home:
         <div class="pro-card"><small>Markets</small><h3>ETF-y</h3><p>Szeroki rynek, sektory, obligacje, surowce, regiony i UCITS.</p></div>
         <div class="pro-card"><small>24/7 risk</small><h3>Krypto</h3><p>Najważniejsze kryptowaluty, segmenty rynku i ręczne symbole.</p></div>
         <div class="pro-card"><small>Scanner</small><h3>Sygnały</h3><p>Today’s Radar, Setup Intelligence, momentum i risk/reward shortlist.</p></div>
+        <div class="pro-card"><small>Proof</small><h3>Forward</h3><p>Live cockpit Candidate v1: pozycje, sloty, snapshoty i ledger eventów.</p></div>
         <div class="pro-card"><small>Performance</small><h3>Journal</h3><p>Paper-performance, equity curve, drawdown i skuteczność sygnałów.</p></div>
         <div class="pro-card"><small>Validation</small><h3>Backtest</h3><p>Chronologiczny walk-forward z kosztami, bez trenowania na przyszłości.</p></div>
         <div class="pro-card"><small>Controls</small><h3>Model</h3><p>Ustawienia historii, wyjaśnienie parametrów i automatycznego monitora.</p></div>
@@ -1459,6 +1555,9 @@ with radar:
             _render_ranking_table(custom_frame.sort_values("Score", ascending=False), "Wynik szybkiego skanu", "Brak danych do pokazania.")
             if custom_errors:
                 st.caption(f"Pominięte / bez danych: {', '.join(custom_errors)}")
+
+with forward_tab:
+    render_forward_cockpit()
 
 with journal:
     render_signal_journal()
