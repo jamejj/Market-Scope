@@ -1018,13 +1018,52 @@ def _event_row(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_run_event(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event_id": event.get("event_id"),
+        "event_type": event.get("event_type"),
+        "symbol": event.get("symbol"),
+        "status": event.get("status"),
+        "signal_date": event.get("signal_date"),
+        "slot": event.get("slot"),
+        "entry_date": event.get("entry_date"),
+        "entry_price": event.get("entry_price"),
+        "exit_date": event.get("exit_date"),
+        "exit_price": event.get("exit_price"),
+        "skip_reason": event.get("skip_reason"),
+        "portfolio_decision": event.get("portfolio_decision"),
+        "decision_reason": event.get("decision_reason"),
+    }
+
+
+def summarize_forward_run_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compact summary for events appended during one CLI run."""
+    by_type = pd.Series([event.get("event_type") for event in events], dtype=object)
+    counts = by_type.value_counts().to_dict() if len(by_type) else {}
+    def of_type(event_type: str) -> list[dict[str, Any]]:
+        return [_compact_run_event(event) for event in events if event.get("event_type") == event_type]
+    return {
+        "run_event_counts": {str(key): int(value) for key, value in counts.items()},
+        "run_event_ids": [event.get("event_id") for event in events if event.get("event_id")],
+        "run_observations": of_type(SIGNAL_EVENT),
+        "run_accepted": of_type(ACCEPT_EVENT),
+        "run_skipped": of_type(SKIP_EVENT),
+        "run_entries": of_type(ENTRY_EVENT),
+        "run_closed": of_type(CLOSE_EVENT),
+        "run_audits": of_type(SNAPSHOT_AUDIT_EVENT),
+    }
+
+
 def build_forward_cockpit(
     events: list[dict[str, Any]],
     *,
     snapshot: dict[str, Any] | None = None,
     manifest: dict[str, Any] | None = None,
+    universe_contract: dict[str, Any] | None = None,
     ledger_error: str | None = None,
     snapshot_error: str | None = None,
+    manifest_error: str | None = None,
+    universe_error: str | None = None,
     now: Any | None = None,
 ) -> dict[str, Any]:
     """Read-only product view of the Candidate v1 proof flow.
@@ -1042,28 +1081,61 @@ def build_forward_cockpit(
         problems.append(f"Ledger error: {ledger_error}")
     if snapshot_error:
         problems.append(f"Snapshot error: {snapshot_error}")
+    if manifest_error:
+        problems.append(f"Manifest error: {manifest_error}")
+    elif not manifest:
+        problems.append("Candidate manifest unavailable.")
+    elif manifest.get("manifest_hash") and not verify_frozen_hash(manifest, "manifest_hash"):
+        problems.append("Candidate manifest hash mismatch.")
+    if universe_error:
+        problems.append(f"Forward universe error: {universe_error}")
+    universe_contract = universe_contract or {}
+    if universe_contract and not verify_frozen_hash(universe_contract, "universe_hash"):
+        problems.append("Frozen forward universe hash mismatch.")
     if not events and not ledger_error:
         problems.append("Forward ledger jest pusty — uruchom pierwszy Candidate v1 forward run.")
 
     snapshot = snapshot or {}
-    universe = snapshot.get("forward_universe") or {}
-    requested = list(universe.get("requested_symbols") or [])
-    completed = list(universe.get("completed_symbols") or [])
-    failed = list(universe.get("failed_symbols") or [])
+    snapshot_universe = snapshot.get("forward_universe") or {}
+    requested = list(snapshot_universe.get("requested_symbols") or [])
+    completed = list(snapshot_universe.get("completed_symbols") or [])
+    failed = list(snapshot_universe.get("failed_symbols") or [])
     if snapshot:
+        current_snapshot_hash = snapshot_hash(snapshot)
+        audited_hashes = {
+            event.get("snapshot_hash")
+            for event in events
+            if event.get("event_type") == SNAPSHOT_AUDIT_EVENT
+        }
+        if current_snapshot_hash not in audited_hashes:
+            problems.append("Aktualny snapshot nie ma odpowiadającego SNAPSHOT_AUDIT w ledgerze.")
         if snapshot.get("status") != "complete":
             problems.append(f"Ostatni snapshot nie jest complete: {snapshot.get('status')}")
+        if universe_contract and snapshot_universe.get("universe_hash") != universe_contract.get("universe_hash"):
+            problems.append("Snapshot universe hash różni się od zamrożonego forward_universe_v1.")
+        expected_symbols = {str(symbol).upper() for symbol in universe_contract.get("symbols") or []}
+        requested_symbols = {str(symbol).upper() for symbol in requested}
+        completed_symbols = {str(symbol).upper() for symbol in completed}
+        if expected_symbols and requested_symbols != expected_symbols:
+            problems.append("Snapshot requested universe nie zgadza się z zamrożonym forward_universe_v1.")
+        if expected_symbols and completed_symbols != expected_symbols:
+            problems.append("Snapshot completed universe nie pokrywa całego forward_universe_v1.")
         if failed:
             problems.append(f"Niepoliczone symbole Candidate v1: {', '.join(map(str, failed))}")
         if requested and completed and len(completed) != len(requested):
             problems.append(f"Niepełne pokrycie universe: {len(completed)}/{len(requested)}")
-        if universe and not bool(universe.get("full_coverage")):
+        if snapshot_universe and not bool(snapshot_universe.get("full_coverage")):
             problems.append("Snapshot nie deklaruje full_coverage=true.")
         if snapshot.get("errors"):
             problems.append(f"Snapshot ma błędy danych: {len(snapshot.get('errors') or {})}")
         if snapshot.get("pre_scan_refresh_errors"):
             problems.append(f"Refresh ledger zgłosił błędy: {len(snapshot.get('pre_scan_refresh_errors') or {})}")
 
+    audit_dates = sorted({
+        date for event in events
+        if event.get("event_type") == SNAPSHOT_AUDIT_EVENT
+        and (date := _date_text(event.get("snapshot_updated_at") or event.get("event_time_utc")))
+    })
     signal_dates = sorted({
         date for event in events
         if event.get("event_type") == SIGNAL_EVENT and (date := _date_text(event.get("signal_date")))
@@ -1109,12 +1181,13 @@ def build_forward_cockpit(
             "records": len(snapshot.get("records") or []),
             "errors": snapshot.get("errors") or {},
             "refresh_errors": snapshot.get("pre_scan_refresh_errors") or {},
+            "hash": snapshot_hash(snapshot) if snapshot else None,
         },
         "coverage": {
             "requested": len(requested),
             "completed": len(completed),
             "failed": len(failed),
-            "full_coverage": bool(universe.get("full_coverage")),
+            "full_coverage": bool(snapshot_universe.get("full_coverage")),
             "requested_symbols": requested,
             "completed_symbols": completed,
             "failed_symbols": failed,
@@ -1127,7 +1200,10 @@ def build_forward_cockpit(
             "free_slots": max(0, slots - len(occupied_slots)),
         },
         "latest_signal_date": latest_signal_date,
-        "forward_days": len(signal_dates),
+        "latest_audit_date": audit_dates[-1] if audit_dates else None,
+        "forward_days": len(audit_dates),
+        "audit_days": len(audit_dates),
+        "signal_days": len(signal_dates),
         "open_positions": open_positions,
         "latest_observations": sorted(latest_observations, key=lambda row: (str(row.get("Symbol")), str(row.get("Status")))),
         "closed_positions": closed_positions,
@@ -1151,14 +1227,25 @@ def load_forward_cockpit(
     snapshot, snapshot_error = _load_json_optional(snapshot_path)
     try:
         manifest = load_candidate_manifest(manifest_path)
-    except Exception:
+        manifest_error = None
+    except Exception as exc:
         manifest = {}
+        manifest_error = str(exc)
+    try:
+        universe = load_forward_universe(FORWARD_UNIVERSE_PATH)
+        universe_error = None
+    except Exception as exc:
+        universe = {}
+        universe_error = str(exc)
     return build_forward_cockpit(
         events,
         snapshot=snapshot,
         manifest=manifest,
+        universe_contract=universe,
         ledger_error=ledger_error,
         snapshot_error=snapshot_error,
+        manifest_error=manifest_error,
+        universe_error=universe_error,
         now=now,
     )
 
@@ -1174,15 +1261,12 @@ def format_forward_cli_summary(
     coverage = snapshot.get("forward_universe") or {}
     completed = len(coverage.get("completed_symbols") or [])
     requested = len(coverage.get("requested_symbols") or [])
-    latest = cockpit.get("latest_observations") or []
-    new_positions = [
-        row for row in latest
-        if row.get("Status") in {"ACCEPTED", "OPEN"}
-    ]
-    skipped = [
-        row for row in latest
-        if row.get("Status") == "SKIPPED"
-    ]
+    run_counts = result.get("run_event_counts") or {}
+    observations = result.get("run_observations") or []
+    accepted = result.get("run_accepted") or []
+    skipped = result.get("run_skipped") or []
+    entries = result.get("run_entries") or []
+    closed = result.get("run_closed") or []
     errors = snapshot.get("errors") or {}
     refresh_errors = result.get("refresh_errors") or {}
     portfolio = cockpit.get("portfolio") or {}
@@ -1192,13 +1276,23 @@ def format_forward_cli_summary(
         "",
         f"Candidate v1 forward run: {status}",
         f"Universe coverage: {completed}/{requested}",
-        f"New observations: {int(result.get('added_signals') or 0)}",
-        f"New positions: {len(new_positions)}",
+        f"New observations: {int(run_counts.get(SIGNAL_EVENT, result.get('added_signals') or 0))}",
+        f"New positions: {int(run_counts.get(ACCEPT_EVENT, 0))}",
     ]
+    if entries:
+        for event in entries:
+            price = event.get("entry_price")
+            price_text = "—" if price is None else f"{float(price):.2f}"
+            lines.append(f"Entry filled: {event.get('symbol')} @ {price_text} on {event.get('entry_date')}")
+    if closed:
+        for event in closed:
+            result_text = event.get("strategy_return")
+            result_text = "—" if result_text is None else f"{float(result_text):+.2%}"
+            lines.append(f"Closed: {event.get('symbol')} · {result_text}")
     if skipped:
-        for row in skipped:
-            reason = row.get("Powód pominięcia") or row.get("Decyzja") or "skipped"
-            lines.append(f"Skipped: {row.get('Symbol')} — {reason}")
+        for event in skipped:
+            reason = event.get("skip_reason") or event.get("portfolio_decision") or "skipped"
+            lines.append(f"Skipped: {event.get('symbol')} — {reason}")
     else:
         lines.append("Skipped: none")
     lines.append(f"Open portfolio: {portfolio.get('open', 0) + portfolio.get('accepted_pending_entry', 0)}/{portfolio.get('slots', 5)}")
@@ -1209,7 +1303,7 @@ def format_forward_cli_summary(
             price_text = "—" if price is None else f"{float(price):.2f}"
             remaining = row.get("Sesje do wyjścia")
             remaining_text = "—" if remaining is None else str(remaining)
-            lines.append(f"Open: {row.get('Symbol')} · entry {entry} @ {price_text} · {remaining_text} sessions left")
+            lines.append(f"Open: {row.get('Symbol')} · entry {entry} @ {price_text} · approx {remaining_text} sessions left")
     if errors or refresh_errors or cockpit.get("problems"):
         lines.append(f"Errors: snapshot={len(errors)}, refresh={len(refresh_errors)}, cockpit={len(cockpit.get('problems') or [])}")
         for problem in (cockpit.get("problems") or [])[:4]:

@@ -13,6 +13,7 @@ from market_oracle.candidate import build_candidate_snapshot, run_candidate_forw
 from market_oracle.forward import (
     assert_forward_contract_ready,
     append_forward_event,
+    build_forward_cockpit,
     format_forward_cli_summary,
     load_forward_cockpit,
     load_forward_universe,
@@ -23,6 +24,7 @@ from market_oracle.forward import (
     reconstruct_forward_state,
     refresh_forward_ledger,
     forward_summary,
+    snapshot_hash,
     verify_frozen_hash,
     verify_pipeline_contract,
 )
@@ -1061,8 +1063,9 @@ def test_forward_cockpit_reads_open_skipped_and_corrupt_ledger(tmp_path):
         "event_type": "SNAPSHOT_AUDIT",
         "candidate_id": manifest["candidate_id"],
         "candidate_manifest_hash": manifest["manifest_hash"],
-        "snapshot_hash": "snapshot-1",
+        "snapshot_hash": snapshot_hash(snapshot),
         "status": "AUDITED",
+        "snapshot_updated_at": snapshot["updated_at"],
     }, ledger)
     append_forward_event({
         "event_type": "SIGNAL_OBSERVED",
@@ -1135,6 +1138,9 @@ def test_forward_cockpit_reads_open_skipped_and_corrupt_ledger(tmp_path):
     cockpit = load_forward_cockpit(path=ledger, snapshot_path=snapshot_path, now="2026-07-22")
     assert cockpit["healthy"] is True
     assert cockpit["coverage"]["completed"] == 5
+    assert cockpit["audit_days"] == 1
+    assert cockpit["signal_days"] == 2
+    assert cockpit["forward_days"] == 1
     assert cockpit["portfolio"]["open"] == 1
     assert cockpit["portfolio"]["free_slots"] == 4
     assert cockpit["latest_signal_date"] == "2026-07-22"
@@ -1145,18 +1151,109 @@ def test_forward_cockpit_reads_open_skipped_and_corrupt_ledger(tmp_path):
 
     summary_text = format_forward_cli_summary(
         snapshot,
-        {"added_signals": 1, "refresh_errors": {}, "snapshot_path": str(snapshot_path)},
+        {
+            "added_signals": 1,
+            "refresh_errors": {},
+            "snapshot_path": str(snapshot_path),
+            "run_event_counts": {"SIGNAL_OBSERVED": 1, "POSITION_SKIPPED": 1},
+            "run_skipped": [{"symbol": "SPY", "skip_reason": "POSITION_SKIPPED_SYMBOL_OPEN"}],
+            "run_entries": [],
+            "run_closed": [],
+            "run_accepted": [],
+        },
         path=ledger,
     )
     assert "Candidate v1 forward run: OK" in summary_text
     assert "Universe coverage: 5/5" in summary_text
     assert "Skipped: SPY — POSITION_SKIPPED_SYMBOL_OPEN" in summary_text
 
+    stale_summary_text = format_forward_cli_summary(
+        snapshot,
+        {
+            "added_signals": 0,
+            "refresh_errors": {},
+            "snapshot_path": str(snapshot_path),
+            "run_event_counts": {},
+            "run_skipped": [],
+            "run_entries": [],
+            "run_closed": [],
+            "run_accepted": [],
+        },
+        path=ledger,
+    )
+    assert "New positions: 0" in stale_summary_text
+    assert "Skipped: none" in stale_summary_text
+
     broken = tmp_path / "broken.jsonl"
     broken.write_text("{not-json}\n", encoding="utf-8")
     broken_view = load_forward_cockpit(path=broken, snapshot_path=snapshot_path)
     assert broken_view["healthy"] is False
     assert any("Ledger error" in problem for problem in broken_view["problems"])
+
+
+def test_forward_cockpit_counts_audit_days_without_signals_and_same_day_reruns(tmp_path):
+    path = tmp_path / "audit_days.jsonl"
+    first_snapshot = {
+        "status": "complete",
+        "schema_version": 6,
+        "updated_at": "2026-07-20T22:30:00+02:00",
+        "records": [{
+            "Symbol": "GOOD", "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-07-20",
+            "Cena": 100.0, "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
+            "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62, "Brier": 0.22,
+            "Jakość modelu": "WYSOKA", "Tryb analizy": "ML", "DecisionReason": "LONG_CONFIRMED",
+        }],
+    }
+    second_same_day = {
+        **first_snapshot,
+        "updated_at": "2026-07-20T22:35:00+02:00",
+    }
+    next_day_no_signal = {
+        "status": "complete",
+        "schema_version": 6,
+        "updated_at": "2026-07-21T22:30:00+02:00",
+        "records": [{
+            "Symbol": "GOOD", "Klasa": "USA / ETF", "Horyzont": 20, "Data": "2026-07-21",
+            "Cena": 101.0, "Ocena": "BRAK SYGNAŁU", "P(wzrost)": 0.50,
+            "Oczekiwany ruch": 0.00, "AUC walidacji": 0.49, "Brier": 0.25,
+            "Jakość modelu": "NISKA — BRAK PRZEWAGI", "Tryb analizy": "ML", "DecisionReason": "LOW_QUALITY",
+        }],
+    }
+    assert record_snapshot_forward_signals(
+        first_snapshot,
+        path=path,
+        allow_historical=True,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+        require_full_universe=False,
+    ) == 1
+    assert record_snapshot_forward_signals(
+        second_same_day,
+        path=path,
+        allow_historical=True,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+        require_full_universe=False,
+    ) == 0
+    assert record_snapshot_forward_signals(
+        next_day_no_signal,
+        path=path,
+        allow_historical=True,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+        require_full_universe=False,
+    ) == 0
+    events = load_forward_events(path)
+    event_types = [event["event_type"] for event in events]
+    assert event_types.count("SNAPSHOT_AUDIT") == 3
+    assert event_types.count("SIGNAL_OBSERVED") == 1
+    cockpit = build_forward_cockpit(events, manifest=load_candidate_manifest(), now="2026-07-21")
+    assert cockpit["forward_days"] == 2
+    assert cockpit["audit_days"] == 2
+    assert cockpit["signal_days"] == 1
 
 
 def test_candidate_snapshot_scans_full_frozen_universe_without_fast_shortlist():

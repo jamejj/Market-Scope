@@ -1067,9 +1067,9 @@ def render_forward_cockpit() -> None:
     completed = coverage["completed"] or 0
     metric_cols[0].metric("Ostatni snapshot", snapshot["updated_at_local"])
     metric_cols[1].metric("Universe coverage", f"{completed}/{requested}" if requested else "—")
-    metric_cols[2].metric("Forward dni", cockpit["forward_days"])
-    metric_cols[3].metric("Otwarte pozycje", f"{portfolio['open']}/{portfolio['slots']}")
-    metric_cols[4].metric("Czeka na wejście", portfolio["accepted_pending_entry"])
+    metric_cols[2].metric("Audit dni", cockpit["audit_days"], help="Unikalne dni, w których ledger zapisał SNAPSHOT_AUDIT.")
+    metric_cols[3].metric("Signal dni", cockpit["signal_days"], help="Unikalne dni, w których pojawił się SIGNAL_OBSERVED.")
+    metric_cols[4].metric("Otwarte pozycje", f"{portfolio['open']}/{portfolio['slots']}")
     metric_cols[5].metric("Wolne sloty", portfolio["free_slots"])
 
     event_cols = st.columns(5)
@@ -1094,11 +1094,17 @@ def render_forward_cockpit() -> None:
     else:
         columns = [
             "Symbol", "Status", "Slot", "Data sygnału", "Data wejścia", "Cena wejścia",
-            "Planowane wyjście", "Sesje minęły", "Sesje do wyjścia",
+            "Planowane wyjście (≈)", "Sesje minęły (≈)", "Sesje do wyjścia (≈)",
             "P(wzrost)", "Oczekiwany ruch", "Jakość", "Decyzja",
         ]
+        open_frame = open_frame.rename(columns={
+            "Planowane wyjście": "Planowane wyjście (≈)",
+            "Sesje minęły": "Sesje minęły (≈)",
+            "Sesje do wyjścia": "Sesje do wyjścia (≈)",
+        })
         present = [column for column in columns if column in open_frame]
         st.dataframe(open_frame[present].style.format(formats), use_container_width=True, hide_index=True)
+        st.caption("Daty i liczba sesji w cockpicie są przybliżeniem na bazie dni roboczych. Ledger zamyka pozycję dopiero, gdy realna cena `Open` dla wyjścia jest dostępna.")
 
     st.subheader("Ostatni dzień forward testu")
     latest = pd.DataFrame(cockpit["latest_observations"])

@@ -16,10 +16,12 @@ from .forward import (
     assert_forward_contract_ready,
     frozen_hash,
     load_candidate_manifest,
+    load_forward_events,
     load_forward_universe,
     pipeline_fingerprint,
     record_snapshot_forward_signals,
     refresh_forward_ledger,
+    summarize_forward_run_events,
     verify_frozen_hash,
 )
 from .signals import SignalInputs, signal_verdict
@@ -158,8 +160,14 @@ def run_candidate_forward_cycle(
     manifest = load_candidate_manifest(manifest_path)
     assert_forward_contract_ready(manifest, require_clean_tree=require_clean_tree, enforce_pipeline=enforce_pipeline)
     refresh_errors: dict[str, str] = {}
+    try:
+        before_events = load_forward_events(ledger_path)
+    except Exception:
+        before_events = []
+    before_count = len(before_events)
+    events_after_refresh = before_events
     if refresh_first:
-        _, _, refresh_errors = refresh_forward_ledger(
+        events_after_refresh, _, refresh_errors = refresh_forward_ledger(
             path=ledger_path,
             manifest_path=manifest_path,
             years=years,
@@ -167,6 +175,7 @@ def run_candidate_forward_cycle(
             enforce_pipeline=enforce_pipeline,
             require_clean_tree=require_clean_tree,
         )
+    refresh_events = events_after_refresh[before_count:]
     snapshot = build_candidate_snapshot(
         manifest_path=manifest_path,
         universe_path=universe_path,
@@ -177,6 +186,8 @@ def run_candidate_forward_cycle(
     snapshot["pre_scan_refresh_errors"] = refresh_errors
     save_candidate_snapshot(snapshot, snapshot_path)
     added = 0
+    before_record_count = len(events_after_refresh)
+    after_record_events = events_after_refresh
     if record:
         added = record_snapshot_forward_signals(
             snapshot,
@@ -187,4 +198,7 @@ def run_candidate_forward_cycle(
             enforce_pipeline=enforce_pipeline,
             require_clean_tree=require_clean_tree,
         )
-    return snapshot, {"added_signals": added, "refresh_errors": refresh_errors}
+        after_record_events = load_forward_events(ledger_path)
+    record_events = after_record_events[before_record_count:]
+    run_summary = summarize_forward_run_events([*refresh_events, *record_events])
+    return snapshot, {"added_signals": added, "refresh_errors": refresh_errors, **run_summary}
