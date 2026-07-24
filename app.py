@@ -1093,6 +1093,10 @@ def render_forward_cockpit() -> None:
     auto_cols[4].metric("Exit code", auto_stored.get("exit_code") if auto_stored.get("exit_code") is not None else "—")
     if automation.get("status_error"):
         st.warning(automation["status_error"])
+    if auto_launchd.get("privacy_block_detected"):
+        st.error(auto_launchd.get("privacy_hint") or "macOS privacy blocked the LaunchAgent.")
+    elif auto_launchd.get("last_exit_code") not in {None, "0", 0}:
+        st.warning(f"LaunchAgent jest załadowany, ale ostatni exit code to {auto_launchd.get('last_exit_code')}. Sprawdź log stderr w expanderze.")
     if auto_plan.get("missed_session_warning"):
         st.warning(auto_plan["missed_session_warning"])
     if auto_stored.get("automation_status") == "FAILED":

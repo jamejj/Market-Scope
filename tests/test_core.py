@@ -36,6 +36,7 @@ from market_oracle.auto_forward import (
     build_automation_plan,
     eligible_session_dates,
     execute_automation,
+    launchd_status,
     launchd_plist_payload,
     nyse_full_holidays,
 )
@@ -1574,3 +1575,38 @@ def test_forward_automation_launchd_plist_has_weekday_schedule(tmp_path):
     assert [item["Weekday"] for item in payload["StartCalendarInterval"]] == [1, 2, 3, 4, 5]
     assert {item["Hour"] for item in payload["StartCalendarInterval"]} == {22}
     assert {item["Minute"] for item in payload["StartCalendarInterval"]} == {35}
+
+
+def test_forward_automation_launchd_status_uses_gui_domain_and_detects_privacy_block(tmp_path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "launchd.stderr.log").write_text(
+        "PermissionError: [Errno 1] Operation not permitted: "
+        "'/Users/jakubjaworski/Documents/Codex/2026-07-03/jo/.venv/pyvenv.cfg'",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(auto_forward_module, "AUTOMATION_LOG_DIR", log_dir)
+    monkeypatch.setattr(auto_forward_module.os, "getuid", lambda: 501)
+
+    def fake_run(command, capture_output, text, check):
+        assert command == ["launchctl", "print", "gui/501/com.jamejj.marketscope.candidate-forward"]
+        return auto_forward_module.subprocess.CompletedProcess(
+            command,
+            0,
+            "gui/501/com.jamejj.marketscope.candidate-forward = {\n"
+            "\tstate = not running\n"
+            "\truns = 1\n"
+            "\tlast exit code = 1\n"
+            "}\n",
+            "",
+        )
+
+    monkeypatch.setattr(auto_forward_module.subprocess, "run", fake_run)
+    status = launchd_status(tmp_path / "agent.plist")
+    assert status["loaded"] is True
+    assert status["domain"] == "gui/501"
+    assert status["state"] == "not running"
+    assert status["runs"] == "1"
+    assert status["last_exit_code"] == "1"
+    assert status["privacy_block_detected"] is True
+    assert "Full Disk Access" in status["privacy_hint"]

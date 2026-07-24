@@ -6,6 +6,7 @@ from datetime import date, datetime, time, timedelta, timezone
 import argparse
 import fcntl
 import json
+import os
 from pathlib import Path
 import plistlib
 import subprocess
@@ -575,6 +576,31 @@ def launchd_plist_payload(
     }
 
 
+def _launchd_domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def _launchd_service() -> str:
+    return f"{_launchd_domain()}/{LAUNCHD_LABEL}"
+
+
+def _log_tail(path: Path, max_chars: int = 4000) -> str:
+    try:
+        return path.read_text(encoding="utf-8")[-max_chars:]
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        return str(exc)
+
+
+def _launchd_print_field(output: str, field: str) -> str | None:
+    prefix = f"\t{field} = "
+    for line in output.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix):].strip()
+    return None
+
+
 def write_launchd_plist(path: Path = LAUNCHD_PLIST_PATH, *, config: AutomationConfig | None = None) -> Path:
     config = config or AutomationConfig()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -586,19 +612,28 @@ def write_launchd_plist(path: Path = LAUNCHD_PLIST_PATH, *, config: AutomationCo
 
 def install_launchd(path: Path = LAUNCHD_PLIST_PATH, *, config: AutomationConfig | None = None) -> dict[str, Any]:
     path = write_launchd_plist(path, config=config)
-    unload = subprocess.run(["launchctl", "unload", str(path)], capture_output=True, text=True, check=False)
-    load = subprocess.run(["launchctl", "load", "-w", str(path)], capture_output=True, text=True, check=False)
+    domain = _launchd_domain()
+    bootout = subprocess.run(["launchctl", "bootout", domain, str(path)], capture_output=True, text=True, check=False)
+    bootstrap = subprocess.run(["launchctl", "bootstrap", domain, str(path)], capture_output=True, text=True, check=False)
+    enable = subprocess.run(["launchctl", "enable", _launchd_service()], capture_output=True, text=True, check=False)
+    status = launchd_status(path)
     return {
-        "installed": load.returncode == 0,
+        "installed": bool(status.get("loaded")),
         "plist": str(path),
-        "unload_exit_code": unload.returncode,
-        "load_exit_code": load.returncode,
-        "load_stderr": load.stderr,
+        "domain": domain,
+        "bootout_exit_code": bootout.returncode,
+        "bootstrap_exit_code": bootstrap.returncode,
+        "enable_exit_code": enable.returncode,
+        "bootstrap_stderr": bootstrap.stderr,
+        "loaded": status.get("loaded"),
+        "last_exit_code": status.get("last_exit_code"),
+        "privacy_block_detected": status.get("privacy_block_detected"),
     }
 
 
 def uninstall_launchd(path: Path = LAUNCHD_PLIST_PATH) -> dict[str, Any]:
-    unload = subprocess.run(["launchctl", "unload", str(path)], capture_output=True, text=True, check=False)
+    domain = _launchd_domain()
+    bootout = subprocess.run(["launchctl", "bootout", domain, str(path)], capture_output=True, text=True, check=False)
     removed = False
     if path.exists():
         path.unlink()
@@ -606,27 +641,55 @@ def uninstall_launchd(path: Path = LAUNCHD_PLIST_PATH) -> dict[str, Any]:
     return {
         "installed": False,
         "plist": str(path),
+        "domain": domain,
         "removed": removed,
-        "unload_exit_code": unload.returncode,
-        "unload_stderr": unload.stderr,
+        "bootout_exit_code": bootout.returncode,
+        "bootout_stderr": bootout.stderr,
     }
 
 
 def launchd_status(path: Path = LAUNCHD_PLIST_PATH) -> dict[str, Any]:
-    loaded = None
-    error = None
+    domain = _launchd_domain()
+    service = _launchd_service()
+    print_stdout = ""
+    print_stderr = ""
     try:
-        result = subprocess.run(["launchctl", "list", LAUNCHD_LABEL], capture_output=True, text=True, check=False)
+        result = subprocess.run(["launchctl", "print", service], capture_output=True, text=True, check=False)
         loaded = result.returncode == 0
-        error = result.stderr.strip() or None
+        print_stdout = result.stdout or ""
+        print_stderr = result.stderr or ""
     except Exception as exc:
-        error = str(exc)
+        loaded = None
+        print_stderr = str(exc)
+    stdout_log = AUTOMATION_LOG_DIR / "launchd.stdout.log"
+    stderr_log = AUTOMATION_LOG_DIR / "launchd.stderr.log"
+    stderr_tail = _log_tail(stderr_log)
+    stdout_tail = _log_tail(stdout_log)
+    privacy_block = (
+        "Operation not permitted" in stderr_tail
+        and ("pyvenv.cfg" in stderr_tail or "/Documents/" in stderr_tail)
+    )
     return {
         "label": LAUNCHD_LABEL,
+        "domain": domain,
+        "service": service,
         "plist": str(path),
         "plist_exists": path.exists(),
         "loaded": loaded,
-        "error": error,
+        "state": _launchd_print_field(print_stdout, "state"),
+        "runs": _launchd_print_field(print_stdout, "runs"),
+        "last_exit_code": _launchd_print_field(print_stdout, "last exit code"),
+        "error": print_stderr.strip() or None,
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+        "privacy_block_detected": privacy_block,
+        "privacy_hint": (
+            "macOS privacy blocked the background LaunchAgent from reading files under Documents. "
+            "Grant Full Disk Access to the launcher/Python path or move the repo outside Documents before relying on automation."
+            if privacy_block else None
+        ),
     }
 
 
