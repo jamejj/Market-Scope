@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from market_oracle.backtest import walk_forward_backtest
+from market_oracle.auto_forward import load_automation_status
 from market_oracle.catalog import (
     CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES, category_options,
     crypto_category_options, crypto_options, etf_options,
@@ -1078,6 +1079,50 @@ def render_forward_cockpit() -> None:
     event_cols[2].metric("Pominięte", summary.get("skipped", 0))
     event_cols[3].metric("Zamknięte", summary.get("closed", 0))
     event_cols[4].metric("Snapshot errors", len(snapshot.get("errors") or {}))
+
+    automation = load_automation_status()
+    auto_stored = automation.get("stored") or {}
+    auto_plan = automation.get("plan") or {}
+    auto_launchd = automation.get("launchd") or {}
+    st.subheader("Automatyzacja proof-flow")
+    auto_cols = st.columns(5)
+    auto_cols[0].metric("Auto status", auto_stored.get("automation_status") or "brak")
+    auto_cols[1].metric("LaunchAgent", "loaded" if auto_launchd.get("loaded") else ("installed" if auto_launchd.get("plist_exists") else "nie zainstalowano"))
+    auto_cols[2].metric("Target sesji", auto_stored.get("target_session_date") or auto_plan.get("target_session_date") or "—")
+    auto_cols[3].metric("Następny run", auto_plan.get("next_planned_run_local", "—")[0:16] if auto_plan.get("next_planned_run_local") else "—")
+    auto_cols[4].metric("Exit code", auto_stored.get("exit_code") if auto_stored.get("exit_code") is not None else "—")
+    if automation.get("status_error"):
+        st.warning(automation["status_error"])
+    if auto_plan.get("missed_session_warning"):
+        st.warning(auto_plan["missed_session_warning"])
+    if auto_stored.get("automation_status") == "FAILED":
+        st.error("Ostatni automatyczny run zakończył się błędem. Sprawdź stderr/log poniżej.")
+    elif auto_stored.get("automation_status") == "OK":
+        st.success("Automatyczny proof-flow ostatnio zakończył się poprawnie.")
+    else:
+        st.info("Automat jest gotowy jako osobny wrapper. Instalacja jest świadomą komendą w terminalu — UI niczego tu nie uruchamia.")
+
+    with st.expander("Komendy automatyzacji i logi"):
+        commands = automation.get("commands") or {}
+        st.code(
+            "\n".join([
+                f"install:   {commands.get('install', '—')}",
+                f"status:    {commands.get('status', '—')}",
+                f"dry-run:   {commands.get('dry_run', '—')}",
+                f"run-now:   {commands.get('run_now', '—')}",
+                f"uninstall: {commands.get('uninstall', '—')}",
+            ]),
+            language="bash",
+        )
+        log_rows = []
+        if auto_stored.get("stdout_log"):
+            log_rows.append({"Typ": "stdout", "Plik": auto_stored.get("stdout_log")})
+        if auto_stored.get("stderr_log"):
+            log_rows.append({"Typ": "stderr", "Plik": auto_stored.get("stderr_log")})
+        log_rows.append({"Typ": "launchd plist", "Plik": auto_launchd.get("plist")})
+        st.dataframe(pd.DataFrame(log_rows), use_container_width=True, hide_index=True)
+        if auto_stored.get("runner_summary_text"):
+            st.text(str(auto_stored["runner_summary_text"]).strip())
 
     formats = {
         "Cena wejścia": "{:.2f}",

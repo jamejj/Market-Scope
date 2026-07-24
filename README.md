@@ -77,6 +77,17 @@ Forward ledger odrzuca snapshoty sprzed `frozen_at`, snapshoty bez zgodnego pipe
 .venv/bin/python run_forward_test.py --record-snapshot --refresh
 ```
 
+Bezpieczna automatyzacja macOS jest osobnym wrapperem wokół Candidate v1. Nie zmienia modeli, progów ani ledgera; przed uruchomieniem sprawdza, czy sesja USA jest już po buforze zamknięcia, czy dana sesja nie została już audytowana, zakłada lock procesu i zapisuje status oraz logi do `data/forward_auto/`.
+
+```bash
+.venv/bin/python run_forward_automation.py dry-run
+.venv/bin/python run_forward_automation.py status
+.venv/bin/python run_forward_automation.py install
+.venv/bin/python run_forward_automation.py uninstall
+```
+
+`install` tworzy LaunchAgent `com.jamejj.marketscope.candidate-forward`, który odpala wrapper od poniedziałku do piątku około 22:35 czasu warszawskiego oraz przy załadowaniu agenta, żeby catch-up po uśpieniu lub wyłączeniu Maca mógł wykonać pominiętą, już zamkniętą sesję. Wrapper nie używa flag `--allow-before-close`, `--no-refresh-first` ani innych obejść zabezpieczeń. Status automatu, ostatni wynik, logi i następny planowany run widać w zakładce **Forward**.
+
 Osobny, wcześniej nieużywany koszyk USA/ETF do kolejnego testu jest zapisany i zahashowany w `configs/unseen_usa_etf_v1.json`. Nie należy zmieniać modeli, cech ani progów Candidate v1 po zobaczeniu jego wyników. Runner unseen zapisuje preflight manifest i odpala walidację do osobnego folderu:
 
 ```bash

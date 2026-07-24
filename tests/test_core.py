@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -29,6 +30,14 @@ from market_oracle.forward import (
     verify_pipeline_contract,
 )
 import market_oracle.forward as forward_module
+from market_oracle.auto_forward import (
+    AutomationConfig,
+    automation_lock,
+    build_automation_plan,
+    execute_automation,
+    launchd_plist_payload,
+)
+import market_oracle.auto_forward as auto_forward_module
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast, fit_forecast_state
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
@@ -1383,3 +1392,116 @@ def test_candidate_cycle_refreshes_before_record_and_blocks_same_day_reentry(tmp
     assert aapl_new["skip_reason"] == "POSITION_SKIPPED_SAME_DAY_REENTRY"
     assert msft_new["status"] == "ACCEPTED"
     assert msft_new["slot"] == 1
+
+
+def test_forward_automation_plan_dedupes_and_catches_up():
+    config = AutomationConfig()
+    cockpit = {"latest_audit_date": "2026-07-23"}
+
+    waiting = build_automation_plan(cockpit=cockpit, now="2026-07-24T21:00:00+02:00", config=config)
+    assert waiting["should_run"] is False
+    assert waiting["reason"] == "ALREADY_AUDITED"
+    assert waiting["target_session_date"] == "2026-07-23"
+
+    ready = build_automation_plan(cockpit=cockpit, now="2026-07-24T22:40:00+02:00", config=config)
+    assert ready["should_run"] is True
+    assert ready["reason"] == "SCHEDULED_SESSION_READY"
+    assert ready["target_session_date"] == "2026-07-24"
+
+    catch_up = build_automation_plan(cockpit=cockpit, now="2026-07-25T10:00:00+02:00", config=config)
+    assert catch_up["should_run"] is True
+    assert catch_up["reason"] == "CATCH_UP_MISSED_SESSION"
+    assert catch_up["target_session_date"] == "2026-07-24"
+    assert "2026-07-24" in catch_up["missed_session_warning"]
+
+
+def test_forward_automation_respects_no_session_day():
+    config = AutomationConfig(closed_dates=frozenset({"2026-07-24"}))
+    cockpit = {"latest_audit_date": "2026-07-23"}
+    plan = build_automation_plan(cockpit=cockpit, now="2026-07-24T22:50:00+02:00", config=config)
+    assert plan["should_run"] is False
+    assert plan["target_session_date"] == "2026-07-23"
+    assert plan["reason"] == "ALREADY_AUDITED"
+
+
+def test_forward_automation_skips_when_session_already_audited(tmp_path, monkeypatch):
+    config = AutomationConfig(
+        status_path=tmp_path / "status.json",
+        lock_path=tmp_path / "run.lock",
+        log_dir=tmp_path / "logs",
+        candidate_command=("python", "run_candidate_forward.py"),
+    )
+    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", lambda: {"latest_audit_date": "2026-07-24"})
+
+    def should_not_run(command):
+        raise AssertionError("dedupe should prevent the runner")
+
+    payload = execute_automation(
+        config=config,
+        now="2026-07-24T22:50:00+02:00",
+        runner=should_not_run,
+    )
+    assert payload["automation_status"] == "SKIPPED"
+    assert payload["exit_code"] == 0
+    assert json.loads(config.status_path.read_text())["automation_status"] == "SKIPPED"
+
+
+def test_forward_automation_lock_blocks_parallel_runs(tmp_path, monkeypatch):
+    config = AutomationConfig(
+        status_path=tmp_path / "status.json",
+        lock_path=tmp_path / "run.lock",
+        log_dir=tmp_path / "logs",
+        candidate_command=("python", "run_candidate_forward.py"),
+    )
+    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", lambda: {"latest_audit_date": "2026-07-23"})
+
+    with automation_lock(config.lock_path):
+        payload = execute_automation(
+            config=config,
+            now="2026-07-24T22:50:00+02:00",
+            runner=lambda command: pytest.fail("locked runner must not execute"),
+        )
+    assert payload["automation_status"] == "LOCKED"
+    assert payload["exit_code"] == 75
+    assert json.loads(config.status_path.read_text())["automation_status"] == "LOCKED"
+
+
+def test_forward_automation_failed_run_writes_logs_and_status(tmp_path, monkeypatch):
+    config = AutomationConfig(
+        status_path=tmp_path / "status.json",
+        lock_path=tmp_path / "run.lock",
+        log_dir=tmp_path / "logs",
+        candidate_command=("python", "run_candidate_forward.py"),
+    )
+    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", lambda: {"latest_audit_date": "2026-07-23"})
+
+    def failing_runner(command):
+        return auto_forward_module.subprocess.CompletedProcess(
+            command,
+            2,
+            '{"status":"error","run_event_counts":{"SNAPSHOT_AUDIT":1}}\nHuman summary',
+            "boom",
+        )
+
+    payload = execute_automation(
+        config=config,
+        now="2026-07-24T22:50:00+02:00",
+        runner=failing_runner,
+    )
+    stored = json.loads(config.status_path.read_text())
+    assert payload["automation_status"] == "FAILED"
+    assert stored["exit_code"] == 2
+    assert Path(stored["stdout_log"]).read_text().startswith('{"status":"error"')
+    assert Path(stored["stderr_log"]).read_text() == "boom"
+    assert stored["runner_payload"]["status"] == "error"
+    assert stored["runner_summary_text"] == "Human summary"
+
+
+def test_forward_automation_launchd_plist_has_weekday_schedule(tmp_path):
+    config = AutomationConfig(status_path=tmp_path / "status.json", lock_path=tmp_path / "lock", log_dir=tmp_path / "logs")
+    payload = launchd_plist_payload(config=config, python_path=tmp_path / "python")
+    assert payload["RunAtLoad"] is True
+    assert payload["ProgramArguments"][-1] == "run-now"
+    assert [item["Weekday"] for item in payload["StartCalendarInterval"]] == [1, 2, 3, 4, 5]
+    assert {item["Hour"] for item in payload["StartCalendarInterval"]} == {22}
+    assert {item["Minute"] for item in payload["StartCalendarInterval"]} == {35}
