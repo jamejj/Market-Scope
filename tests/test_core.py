@@ -34,8 +34,10 @@ from market_oracle.auto_forward import (
     AutomationConfig,
     automation_lock,
     build_automation_plan,
+    eligible_session_dates,
     execute_automation,
     launchd_plist_payload,
+    nyse_full_holidays,
 )
 import market_oracle.auto_forward as auto_forward_module
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
@@ -1424,6 +1426,31 @@ def test_forward_automation_respects_no_session_day():
     assert plan["reason"] == "ALREADY_AUDITED"
 
 
+def test_forward_automation_uses_nyse_holiday_calendar():
+    assert "2026-07-03" in nyse_full_holidays(2026)
+    config = AutomationConfig()
+    cockpit = {"latest_audit_date": "2026-07-02"}
+    plan = build_automation_plan(cockpit=cockpit, now="2026-07-03T22:50:00+02:00", config=config)
+    assert plan["should_run"] is False
+    assert plan["target_session_date"] == "2026-07-02"
+    assert plan["target_session_is_nyse_session"] is True
+    assert plan["reason"] == "ALREADY_AUDITED"
+
+
+def test_forward_automation_three_day_gap_is_reported_without_backfill():
+    config = AutomationConfig()
+    cockpit = {"latest_audit_date": "2026-07-20"}
+    plan = build_automation_plan(cockpit=cockpit, now="2026-07-24T22:50:00+02:00", config=config)
+    assert plan["should_run"] is True
+    assert plan["reason"] == "SCHEDULED_SESSION_READY_WITH_GAP"
+    assert plan["target_session_date"] == "2026-07-24"
+    assert plan["missing_sessions"] == ["2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24"]
+    assert plan["missed_sessions"] == ["2026-07-21", "2026-07-22", "2026-07-23"]
+    assert plan["missed_sessions_count"] == 3
+    assert "Wrapper wykona tylko najnowszą sesję 2026-07-24" in plan["missed_session_warning"]
+    assert eligible_session_dates(latest_audit_date="2026-07-20", now="2026-07-24T22:50:00+02:00", config=config)[-1] == "2026-07-24"
+
+
 def test_forward_automation_skips_when_session_already_audited(tmp_path, monkeypatch):
     config = AutomationConfig(
         status_path=tmp_path / "status.json",
@@ -1444,6 +1471,35 @@ def test_forward_automation_skips_when_session_already_audited(tmp_path, monkeyp
     assert payload["automation_status"] == "SKIPPED"
     assert payload["exit_code"] == 0
     assert json.loads(config.status_path.read_text())["automation_status"] == "SKIPPED"
+
+
+def test_forward_automation_rechecks_plan_after_lock(tmp_path, monkeypatch):
+    config = AutomationConfig(
+        status_path=tmp_path / "status.json",
+        lock_path=tmp_path / "run.lock",
+        log_dir=tmp_path / "logs",
+        candidate_command=("python", "run_candidate_forward.py"),
+    )
+    cockpits = [
+        {"latest_audit_date": "2026-07-23"},
+        {"latest_audit_date": "2026-07-24"},
+    ]
+
+    def next_cockpit():
+        return cockpits.pop(0)
+
+    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", next_cockpit)
+    payload = execute_automation(
+        config=config,
+        now="2026-07-24T22:50:00+02:00",
+        runner=lambda command: pytest.fail("race re-check should prevent duplicate run"),
+    )
+    stored = json.loads(config.status_path.read_text())
+    assert payload["automation_status"] == "SKIPPED"
+    assert payload["race_recheck"] is True
+    assert payload["plan"]["reason"] == "SCHEDULED_SESSION_READY"
+    assert payload["plan_after_lock"]["reason"] == "ALREADY_AUDITED"
+    assert stored["race_recheck"] is True
 
 
 def test_forward_automation_lock_blocks_parallel_runs(tmp_path, monkeypatch):
@@ -1473,6 +1529,18 @@ def test_forward_automation_failed_run_writes_logs_and_status(tmp_path, monkeypa
         log_dir=tmp_path / "logs",
         candidate_command=("python", "run_candidate_forward.py"),
     )
+    config.status_path.parent.mkdir(parents=True, exist_ok=True)
+    config.status_path.write_text(json.dumps({
+        "automation_status": "OK",
+        "target_session_date": "2026-07-23",
+        "ended_at": "2026-07-23T21:00:00+00:00",
+        "exit_code": 0,
+        "last_successful_run": {
+            "target_session_date": "2026-07-23",
+            "ended_at": "2026-07-23T21:00:00+00:00",
+            "exit_code": 0,
+        },
+    }))
     monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", lambda: {"latest_audit_date": "2026-07-23"})
 
     def failing_runner(command):
@@ -1495,6 +1563,7 @@ def test_forward_automation_failed_run_writes_logs_and_status(tmp_path, monkeypa
     assert Path(stored["stderr_log"]).read_text() == "boom"
     assert stored["runner_payload"]["status"] == "error"
     assert stored["runner_summary_text"] == "Human summary"
+    assert stored["last_successful_run"]["target_session_date"] == "2026-07-23"
 
 
 def test_forward_automation_launchd_plist_has_weekday_schedule(tmp_path):

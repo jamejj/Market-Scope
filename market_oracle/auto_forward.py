@@ -6,7 +6,6 @@ from datetime import date, datetime, time, timedelta, timezone
 import argparse
 import fcntl
 import json
-import os
 from pathlib import Path
 import plistlib
 import subprocess
@@ -25,6 +24,16 @@ LAUNCHD_LABEL = "com.jamejj.marketscope.candidate-forward"
 LAUNCHD_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 RUNNER_SCRIPT = ROOT / "run_forward_automation.py"
 CANDIDATE_SCRIPT = ROOT / "run_candidate_forward.py"
+EXPLICIT_NYSE_HOLIDAYS = frozenset({
+    # Official NYSE/ICE holiday calendar for 2026-2028.
+    # Early closes are not full-session closures and are intentionally excluded.
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+    "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+    "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+    "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29", "2028-06-19",
+    "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25",
+})
 
 
 def _default_python() -> Path:
@@ -44,6 +53,7 @@ class AutomationConfig:
     ready_minute: int = 35
     session_weekdays: tuple[int, ...] = (0, 1, 2, 3, 4)
     closed_dates: frozenset[str] = field(default_factory=frozenset)
+    holiday_calendar: str = "NYSE"
     status_path: Path = AUTOMATION_STATUS_PATH
     lock_path: Path = AUTOMATION_LOCK_PATH
     log_dir: Path = AUTOMATION_LOG_DIR
@@ -151,8 +161,74 @@ def _date_text(value: Any) -> str | None:
     return parsed.astimezone(WARSAW).date().isoformat() if parsed.tzinfo else parsed.date().isoformat()
 
 
+def _nth_weekday(year: int, month: int, weekday: int, nth: int) -> date:
+    current = date(year, month, 1)
+    while current.weekday() != weekday:
+        current += timedelta(days=1)
+    return current + timedelta(days=7 * (nth - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    next_month = date(year + int(month == 12), 1 if month == 12 else month + 1, 1)
+    current = next_month - timedelta(days=1)
+    while current.weekday() != weekday:
+        current -= timedelta(days=1)
+    return current
+
+
+def _observed_fixed(year: int, month: int, day: int) -> date:
+    holiday = date(year, month, day)
+    if holiday.weekday() == 5:
+        return holiday - timedelta(days=1)
+    if holiday.weekday() == 6:
+        return holiday + timedelta(days=1)
+    return holiday
+
+
+def _easter_sunday(year: int) -> date:
+    # Meeus/Jones/Butcher Gregorian algorithm.
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def nyse_full_holidays(year: int) -> set[str]:
+    holidays = {item for item in EXPLICIT_NYSE_HOLIDAYS if item.startswith(f"{year}-")}
+    if holidays:
+        return set(holidays)
+    return {
+        _observed_fixed(year, 1, 1).isoformat(),
+        _nth_weekday(year, 1, 0, 3).isoformat(),   # Martin Luther King Jr. Day
+        _nth_weekday(year, 2, 0, 3).isoformat(),   # Washington's Birthday
+        (_easter_sunday(year) - timedelta(days=2)).isoformat(),  # Good Friday
+        _last_weekday(year, 5, 0).isoformat(),     # Memorial Day
+        _observed_fixed(year, 6, 19).isoformat(),  # Juneteenth
+        _observed_fixed(year, 7, 4).isoformat(),   # Independence Day
+        _nth_weekday(year, 9, 0, 1).isoformat(),   # Labor Day
+        _nth_weekday(year, 11, 3, 4).isoformat(),  # Thanksgiving
+        _observed_fixed(year, 12, 25).isoformat(),
+    }
+
+
 def _is_session_day(day: date, config: AutomationConfig) -> bool:
-    return day.weekday() in set(config.session_weekdays) and day.isoformat() not in config.closed_dates
+    if day.weekday() not in set(config.session_weekdays):
+        return False
+    closed = set(config.closed_dates)
+    if config.holiday_calendar.upper() == "NYSE":
+        closed.update(nyse_full_holidays(day.year))
+    return day.isoformat() not in closed
 
 
 def _previous_session_day(day: date, config: AutomationConfig) -> date | None:
@@ -185,6 +261,32 @@ def target_session_date(now: datetime | str | None = None, config: AutomationCon
     return _previous_session_day(latest_closed_candidate, config)
 
 
+def eligible_session_dates(
+    *,
+    latest_audit_date: str | None,
+    now: datetime | str | None = None,
+    config: AutomationConfig | None = None,
+    max_lookback_days: int = 45,
+) -> list[str]:
+    config = config or AutomationConfig()
+    target = target_session_date(now, config)
+    if target is None:
+        return []
+    if latest_audit_date:
+        parsed_latest = date.fromisoformat(latest_audit_date)
+        start = parsed_latest + timedelta(days=1)
+    else:
+        start = target
+    earliest = target - timedelta(days=max_lookback_days)
+    current = max(start, earliest)
+    sessions: list[str] = []
+    while current <= target:
+        if _is_session_day(current, config):
+            sessions.append(current.isoformat())
+        current += timedelta(days=1)
+    return sessions
+
+
 def next_planned_run(now: datetime | str | None = None, config: AutomationConfig | None = None) -> datetime:
     config = config or AutomationConfig()
     local = _as_warsaw(now)
@@ -205,6 +307,8 @@ def build_automation_plan(
     target = target_session_date(local, config)
     latest_audit = _date_text((cockpit or {}).get("latest_audit_date"))
     target_text = target.isoformat() if target else None
+    missing_sessions = eligible_session_dates(latest_audit_date=latest_audit, now=local, config=config)
+    skipped_backfill = missing_sessions[:-1] if len(missing_sessions) > 1 else []
     stored_status = stored_status or {}
     last_status = stored_status.get("automation_status")
     should_run = False
@@ -213,8 +317,20 @@ def build_automation_plan(
 
     if target is None:
         reason = "NO_RECENT_SESSION"
+    elif not missing_sessions:
+        reason = "ALREADY_AUDITED"
     elif latest_audit and latest_audit >= target_text:
         reason = "ALREADY_AUDITED"
+    elif len(missing_sessions) > 1:
+        should_run = True
+        if target == local.date():
+            reason = "SCHEDULED_SESSION_READY_WITH_GAP"
+        else:
+            reason = "CATCH_UP_LATEST_ONLY"
+        warning = (
+            f"Brakuje audytów dla {len(missing_sessions)} sesji: {', '.join(missing_sessions)}. "
+            f"Wrapper wykona tylko najnowszą sesję {target_text}; wcześniejsze zostają jawnie oznaczone jako missed."
+        )
     elif target == local.date():
         should_run = True
         reason = "SCHEDULED_SESSION_READY"
@@ -231,11 +347,40 @@ def build_automation_plan(
         "now_local": local.isoformat(),
         "target_session_date": target_text,
         "latest_audit_date": latest_audit,
+        "missing_sessions": missing_sessions,
+        "missed_sessions": skipped_backfill,
+        "missed_sessions_count": len(skipped_backfill),
+        "target_session_is_nyse_session": bool(target and _is_session_day(target, config)),
+        "holiday_calendar": config.holiday_calendar,
         "should_run": should_run,
         "reason": reason,
         "next_planned_run_local": planned.isoformat(),
         "missed_session_warning": warning,
         "ready_after_local": f"{config.ready_hour:02d}:{config.ready_minute:02d}",
+    }
+
+
+def _last_successful_run(stored_status: dict[str, Any]) -> dict[str, Any] | None:
+    current = stored_status.get("last_successful_run")
+    if isinstance(current, dict):
+        return current
+    if stored_status.get("automation_status") == "OK":
+        return {
+            "target_session_date": stored_status.get("target_session_date"),
+            "ended_at": stored_status.get("ended_at"),
+            "exit_code": stored_status.get("exit_code"),
+            "runner_summary_text": stored_status.get("runner_summary_text"),
+        }
+    return None
+
+
+def _success_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "target_session_date": payload.get("target_session_date"),
+        "ended_at": payload.get("ended_at"),
+        "exit_code": payload.get("exit_code"),
+        "runner_summary_text": payload.get("runner_summary_text"),
+        "runner_payload_status": (payload.get("runner_payload") or {}).get("status"),
     }
 
 
@@ -291,6 +436,7 @@ def execute_automation(
         "plan": plan,
         "status_error": status_error,
         "candidate_command": list(config.candidate_command),
+        "last_successful_run": _last_successful_run(stored),
     }
     if dry_run:
         return {**base, "automation_status": "DRY_RUN", "message": "Nie uruchomiono skanera."}
@@ -308,12 +454,40 @@ def execute_automation(
             "exit_code": 0,
             "stdout_log": None,
             "stderr_log": None,
+            "last_successful_run": _last_successful_run(stored),
         }
         _write_json(config.status_path, payload)
         return payload
 
     try:
         with automation_lock(config.lock_path):
+            locked_stored, locked_status_error = _read_json(config.status_path)
+            locked_cockpit = load_forward_cockpit()
+            locked_plan = build_automation_plan(
+                cockpit=locked_cockpit,
+                now=now,
+                config=config,
+                stored_status=locked_stored,
+            )
+            if locked_status_error and not status_error:
+                base["status_error"] = locked_status_error
+            if not locked_plan["should_run"]:
+                ended_at = datetime.now(timezone.utc)
+                payload = {
+                    **base,
+                    "plan_after_lock": locked_plan,
+                    "automation_status": "SKIPPED",
+                    "started_at": started_at.isoformat(),
+                    "ended_at": ended_at.isoformat(),
+                    "duration_seconds": (ended_at - started_at).total_seconds(),
+                    "exit_code": 0,
+                    "stdout_log": None,
+                    "stderr_log": None,
+                    "race_recheck": True,
+                    "last_successful_run": _last_successful_run(locked_stored),
+                }
+                _write_json(config.status_path, payload)
+                return payload
             try:
                 run = (runner or _default_runner)(config.candidate_command)
             except Exception as exc:
@@ -330,6 +504,7 @@ def execute_automation(
             "error": str(exc),
             "stdout_log": None,
             "stderr_log": None,
+            "last_successful_run": _last_successful_run(stored),
         }
         _write_json(config.status_path, payload)
         return payload
@@ -356,6 +531,7 @@ def execute_automation(
         "runner_payload": parsed["payload"],
         "runner_summary_text": parsed["summary_text"],
     }
+    payload["last_successful_run"] = _success_summary(payload) if run.returncode == 0 else _last_successful_run(stored)
     _write_json(config.status_path, payload)
     return payload
 
