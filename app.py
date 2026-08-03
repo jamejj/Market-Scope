@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import math
 import os
 import subprocess
@@ -227,6 +228,272 @@ st.markdown("""
     }
     .muted {opacity: .74;}
 
+    .command-hero {
+        position: relative;
+        overflow: hidden;
+        display: grid;
+        grid-template-columns: minmax(0, 1.28fr) minmax(320px, .72fr);
+        gap: 20px;
+        padding: 24px;
+        margin: 8px 0 22px;
+        border: 1px solid rgba(56, 189, 248, .18);
+        border-radius: 22px;
+        background:
+            radial-gradient(circle at 12% 0%, rgba(99, 102, 241, .18), transparent 22rem),
+            radial-gradient(circle at 100% 10%, rgba(14, 165, 233, .12), transparent 20rem),
+            linear-gradient(145deg, rgba(15, 23, 42, .82), rgba(5, 8, 22, .78));
+        box-shadow: 0 24px 70px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.045);
+    }
+    .command-hero::after {
+        content: "";
+        position: absolute;
+        inset: auto -8% -45% 38%;
+        height: 240px;
+        background: radial-gradient(circle, rgba(56,189,248,.16), transparent 68%);
+        pointer-events: none;
+    }
+    .command-kicker {
+        display:inline-flex;
+        align-items:center;
+        gap: 8px;
+        padding: 7px 10px;
+        border-radius: 999px;
+        color: #bae6fd;
+        border: 1px solid rgba(56,189,248,.24);
+        background: rgba(14, 165, 233, .08);
+        font-size: .72rem;
+        font-weight: 900;
+        letter-spacing: .10em;
+        text-transform: uppercase;
+    }
+    .command-title {
+        margin: 15px 0 10px;
+        font-size: clamp(2.05rem, 4vw, 4.25rem);
+        line-height: .96;
+        letter-spacing: -.065em;
+        color: #f8fafc;
+        font-weight: 900;
+    }
+    .command-hero p {
+        margin: 0;
+        max-width: 820px;
+        color: #aab7d5;
+        font-size: 1.02rem;
+        line-height: 1.55;
+    }
+    .hero-badges {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 9px;
+        margin-top: 17px;
+    }
+    .hero-badge {
+        display:inline-flex;
+        align-items:center;
+        gap: 8px;
+        padding: 9px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, .17);
+        background: rgba(15, 23, 42, .50);
+        color: #dbeafe;
+        font-size: .82rem;
+        font-weight: 850;
+    }
+    .proof-panel {
+        position: relative;
+        z-index: 1;
+        align-self: stretch;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        min-width: 0;
+        padding: 18px;
+        border-radius: 18px;
+        border: 1px solid rgba(56, 189, 248, .30);
+        background:
+            radial-gradient(circle at 88% 8%, rgba(34, 197, 94, .08), transparent 12rem),
+            linear-gradient(155deg, rgba(7, 12, 28, .98), rgba(4, 8, 20, .96));
+        box-shadow:
+            0 22px 60px rgba(0, 0, 0, .34),
+            0 0 0 1px rgba(15, 23, 42, .74),
+            inset 0 1px 0 rgba(255,255,255,.055);
+        backdrop-filter: blur(10px);
+    }
+    .proof-panel::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        pointer-events: none;
+        background: linear-gradient(180deg, rgba(255,255,255,.035), transparent 34%);
+    }
+    .proof-panel h3 {
+        margin: 0;
+        font-size: .92rem;
+        letter-spacing: .10em;
+        text-transform: uppercase;
+        color: #dbeafe;
+        min-width: 0;
+    }
+    .proof-status-line {
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap: 12px;
+        margin-bottom: 16px;
+        min-width: 0;
+    }
+    .proof-status {
+        display:inline-flex;
+        align-items:center;
+        gap: 9px;
+        flex: 0 0 auto;
+        white-space: nowrap;
+        padding: 7px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(34, 197, 94, .24);
+        background: rgba(34, 197, 94, .08);
+        color: #bbf7d0;
+        font-weight: 900;
+        font-size: .80rem;
+    }
+    .proof-status.warn {
+        border-color: rgba(251,191,36,.32);
+        background: rgba(251,191,36,.09);
+        color: #fde68a;
+    }
+    .proof-status.bad {
+        border-color: rgba(251,113,133,.34);
+        background: rgba(251,113,133,.09);
+        color: #fecdd3;
+    }
+    .proof-grid {
+        display:grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 11px;
+        min-width: 0;
+    }
+    .proof-stat {
+        position: relative;
+        z-index: 1;
+        min-width: 0;
+        padding: 13px;
+        border-radius: 14px;
+        border: 1px solid rgba(148, 163, 184, .18);
+        background: linear-gradient(160deg, rgba(15, 23, 42, .94), rgba(9, 14, 30, .90));
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+    }
+    .proof-stat small {
+        display:block;
+        color: #94a3b8;
+        font-weight: 850;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+        font-size: .66rem;
+    }
+    .proof-stat strong {
+        display:block;
+        margin-top: 6px;
+        color: #f8fafc;
+        font-size: clamp(1.02rem, 1.35vw, 1.22rem);
+        letter-spacing: -.035em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .dashboard-grid {
+        display:grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+        margin: 16px 0 22px;
+    }
+    .dashboard-card {
+        min-height: 122px;
+        padding: 17px;
+        border-radius: 17px;
+        border: 1px solid rgba(148, 163, 184, .14);
+        background: linear-gradient(145deg, rgba(15,23,42,.74), rgba(7,11,24,.66));
+        box-shadow: 0 14px 34px rgba(0,0,0,.18);
+    }
+    .dashboard-card small {
+        display:block;
+        color: #94a3b8;
+        font-size: .70rem;
+        font-weight: 900;
+        letter-spacing: .11em;
+        text-transform: uppercase;
+    }
+    .dashboard-card h3 {
+        margin: 8px 0 6px;
+        font-size: 1.55rem;
+        letter-spacing: -.055em;
+    }
+    .dashboard-card p {
+        margin: 0;
+        color: #9aa8c7;
+        font-size: .88rem;
+        line-height: 1.42;
+    }
+    .position-strip {
+        display:grid;
+        grid-template-columns: minmax(0, 1.2fr) repeat(4, minmax(0, .7fr));
+        gap: 12px;
+        margin: 10px 0 20px;
+    }
+    .position-tile {
+        padding: 15px;
+        border-radius: 16px;
+        border: 1px solid rgba(56, 189, 248, .16);
+        background: rgba(15, 23, 42, .55);
+    }
+    .position-tile small {
+        display:block;
+        color: #94a3b8;
+        font-size: .68rem;
+        font-weight: 900;
+        letter-spacing: .10em;
+        text-transform: uppercase;
+    }
+    .position-tile strong {
+        display:block;
+        margin-top: 6px;
+        color: #f8fafc;
+        font-size: 1.14rem;
+    }
+    .next-actions {
+        display:grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+        margin: 16px 0 12px;
+    }
+    .action-card {
+        padding: 18px;
+        border-radius: 17px;
+        border: 1px solid rgba(148, 163, 184, .14);
+        background: linear-gradient(145deg, rgba(15, 23, 42, .70), rgba(8, 13, 25, .64));
+        box-shadow: 0 14px 34px rgba(0,0,0,.18);
+    }
+    .action-card strong {
+        display:block;
+        margin-bottom: 8px;
+        color: #f8fafc;
+        font-size: 1.05rem;
+    }
+    .action-card span {
+        color: var(--muted);
+        line-height: 1.45;
+        font-size: .90rem;
+    }
+    @media (max-width: 1100px) {
+        .command-hero {grid-template-columns: 1fr;}
+        .dashboard-grid {grid-template-columns: repeat(2, minmax(0, 1fr));}
+        .position-strip {grid-template-columns: repeat(2, minmax(0, 1fr));}
+        .next-actions {grid-template-columns: 1fr;}
+    }
+    @media (max-width: 700px) {
+        .dashboard-grid, .proof-grid, .position-strip {grid-template-columns: 1fr;}
+    }
+
     div[data-testid="stTabs"] [role="tablist"] {
         gap: 18px;
         padding: 0;
@@ -380,6 +647,233 @@ def compact_number(value) -> str:
         if abs(value) >= divisor:
             return f"{value / divisor:.2f} {unit}"
     return f"{value:,.0f}"
+
+
+def clean_text(value, default: str = "—") -> str:
+    if value is None or value == "":
+        return default
+    return html.escape(str(value))
+
+
+def short_datetime(value, default: str = "—") -> str:
+    if not value:
+        return default
+    text = str(value).replace("T", " ")
+    return html.escape(text[:16])
+
+
+def value_pct(value, default: str = "—") -> str:
+    if value is None or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return default
+    return pct(value)
+
+
+def signed_pct(value, default: str = "—") -> str:
+    if value is None or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return default
+    return f"{value:+.1%}"
+
+
+def safe_load_forward_cockpit() -> tuple[dict | None, str | None]:
+    try:
+        return load_forward_cockpit(), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def safe_load_automation_status() -> tuple[dict | None, str | None]:
+    try:
+        return load_automation_status(), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def proof_state(cockpit: dict | None, automation: dict | None, cockpit_error: str | None, automation_error: str | None) -> dict:
+    if cockpit_error or automation_error:
+        return {"label": "Wymaga uwagi", "klass": "bad", "detail": cockpit_error or automation_error or "Błąd statusu"}
+    if not cockpit:
+        return {"label": "Brak danych", "klass": "warn", "detail": "Forward ledger nie jest jeszcze dostępny"}
+    launchd = (automation or {}).get("launchd") or {}
+    stored = (automation or {}).get("stored") or {}
+    plan = (automation or {}).get("plan") or {}
+    problems = cockpit.get("problems") or []
+    if problems or launchd.get("privacy_block_detected") or stored.get("automation_status") == "FAILED":
+        return {"label": "Wymaga uwagi", "klass": "bad", "detail": (problems[0] if problems else "Problem automatyzacji")}
+    if cockpit.get("healthy") and launchd.get("loaded") and str(launchd.get("last_exit_code")) in {"0", "(never exited)", "None"}:
+        return {"label": "OK", "klass": "", "detail": f"następny skan: {short_datetime(plan.get('next_planned_run_local'))}"}
+    if cockpit.get("healthy"):
+        return {"label": "Ledger OK", "klass": "warn", "detail": "Ledger jest zdrowy, sprawdź automatyzację"}
+    return {"label": "Niepełny", "klass": "warn", "detail": "Brakuje pełnego pokrycia lub audytu"}
+
+
+def display_forward_status(value: str | None) -> str:
+    labels = {
+        "OPEN": "Otwarta",
+        "ACCEPTED": "Czeka na wejście",
+        "SKIPPED": "Pominięto",
+        "CLOSED": "Zamknięta",
+        "OBSERVED": "Zauważono",
+        "AUDITED": "Audyt",
+    }
+    return labels.get(str(value or ""), str(value or "—"))
+
+
+def display_skip_reason(value: str | None) -> str:
+    labels = {
+        "POSITION_SKIPPED_SYMBOL_OPEN": "symbol jest już otwarty w portfelu forward",
+        "POSITION_SKIPPED_NO_FREE_SLOT": "brak wolnego slotu w portfelu",
+        "POSITION_SKIPPED_MAX_POSITIONS": "osiągnięto limit pozycji",
+        "POSITION_SKIPPED_SAME_DAY_REENTRY": "blokada ponownego wejścia tego samego dnia",
+    }
+    if not value:
+        return "—"
+    return labels.get(str(value), str(value))
+
+
+def prepare_start_observations(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    output = frame.copy()
+    if "Status" in output:
+        output["Status"] = output["Status"].map(display_forward_status)
+    if "Powód pominięcia" in output:
+        output["Powód pominięcia"] = output["Powód pominięcia"].map(display_skip_reason)
+    return output
+
+
+def render_start_dashboard(
+    *,
+    snapshot: dict,
+    journal: dict,
+    universe_size: int,
+    cockpit: dict | None,
+    automation: dict | None,
+    cockpit_error: str | None = None,
+    automation_error: str | None = None,
+) -> None:
+    coverage = (cockpit or {}).get("coverage") or {}
+    portfolio = (cockpit or {}).get("portfolio") or {}
+    summary = (cockpit or {}).get("summary") or {}
+    plan = (automation or {}).get("plan") or {}
+    stored = (automation or {}).get("stored") or {}
+    launchd = (automation or {}).get("launchd") or {}
+    state = proof_state(cockpit, automation, cockpit_error, automation_error)
+
+    requested = coverage.get("requested") or 0
+    completed = coverage.get("completed") or 0
+    coverage_text = f"{completed}/{requested}" if requested else "—"
+    audit_days = (cockpit or {}).get("audit_days", "—")
+    signal_days = (cockpit or {}).get("signal_days", "—")
+    open_positions = portfolio.get("open", 0)
+    slots = portfolio.get("slots", 5)
+    free_slots = portfolio.get("free_slots", "—")
+    latest_audit = (cockpit or {}).get("latest_audit_date") or plan.get("latest_audit_date")
+    latest_signal = (cockpit or {}).get("latest_signal_date")
+    next_run = plan.get("next_planned_run_local")
+    last_auto = stored.get("automation_status") or "—"
+    launchd_text = "aktywny" if launchd.get("loaded") else "nieaktywny"
+    launchd_exit = launchd.get("last_exit_code") if launchd.get("last_exit_code") is not None else "—"
+
+    st.markdown(f"""
+    <div class="command-hero">
+        <div>
+            <span class="command-kicker">MarketScope command center</span>
+            <div class="command-title">Rynek, sygnały i forward test w jednym miejscu.</div>
+            <p>
+                Start pokazuje, czy automat po sesji USA wykonał skan, co obserwuje Candidate v1
+                i czy portfel testowy ma aktywne pozycje. To nadal warstwa badawcza —
+                nie rekomendacja kupna ani sprzedaży.
+            </p>
+            <div class="hero-badges">
+                <span class="hero-badge">🧊 Candidate v1: zamrożony</span>
+                <span class="hero-badge">🟢 Automat: {clean_text(launchd_text)}</span>
+                <span class="hero-badge">📡 Pokrycie: {clean_text(coverage_text)}</span>
+                <span class="hero-badge">🧾 Dni audytu: {clean_text(audit_days)}</span>
+            </div>
+        </div>
+        <div class="proof-panel">
+            <div class="proof-status-line">
+                <h3>Stan proof</h3>
+                <span class="proof-status {state['klass']}"><i class="ms-led"></i>{clean_text(state['label'])}</span>
+            </div>
+            <div class="proof-grid">
+                <div class="proof-stat"><small>Ostatni audyt</small><strong>{clean_text(latest_audit)}</strong></div>
+                <div class="proof-stat"><small>Następny skan</small><strong>{short_datetime(next_run)}</strong></div>
+                <div class="proof-stat"><small>Portfel testowy</small><strong>{clean_text(open_positions)}/{clean_text(slots)}</strong></div>
+                <div class="proof-stat"><small>Automat</small><strong>{clean_text(last_auto)}</strong></div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if cockpit_error:
+        st.error(f"Forward cockpit error: {cockpit_error}")
+    if automation_error:
+        st.warning(f"Automation status error: {automation_error}")
+    if state["klass"] == "bad":
+        st.error(state["detail"])
+    elif state["klass"] == "warn":
+        st.warning(state["detail"])
+    else:
+        st.caption(f"✅ Proof flow zdrowy · {state['detail']}")
+
+    st.markdown(f"""
+    <div class="dashboard-grid">
+        <div class="dashboard-card"><small>Audyt forward</small><h3>{clean_text(summary.get('events', 0))}</h3><p>Nieusuwalna historia obserwacji, wejść, pominięć i rozliczeń.</p></div>
+        <div class="dashboard-card"><small>Obserwacje sygnałów</small><h3>{clean_text(summary.get('signals', 0))}</h3><p>Ile razy zamrożony system 20D LONG znalazł setup do obserwacji.</p></div>
+        <div class="dashboard-card"><small>Portfel testowy</small><h3>{clean_text(open_positions)}/{clean_text(slots)}</h3><p>Aktywne pozycje forward; wolne sloty: {clean_text(free_slots)}.</p></div>
+        <div class="dashboard-card"><small>Ostatni sygnał</small><h3>{clean_text(latest_signal)}</h3><p>Najnowszy dzień, w którym system coś zauważył.</p></div>
+        <div class="dashboard-card"><small>Instrumenty</small><h3>{clean_text(universe_size)}</h3><p>Szeroki radar MarketScope: akcje, ETF-y i krypto.</p></div>
+        <div class="dashboard-card"><small>Skan rynku</small><h3>{clean_text(snapshot.get('completed', 0))}/{clean_text(snapshot.get('total', universe_size))}</h3><p>Ostatni zapisany status radaru: {clean_text(snapshot.get('status', 'offline'))}.</p></div>
+        <div class="dashboard-card"><small>Dni z sygnałem</small><h3>{clean_text(signal_days)}</h3><p>Dni forward, w których pojawiła się co najmniej jedna obserwacja.</p></div>
+        <div class="dashboard-card"><small>Dziennik</small><h3>{clean_text(journal.get('total', 0))}</h3><p>Osobny paper-performance historycznych sygnałów poza Candidate v1.</p></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.subheader("Aktywna pozycja w teście forward")
+    open_rows = (cockpit or {}).get("open_positions") or []
+    if open_rows:
+        row = open_rows[0]
+        st.markdown(f"""
+        <div class="position-strip">
+            <div class="position-tile"><small>Pozycja</small><strong>{clean_text(row.get('Symbol'))} · {clean_text(display_forward_status(row.get('Status')).lower())}</strong></div>
+            <div class="position-tile"><small>Wejście</small><strong>{clean_text(row.get('Data wejścia'))} @ {clean_text(f"{row.get('Cena wejścia', 0):.2f}" if isinstance(row.get('Cena wejścia'), (int, float)) else row.get('Cena wejścia'))}</strong></div>
+            <div class="position-tile"><small>P(wzrost)</small><strong>{value_pct(row.get('P(wzrost)'))}</strong></div>
+            <div class="position-tile"><small>Oczekiwany ruch</small><strong>{signed_pct(row.get('Oczekiwany ruch'))}</strong></div>
+            <div class="position-tile"><small>Do wyjścia</small><strong>{clean_text(row.get('Sesje do wyjścia'))} sesji</strong></div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.info("Candidate v1 nie ma teraz otwartej pozycji. To poprawny stan — system ma prawo milczeć.")
+
+    latest = pd.DataFrame((cockpit or {}).get("latest_observations") or [])
+    if not latest.empty:
+        st.subheader("Co system zrobił ostatnio?")
+        latest = prepare_start_observations(latest)
+        columns = ["Symbol", "Status", "Data sygnału", "P(wzrost)", "Oczekiwany ruch", "Jakość", "Decyzja", "Powód pominięcia"]
+        present = [column for column in columns if column in latest.columns]
+        st.dataframe(
+            latest[present].style.format({"P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:+.1%}"}, na_rep="—"),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.subheader("Co warto sprawdzić dalej?")
+    st.markdown("""
+    <div class="next-actions">
+        <div class="action-card"><strong>Forward</strong><span>Sprawdź pełną historię audytów, pozycji i decyzji Candidate v1.</span></div>
+        <div class="action-card"><strong>Sygnały</strong><span>Zobacz ranking setupów: hot movers, swing, trend i ryzyko spadku.</span></div>
+        <div class="action-card"><strong>Analiza instrumentu</strong><span>Wejdź w Spółki, ETF-y albo Krypto i zobacz pełną prognozę dla symbolu.</span></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.expander("Jak czytać prognozę?"):
+        st.markdown("""
+        - **P(wzrost)** mówi, jak często model oczekuje ceny wyższej po danym horyzoncie.
+        - **AUC** mierzy przewagę kierunkową poza próbką; około 0,50 oznacza brak przewagi.
+        - **Brier** ocenia jakość prawdopodobieństw; mniej znaczy lepiej.
+        - **Forward test** to realne, append-only obserwacje po zamrożeniu Candidate v1 — tego nie tuningujemy po fakcie.
+        """)
 
 
 def profile_name(profile: dict, fallback: str) -> str:
@@ -661,7 +1155,7 @@ def _render_ranking_table(frame: pd.DataFrame, title: str, empty_text: str) -> N
         "Risk/reward", "Edge score", "Deep score", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Jakość modelu", "Score",
     ]
     present = [column for column in columns if column in frame.columns]
-    st.dataframe(frame[present].style.format(formats), use_container_width=True, hide_index=True)
+    st.dataframe(frame[present].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
 
 
 def _unique_symbols(frame: pd.DataFrame) -> int:
@@ -1018,7 +1512,7 @@ def render_signal_journal() -> None:
             "Data sygnału", "Symbol", "Klasa", "Horyzont", "Kierunek", "Setup", "Ocena",
             "P(wzrost)", "Cena sygnału", "Data wejścia", "Cena wejścia", "Egzekucja", "Upłynęło", "Pozostało", "Jakość", "Score",
         ]
-        st.dataframe(open_entries[[c for c in columns if c in open_entries]].style.format(formats), use_container_width=True, hide_index=True)
+        st.dataframe(open_entries[[c for c in columns if c in open_entries]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
     with tabs[2]:
         columns = [
             "Data sygnału", "Data oceny", "Symbol", "Horyzont", "Kierunek", "Trafiony",
@@ -1027,7 +1521,7 @@ def render_signal_journal() -> None:
         if closed.empty:
             st.info("Jeszcze żaden sygnał nie dojrzał do oceny. Wróć po upływie horyzontu 1/5/20 dni lub sesji.")
         else:
-            st.dataframe(closed[[c for c in columns if c in closed]].style.format(formats), use_container_width=True, hide_index=True)
+            st.dataframe(closed[[c for c in columns if c in closed]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
     with tabs[3]:
         if closed.empty:
             st.info("Statystyki pojawią się po zamknięciu pierwszych sygnałów.")
@@ -1152,7 +1646,7 @@ def render_forward_cockpit() -> None:
             "Sesje do wyjścia": "Sesje do wyjścia (≈)",
         })
         present = [column for column in columns if column in open_frame]
-        st.dataframe(open_frame[present].style.format(formats), use_container_width=True, hide_index=True)
+        st.dataframe(open_frame[present].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
         st.caption("Daty i liczba sesji w cockpicie są przybliżeniem na bazie dni roboczych. Ledger zamyka pozycję dopiero, gdy realna cena `Open` dla wyjścia jest dostępna.")
 
     st.subheader("Ostatni dzień forward testu")
@@ -1166,7 +1660,7 @@ def render_forward_cockpit() -> None:
             "Jakość", "Decyzja", "Powód pominięcia",
         ]
         present = [column for column in columns if column in latest]
-        st.dataframe(latest[present].style.format(formats), use_container_width=True, hide_index=True)
+        st.dataframe(latest[present].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
 
     st.subheader("Historia eventów")
     events = pd.DataFrame(cockpit["recent_events"])
@@ -1178,7 +1672,7 @@ def render_forward_cockpit() -> None:
             "Wejście", "Cena wejścia", "Wyjście", "Cena wyjścia", "Powód/Decyzja",
         ]
         present = [column for column in columns if column in events]
-        st.dataframe(events[present].style.format(formats), use_container_width=True, hide_index=True)
+        st.dataframe(events[present].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
 
     with st.expander("Co oznaczają eventy?"):
         st.markdown("""
@@ -1356,14 +1850,14 @@ def render_signal_dashboard() -> None:
             "P(wzrost)", "Oczekiwany ruch", "Deep score", "Setup score", "Risk/reward", "Edge score",
         ]
         radar_cols[0].subheader("Priorytet / watchlist")
-        radar_cols[0].dataframe(priority[[c for c in compact_columns if c in priority]].style.format(formats), use_container_width=True, hide_index=True)
+        radar_cols[0].dataframe(priority[[c for c in compact_columns if c in priority]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
         radar_cols[1].subheader("Najmocniejsze ruchy")
-        radar_cols[1].dataframe(hot_now[[c for c in compact_columns if c in hot_now]].style.format(formats), use_container_width=True, hide_index=True)
+        radar_cols[1].dataframe(hot_now[[c for c in compact_columns if c in hot_now]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
         radar_cols[2].subheader("Ryzyka / unikaj")
         if risk_now.empty:
             radar_cols[2].info("Brak wyraźnych ryzyk w zapisanym rankingu.")
         else:
-            radar_cols[2].dataframe(risk_now[[c for c in compact_columns if c in risk_now]].style.format(formats), use_container_width=True, hide_index=True)
+            radar_cols[2].dataframe(risk_now[[c for c in compact_columns if c in risk_now]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
     with horizon_tabs[1]:
         st.subheader("Setup intelligence")
         st.caption("Rozbicie score na elementy, które trader sprawdza ręcznie: impet, trend, kontrolę ryzyka, płynność i potwierdzenie modelu.")
@@ -1377,7 +1871,7 @@ def render_signal_dashboard() -> None:
             "Momentum score", "Trend score", "Risk control", "Model edge", "Liquidity score",
             "P(wzrost)", "Risk/reward", "AUC walidacji", "Jakość modelu",
         ]
-        st.dataframe(setup_frame[[c for c in setup_columns if c in setup_frame]].style.format(formats), use_container_width=True, hide_index=True)
+        st.dataframe(setup_frame[[c for c in setup_columns if c in setup_frame]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
         st.info(
             "**Setup score** to nie sygnał kupna. To priorytet dalszej analizy: im wyżej, tym bardziej spójny jest układ momentum + trend + ryzyko + ML."
         )
@@ -1393,7 +1887,7 @@ def render_signal_dashboard() -> None:
             "RSI 14", "Radar score", "Ocena", "P(wzrost)", "AUC walidacji", "Jakość modelu",
         ]
         present = [column for column in hot_columns if column in hot.columns]
-        st.dataframe(hot[present].style.format(formats), use_container_width=True, hide_index=True)
+        st.dataframe(hot[present].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
     with horizon_tabs[3]:
         rr = frame.sort_values(["Edge score", "Deep score", "Setup score", "Risk/reward"], ascending=False).drop_duplicates("Symbol").head(20)
         st.subheader("Najlepszy stosunek potencjału do ryzyka")
@@ -1403,7 +1897,7 @@ def render_signal_dashboard() -> None:
             "P(wzrost)", "Oczekiwany ruch", "Risk/reward", "Edge score",
             "Deep score", "Setup score", "Risk control", "AUC walidacji", "Brier", "Jakość modelu", "Zmienność roczna",
         ]
-        st.dataframe(rr[[c for c in rr_columns if c in rr]].style.format(formats), use_container_width=True, hide_index=True)
+        st.dataframe(rr[[c for c in rr_columns if c in rr]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
     for tab, horizon, title in [
         (horizon_tabs[4], 1, "Najciekawsze setupy krótkoterminowe"),
         (horizon_tabs[5], 5, "Najciekawsze setupy swingowe"),
@@ -1442,13 +1936,13 @@ def render_signal_dashboard() -> None:
             "Pewność", "Zmienność roczna", "Max drawdown", "Risk/reward", "Edge score", "Radar score", "Score",
         ]
         present = [column for column in columns if column in filtered.columns]
-        st.dataframe(filtered[present].style.format(formats), use_container_width=True, hide_index=True)
+        st.dataframe(filtered[present].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
         st.download_button("Pobierz ranking CSV", filtered.to_csv(index=False).encode(), "marketscope_signals.csv", "text/csv")
 
     if not bearish.empty:
         with st.expander(f"Ryzyko spadku ({len(bearish)})"):
             columns = ["Symbol", "Klasa", "Horyzont", "Setup", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Jakość modelu"]
-            st.dataframe(bearish[columns].style.format(formats), use_container_width=True, hide_index=True)
+            st.dataframe(bearish[columns].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
 
     if errors:
         with st.expander(f"Pominięte instrumenty i błędy danych ({len(errors)})"):
@@ -1464,9 +1958,20 @@ def render_signal_dashboard() -> None:
 _hero_snapshot = load_snapshot() or {}
 _hero_journal = journal_summary(load_journal())
 _hero_universe = len(default_universe())
+_hero_forward, _hero_forward_error = safe_load_forward_cockpit()
+_hero_automation, _hero_automation_error = safe_load_automation_status()
+_hero_proof = proof_state(_hero_forward, _hero_automation, _hero_forward_error, _hero_automation_error)
+_hero_portfolio = (_hero_forward or {}).get("portfolio") or {}
+_hero_coverage = (_hero_forward or {}).get("coverage") or {}
+_hero_auto_launchd = (_hero_automation or {}).get("launchd") or {}
 _hero_status = "Skan trwa" if _hero_snapshot.get("status") == "running" else ("Gotowy" if _hero_snapshot.get("status") == "complete" else "Offline")
 _hero_completed = _hero_snapshot.get("completed", 0)
 _hero_total = _hero_snapshot.get("total", _hero_universe)
+_hero_forward_coverage = (
+    f"{_hero_coverage.get('completed', 0)}/{_hero_coverage.get('requested', 0)}"
+    if _hero_coverage.get("requested")
+    else "—"
+)
 st.markdown(f"""
 <div class="ms-topbar">
     <div class="ms-brand">
@@ -1479,8 +1984,10 @@ st.markdown(f"""
     <div class="ms-status-strip">
         <span class="ms-chip"><i class="ms-led"></i>{_hero_status}</span>
         <span class="ms-chip">Radar {_hero_completed}/{_hero_total}</span>
-        <span class="ms-chip">Universe {_hero_universe}</span>
-        <span class="ms-chip">Journal {_hero_journal["total"]}</span>
+        <span class="ms-chip">Proof {clean_text(_hero_proof["label"])}</span>
+        <span class="ms-chip">Forward {_hero_forward_coverage}</span>
+        <span class="ms-chip">Portfolio {_hero_portfolio.get("open", 0)}/{_hero_portfolio.get("slots", 5)}</span>
+        <span class="ms-chip">Auto {"ON" if _hero_auto_launchd.get("loaded") else "OFF"}</span>
         <span class="ms-chip">Engine 3×ML</span>
     </div>
 </div>
@@ -1491,28 +1998,15 @@ home, stocks, etfs, crypto, radar, forward_tab, journal, backtest, settings, met
 ])
 
 with home:
-    st.header("Panel główny")
-    st.write("Wybierz moduł i przejdź od szerokiego radaru rynku do konkretnej analizy instrumentu. Każdy symbol dostaje prognozę 1/5/20/60, jakość walidacji, momentum, ryzyko i miejsce w dzienniku skuteczności.")
-    st.markdown("""
-    <div class="feature-grid">
-        <div class="pro-card"><small>Universe</small><h3>Spółki</h3><p>GPW, USA, sektory, mniejsze firmy i wyszukiwarka globalna.</p></div>
-        <div class="pro-card"><small>Markets</small><h3>ETF-y</h3><p>Szeroki rynek, sektory, obligacje, surowce, regiony i UCITS.</p></div>
-        <div class="pro-card"><small>24/7 risk</small><h3>Krypto</h3><p>Najważniejsze kryptowaluty, segmenty rynku i ręczne symbole.</p></div>
-        <div class="pro-card"><small>Scanner</small><h3>Sygnały</h3><p>Today’s Radar, Setup Intelligence, momentum i risk/reward shortlist.</p></div>
-        <div class="pro-card"><small>Proof</small><h3>Forward</h3><p>Live cockpit Candidate v1: pozycje, sloty, snapshoty i ledger eventów.</p></div>
-        <div class="pro-card"><small>Performance</small><h3>Journal</h3><p>Paper-performance, equity curve, drawdown i skuteczność sygnałów.</p></div>
-        <div class="pro-card"><small>Validation</small><h3>Backtest</h3><p>Chronologiczny walk-forward z kosztami, bez trenowania na przyszłości.</p></div>
-        <div class="pro-card"><small>Controls</small><h3>Model</h3><p>Ustawienia historii, wyjaśnienie parametrów i automatycznego monitora.</p></div>
-        <div class="pro-card"><small>Trust</small><h3>Metodologia</h3><p>Opis modelu, ograniczeń, walidacji i zabezpieczeń przed fałszywym edge.</p></div>
-    </div>
-    """, unsafe_allow_html=True)
-    st.subheader("Jak czytać prognozę?")
-    st.markdown("""
-    - **P(wzrost)** mówi, jak często model oczekuje ceny wyższej po danym horyzoncie.
-    - **AUC** mierzy przewagę kierunkową poza próbką; około 0,50 oznacza brak przewagi.
-    - **Brier** ocenia jakość prawdopodobieństw; mniej znaczy lepiej.
-    - Jeśli walidacja jest słaba, aplikacja automatycznie wygasza sygnał do neutralnego.
-    """)
+    render_start_dashboard(
+        snapshot=_hero_snapshot,
+        journal=_hero_journal,
+        universe_size=_hero_universe,
+        cockpit=_hero_forward,
+        automation=_hero_automation,
+        cockpit_error=_hero_forward_error,
+        automation_error=_hero_automation_error,
+    )
 
 with stocks:
     st.header("Analiza spółek")
