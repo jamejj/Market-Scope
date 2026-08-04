@@ -434,6 +434,88 @@ st.markdown("""
         font-size: .88rem;
         line-height: 1.42;
     }
+    .daily-brief {
+        display: grid;
+        grid-template-columns: minmax(0, 1.35fr) minmax(320px, .65fr);
+        gap: 14px;
+        margin: 18px 0 22px;
+    }
+    .brief-main, .brief-side {
+        border-radius: 20px;
+        border: 1px solid rgba(56, 189, 248, .18);
+        background:
+            radial-gradient(circle at 0% 0%, rgba(14, 165, 233, .10), transparent 18rem),
+            linear-gradient(150deg, rgba(15, 23, 42, .86), rgba(5, 10, 23, .78));
+        box-shadow: 0 18px 42px rgba(0,0,0,.20), inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    .brief-main {
+        padding: 20px;
+    }
+    .brief-main small {
+        display:block;
+        margin-bottom: 9px;
+        color: #93c5fd;
+        font-size: .72rem;
+        font-weight: 950;
+        letter-spacing: .11em;
+        text-transform: uppercase;
+    }
+    .brief-main h3 {
+        margin: 0 0 10px;
+        color: #f8fafc;
+        font-size: clamp(1.35rem, 2vw, 2.05rem);
+        line-height: 1.08;
+        letter-spacing: -.045em;
+    }
+    .brief-main p {
+        margin: 0;
+        color: #aab7d5;
+        font-size: .96rem;
+        line-height: 1.55;
+    }
+    .brief-risk {
+        margin-top: 14px;
+        padding: 12px 13px;
+        border-radius: 14px;
+        border: 1px solid rgba(251, 191, 36, .20);
+        background: rgba(251, 191, 36, .07);
+        color: #fde68a;
+        font-size: .88rem;
+        line-height: 1.42;
+    }
+    .brief-side {
+        padding: 14px;
+        display: grid;
+        gap: 10px;
+    }
+    .brief-row {
+        padding: 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(148, 163, 184, .14);
+        background: rgba(8, 13, 28, .76);
+    }
+    .brief-row small {
+        display:block;
+        color: #94a3b8;
+        font-size: .66rem;
+        font-weight: 900;
+        letter-spacing: .09em;
+        text-transform: uppercase;
+    }
+    .brief-row strong {
+        display:block;
+        margin-top: 5px;
+        color: #f8fafc;
+        font-size: 1.04rem;
+        line-height: 1.24;
+    }
+    .brief-row span {
+        display:block;
+        margin-top: 4px;
+        color: #97a7c7;
+        font-size: .82rem;
+        line-height: 1.35;
+    }
     .position-strip {
         display:grid;
         grid-template-columns: minmax(0, 1.2fr) repeat(4, minmax(0, .7fr));
@@ -487,6 +569,7 @@ st.markdown("""
     @media (max-width: 1100px) {
         .command-hero {grid-template-columns: 1fr;}
         .dashboard-grid {grid-template-columns: repeat(2, minmax(0, 1fr));}
+        .daily-brief {grid-template-columns: 1fr;}
         .position-strip {grid-template-columns: repeat(2, minmax(0, 1fr));}
         .next-actions {grid-template-columns: 1fr;}
     }
@@ -741,6 +824,100 @@ def prepare_start_observations(frame: pd.DataFrame) -> pd.DataFrame:
     return output
 
 
+def format_price(value, default: str = "—") -> str:
+    if value is None or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return default
+    return f"{value:,.2f}"
+
+
+def latest_observation(cockpit: dict | None) -> dict:
+    observations = (cockpit or {}).get("latest_observations") or []
+    return observations[0] if observations else {}
+
+
+def active_position(cockpit: dict | None) -> dict:
+    positions = (cockpit or {}).get("open_positions") or []
+    return positions[0] if positions else {}
+
+
+def build_daily_brief(cockpit: dict | None, automation: dict | None, state: dict) -> dict:
+    obs = latest_observation(cockpit)
+    pos = active_position(cockpit)
+    plan = (automation or {}).get("plan") or {}
+    portfolio = (cockpit or {}).get("portfolio") or {}
+    latest_audit = (cockpit or {}).get("latest_audit_date") or plan.get("latest_audit_date")
+    next_run = plan.get("next_planned_run_local")
+    symbol = obs.get("Symbol") or pos.get("Symbol") or "—"
+    obs_date = obs.get("Data sygnału") or (cockpit or {}).get("latest_signal_date") or latest_audit
+    obs_status = str(obs.get("Status") or "")
+    skip_reason_raw = obs.get("Powód pominięcia")
+    skip_reason = display_skip_reason(skip_reason_raw)
+    probability = value_pct(obs.get("P(wzrost)") if obs else pos.get("P(wzrost)"))
+    expected = signed_pct(obs.get("Oczekiwany ruch") if obs else pos.get("Oczekiwany ruch"))
+    open_count = portfolio.get("open", 0)
+    slots = portfolio.get("slots", 5)
+    new_positions = 1 if obs_status in {"ACCEPTED", "OPEN"} else 0
+    skipped = 1 if obs_status == "SKIPPED" else 0
+    observed = 1 if obs else 0
+
+    if obs_status == "SKIPPED" and "symbol jest już otwarty" in skip_reason and pos:
+        headline = f"{symbol} nadal spełnia warunki LONG Candidate v1, ale system nie dubluje pozycji."
+        body = (
+            f"Ostatni audyt z {obs_date} ponownie zauważył setup na {symbol}. "
+            f"Nowa pozycja nie została otwarta, bo {skip_reason}. "
+            f"Aktywna pozycja została otwarta {pos.get('Data wejścia')} po {format_price(pos.get('Cena wejścia'))}; "
+            f"do planowego rozliczenia zostało około {pos.get('Sesje do wyjścia')} sesji."
+        )
+        action = "Obserwuj istniejącą pozycję"
+    elif obs_status == "SKIPPED":
+        headline = f"{symbol} pojawił się w sygnałach, ale nie trafił do portfela."
+        body = (
+            f"System zauważył setup z P(wzrost) {probability} i oczekiwanym ruchem {expected}, "
+            f"ale pozycja została pominięta: {skip_reason}."
+        )
+        action = "Sprawdź powód pominięcia"
+    elif obs_status in {"ACCEPTED", "OPEN"}:
+        headline = f"{symbol} trafił do forward testu jako nowa hipoteza."
+        body = (
+            f"System zaakceptował sygnał z P(wzrost) {probability} i oczekiwanym ruchem {expected}. "
+            "To zapis testowy po zamrożonych regułach Candidate v1, nie rekomendacja kupna."
+        )
+        action = "Śledź wejście i rozliczenie"
+    elif pos:
+        headline = f"Najważniejsza aktywna hipoteza: {pos.get('Symbol')} w portfelu forward."
+        body = (
+            f"Pozycja jest otwarta od {pos.get('Data wejścia')} po {format_price(pos.get('Cena wejścia'))}. "
+            f"Model zapisał P(wzrost) {value_pct(pos.get('P(wzrost)'))}, a do planowego rozliczenia zostało około "
+            f"{pos.get('Sesje do wyjścia')} sesji."
+        )
+        action = "Monitoruj aktywną hipotezę"
+    else:
+        headline = "Candidate v1 nie ma teraz aktywnej pozycji."
+        body = (
+            "To też jest poprawny stan. Zamrożony system może milczeć, jeśli nie widzi wystarczająco mocnego setupu "
+            "albo portfel nie powinien przyjmować nowej ekspozycji."
+        )
+        action = "Czekaj na kolejny audyt"
+
+    risk = (
+        "To forward test i paper-performance: sygnał pokazuje hipotezę badawczą, nie gwarancję ruchu ani polecenie kupna. "
+        "Najważniejsze jest, że system nie zwiększa ekspozycji na symbol, który już jest w portfelu."
+        if pos
+        else "To forward test i paper-performance: brak pozycji nie jest błędem, tylko częścią selektywnej strategii."
+    )
+    return {
+        "headline": headline,
+        "body": body,
+        "risk": risk,
+        "rows": [
+            ("Ostatni audyt", latest_audit or "—", f"Proof flow: {state.get('label') or '—'}"),
+            ("Dzisiejszy sygnał", symbol, f"P(wzrost): {probability} · oczekiwany ruch: {expected}"),
+            ("Decyzja", action, f"Nowe pozycje: {new_positions} · pominięte: {skipped} · obserwacje: {observed}"),
+            ("Następny skan", short_datetime(next_run), f"Portfel forward: {open_count}/{slots}"),
+        ],
+    }
+
+
 def render_start_dashboard(
     *,
     snapshot: dict,
@@ -816,6 +993,28 @@ def render_start_dashboard(
         st.warning(state["detail"])
     else:
         st.caption(f"✅ Proof flow zdrowy · {state['detail']}")
+
+    brief = build_daily_brief(cockpit, automation, state)
+    brief_rows = "".join(
+        '<div class="brief-row">'
+        f"<small>{clean_text(label)}</small>"
+        f"<strong>{clean_text(value)}</strong>"
+        f"<span>{clean_text(detail)}</span>"
+        "</div>"
+        for label, value, detail in brief["rows"]
+    )
+    st.markdown(
+        '<div class="daily-brief">'
+        '<div class="brief-main">'
+        "<small>Co dziś jest ważne?</small>"
+        f"<h3>{clean_text(brief['headline'])}</h3>"
+        f"<p>{clean_text(brief['body'])}</p>"
+        f"<div class=\"brief-risk\">⚠️ {clean_text(brief['risk'])}</div>"
+        "</div>"
+        f'<div class="brief-side">{brief_rows}</div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown(f"""
     <div class="dashboard-grid">
