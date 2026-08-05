@@ -516,6 +516,89 @@ st.markdown("""
         font-size: .82rem;
         line-height: 1.35;
     }
+    .signal-brief {
+        display: grid;
+        grid-template-columns: minmax(0, 1.1fr) minmax(360px, .9fr);
+        gap: 16px;
+        margin: 18px 0 22px;
+    }
+    .signal-brief-main, .signal-brief-grid {
+        border-radius: 20px;
+        border: 1px solid rgba(56, 189, 248, .18);
+        background:
+            radial-gradient(circle at 0% 0%, rgba(56, 189, 248, .10), transparent 20rem),
+            linear-gradient(150deg, rgba(15, 23, 42, .86), rgba(5, 10, 23, .80));
+        box-shadow: 0 18px 42px rgba(0,0,0,.20), inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    .signal-brief-main {
+        padding: 20px;
+    }
+    .signal-brief-main small {
+        display:block;
+        margin-bottom: 9px;
+        color: #93c5fd;
+        font-size: .72rem;
+        font-weight: 950;
+        letter-spacing: .11em;
+        text-transform: uppercase;
+    }
+    .signal-brief-main h3 {
+        margin: 0 0 10px;
+        color: #f8fafc;
+        font-size: clamp(1.25rem, 1.7vw, 1.85rem);
+        line-height: 1.12;
+        letter-spacing: -.04em;
+    }
+    .signal-brief-main p {
+        margin: 0;
+        color: #aab7d5;
+        font-size: .95rem;
+        line-height: 1.55;
+    }
+    .signal-brief-note {
+        margin-top: 14px;
+        padding: 12px 13px;
+        border-radius: 14px;
+        border: 1px solid rgba(45, 212, 191, .18);
+        background: rgba(45, 212, 191, .07);
+        color: #a7f3d0;
+        font-size: .86rem;
+        line-height: 1.42;
+    }
+    .signal-brief-grid {
+        padding: 14px;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+    }
+    .signal-brief-card {
+        padding: 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(148, 163, 184, .14);
+        background: rgba(8, 13, 28, .76);
+    }
+    .signal-brief-card small {
+        display:block;
+        color: #94a3b8;
+        font-size: .66rem;
+        font-weight: 900;
+        letter-spacing: .09em;
+        text-transform: uppercase;
+    }
+    .signal-brief-card strong {
+        display:block;
+        margin-top: 5px;
+        color: #f8fafc;
+        font-size: 1.02rem;
+        line-height: 1.24;
+    }
+    .signal-brief-card span {
+        display:block;
+        margin-top: 4px;
+        color: #97a7c7;
+        font-size: .82rem;
+        line-height: 1.35;
+    }
     .position-strip {
         display:grid;
         grid-template-columns: minmax(0, 1.2fr) repeat(4, minmax(0, .7fr));
@@ -570,6 +653,7 @@ st.markdown("""
         .command-hero {grid-template-columns: 1fr;}
         .dashboard-grid {grid-template-columns: repeat(2, minmax(0, 1fr));}
         .daily-brief {grid-template-columns: 1fr;}
+        .signal-brief {grid-template-columns: 1fr;}
         .position-strip {grid-template-columns: repeat(2, minmax(0, 1fr));}
         .next-actions {grid-template-columns: 1fr;}
     }
@@ -914,6 +998,207 @@ def build_daily_brief(cockpit: dict | None, automation: dict | None, state: dict
             ("Dzisiejszy sygnał", symbol, f"P(wzrost): {probability} · oczekiwany ruch: {expected}"),
             ("Decyzja", action, f"Nowe pozycje: {new_positions} · pominięte: {skipped} · obserwacje: {observed}"),
             ("Następny skan", short_datetime(next_run), f"Portfel forward: {open_count}/{slots}"),
+        ],
+    }
+
+
+def signal_brief_value(row: pd.Series | None, column: str, default: str = "—") -> str:
+    if row is None or column not in row:
+        return default
+    value = row.get(column)
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return default
+    if pd.isna(value):
+        return default
+    return str(value)
+
+
+def signal_brief_horizon(value) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"{int(float(value))}d"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def classify_signal_errors(errors: dict | None) -> dict[str, dict]:
+    provider_no_data: dict[str, str] = {}
+    no_data: dict[str, str] = {}
+    failed: dict[str, str] = {}
+    for symbol, message in (errors or {}).items():
+        normalized_symbol = str(symbol)
+        text = str(message)
+        lowered = text.lower()
+        if any(marker in lowered for marker in [
+            "brak danych",
+            "no price data",
+            "possibly delisted",
+            "no timezone",
+            "quote not found",
+            "not found",
+        ]):
+            provider_no_data[normalized_symbol] = text
+            if normalized_symbol.upper().endswith("-USD"):
+                no_data[normalized_symbol] = text
+        else:
+            failed[normalized_symbol] = text
+    return {"no_data": no_data, "provider_no_data": provider_no_data, "failed": failed}
+
+
+def signal_scan_contract(frame: pd.DataFrame, snapshot: dict) -> dict:
+    errors = classify_signal_errors(snapshot.get("errors") or {})
+    fast_rows = frame[frame["Tryb analizy"].astype(str).eq("FAST")] if "Tryb analizy" in frame else pd.DataFrame()
+    ml_rows = frame[frame["Tryb analizy"].astype(str).eq("ML")] if "Tryb analizy" in frame else pd.DataFrame()
+    universe_total = int(snapshot.get("universe_total") or snapshot.get("total") or _unique_symbols(frame))
+    fast_completed = int(snapshot.get("fast_completed") or (universe_total if not frame.empty else 0))
+    ml_attempted = int(snapshot.get("ml_completed") or 0)
+    ml_total = int(snapshot.get("ml_total") or 0)
+    return {
+        "universe_total": universe_total,
+        "fast_completed": fast_completed,
+        "ranked_symbols": _unique_symbols(frame),
+        "ranked_rows": int(len(frame)),
+        "fast_rows": int(len(fast_rows)),
+        "fast_symbols": _unique_symbols(fast_rows),
+        "ml_rows": int(len(ml_rows)),
+        "ml_symbols": _unique_symbols(ml_rows),
+        "ml_attempted": ml_attempted,
+        "ml_total": ml_total,
+        "deep_limit": snapshot.get("deep_limit"),
+        "no_data": errors["no_data"],
+        "provider_no_data": errors["provider_no_data"],
+        "failed": errors["failed"],
+    }
+
+
+def with_signal_display_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    output = frame.copy()
+    if output.empty:
+        return output
+
+    def direction_text(row: pd.Series) -> str:
+        if str(row.get("Tryb analizy")) == "ML":
+            return f"ML P(wzrost): {value_pct(row.get('P(wzrost)'))}"
+        return "FAST · bez potwierdzenia ML"
+
+    def move_text(row: pd.Series) -> str:
+        expected = row.get("Oczekiwany ruch")
+        if str(row.get("Tryb analizy")) == "ML":
+            return signed_pct(expected)
+        return f"ruch FAST: {signed_pct(expected)}"
+
+    output["Ocena kierunku"] = output.apply(direction_text, axis=1)
+    output["Ruch / impet"] = output.apply(move_text, axis=1)
+    return output
+
+
+def build_signal_radar_brief(
+    frame: pd.DataFrame,
+    snapshot: dict,
+    *,
+    bullish_labels: set[str],
+    bearish_labels: set[str],
+) -> dict:
+    """Human-readable summary for the Signals tab without changing ranking logic."""
+    if frame.empty:
+        return {
+            "headline": "Radar nie ma jeszcze danych do interpretacji.",
+            "body": "Uruchom pełny skan albo poczekaj, aż monitor zapisze pierwsze wiersze rankingu.",
+            "note": "To tylko warstwa prezentacji. Nie zmienia modeli, progów ani zapisanego rankingu.",
+            "cards": [
+                ("Status", "Brak danych", "Ranking nie został jeszcze policzony"),
+                ("Lider", "—", "Brak instrumentu do oceny"),
+                ("Ryzyko", "—", "Brak danych o ryzyku"),
+                ("Następny krok", "Uruchom skan", "Pełny obraz pojawi się po zakończeniu"),
+            ],
+        }
+
+    sort_columns = [column for column in ["Deep score", "Setup score", "Edge score", "Radar score", "Score"] if column in frame.columns]
+    confirmed = frame[
+        frame["Ocena"].isin(bullish_labels)
+        & frame["Tryb analizy"].astype(str).eq("ML")
+    ].copy()
+    priority = frame[
+        frame["Akcja radaru"].isin(["PRIORYTET DO ANALIZY", "WATCHLIST", "FAST SHORTLIST", "MOMENTUM DO SPRAWDZENIA"])
+    ].copy()
+    if not confirmed.empty:
+        pool = confirmed
+        leader_kind = "confirmed"
+    elif not priority.empty:
+        pool = priority
+        leader_kind = "priority"
+    else:
+        pool = frame.copy()
+        leader_kind = "neutral"
+    if sort_columns:
+        leader = pool.sort_values(sort_columns, ascending=False).iloc[0]
+    else:
+        leader = pool.iloc[0]
+
+    contract = signal_scan_contract(frame, snapshot)
+    status = str(snapshot.get("status") or "unknown")
+    if status == "running":
+        status_text = f"FAST {contract['fast_completed']}/{contract['universe_total']} · skan trwa"
+    elif status == "complete":
+        status_text = (
+            f"FAST complete · ML rows {contract['ml_rows']} · "
+            f"krypto bez danych {len(contract['no_data'])} · błędy {len(contract['failed'])}"
+        )
+    else:
+        status_text = f"Status: {status}"
+    symbol = signal_brief_value(leader, "Symbol")
+    horizon = signal_brief_horizon(leader.get("Horyzont") if "Horyzont" in leader else None)
+    action = signal_brief_value(leader, "Akcja radaru")
+    thesis = signal_brief_value(leader, "Teza radaru")
+    leader_mode = signal_brief_value(leader, "Tryb analizy")
+    probability = value_pct(leader.get("P(wzrost)") if leader_mode == "ML" and "P(wzrost)" in leader else None)
+    expected = signed_pct(leader.get("Oczekiwany ruch") if "Oczekiwany ruch" in leader else None)
+    quality = signal_brief_value(leader, "Jakość modelu")
+    setup_grade = signal_brief_value(leader, "Setup grade")
+    hot_symbols = _unique_symbols(frame[frame["Radar momentum"].isin({"PEREŁKA MOMENTUM", "BREAKOUT WATCH", "MOMENTUM WATCH"})])
+    confirmed_symbols = _unique_symbols(confirmed)
+    bearish_symbols = _unique_symbols(frame[frame["Ocena"].isin(bearish_labels)])
+    risk_value = f"{bearish_symbols} alertów" if bearish_symbols else "brak alertów ryzyka"
+
+    if leader_kind == "confirmed":
+        headline = f"{symbol} jest teraz najmocniejszym potwierdzonym setupem ML w radarze."
+        body = (
+            f"Horyzont {horizon}, P(wzrost) {probability}, oczekiwany ruch {expected}. "
+            f"Teza systemu: {thesis}. To priorytet do ręcznej analizy, nie automatyczna rekomendacja kupna."
+        )
+    elif leader_kind == "priority":
+        headline = f"{symbol} jest najwyżej w radarze FAST, ale nie ma jeszcze potwierdzenia ML."
+        body = (
+            f"System oznaczył go jako {action} na horyzoncie {horizon}. "
+            f"Setup: {setup_grade}; teza: {thesis}. Liczby w tym trybie są heurystyką FAST, nie skalibrowanym P(wzrost) z ML."
+        )
+    else:
+        headline = "Radar nie ma wyraźnego potwierdzonego lidera."
+        body = (
+            f"Najwyżej w częściowym rankingu jest {symbol}, ale obecny stan bardziej przypomina obserwację niż gotową hipotezę. "
+            "W takim momencie najcenniejsza może być selekcja i odrzucanie szumu."
+        )
+
+    note = (
+        "Ranking jest jeszcze częściowy — pełny obraz pojawi się po zakończeniu Deep ML."
+        if status == "running"
+        else "To radar badawczy: pomaga ustalić kolejność analizy, ale nie zastępuje decyzji inwestora."
+    )
+    leader_detail = (
+        f"P(wzrost): {probability} · oczekiwany ruch: {expected}"
+        if leader_mode == "ML"
+        else f"FAST · bez ML · ruch/impet: {expected}"
+    )
+    return {
+        "headline": headline,
+        "body": body,
+        "note": note,
+        "cards": [
+            ("Lider radaru", f"{symbol} · {horizon}", f"{action} · {leader_detail}"),
+            ("Potwierdzone ML", f"{confirmed_symbols} symboli", f"ML rows: {contract['ml_rows']} · FAST rows: {contract['fast_rows']} · jakość lidera: {quality}"),
+            ("Momentum", f"{hot_symbols} hot movers", "Perełki, breakouty i szybkie ruchy do sprawdzenia"),
+            ("Ryzyko / dane", risk_value, status_text),
         ],
     }
 
@@ -1350,7 +1635,7 @@ def _render_ranking_table(frame: pd.DataFrame, title: str, empty_text: str) -> N
     }
     columns = [
         "Symbol", "Klasa", "Tryb analizy", "Setup", "Setup grade", "Akcja radaru", "Radar momentum", "Teza radaru",
-        "Setup score", "Ocena", "P(wzrost)", "Oczekiwany ruch",
+        "Setup score", "Ocena", "Ocena kierunku", "Ruch / impet",
         "Risk/reward", "Edge score", "Deep score", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Jakość modelu", "Score",
     ]
     present = [column for column in columns if column in frame.columns]
@@ -1960,7 +2245,7 @@ def render_signal_dashboard() -> None:
                     "żeby dostać radar 1d/5d/20d z hot movers."
                 )
         else:
-            st.success(f"Ranking gotowy · aktualizacja: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzonty: **{horizon_text}**")
+            st.success(f"Skan zapisany · aktualizacja: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzonty: **{horizon_text}**")
 
     frame = pd.DataFrame(snapshot.get("records", []))
     if frame.empty:
@@ -1973,6 +2258,7 @@ def render_signal_dashboard() -> None:
     if "Setup" not in frame:
         frame["Setup"] = "—"
     frame = _ensure_radar_columns(frame)
+    frame = with_signal_display_columns(frame)
     fast_rows = frame[frame["Tryb analizy"].astype(str).eq("FAST")]
     ml_rows = frame[frame["Tryb analizy"].astype(str).eq("ML")]
 
@@ -1981,27 +2267,73 @@ def render_signal_dashboard() -> None:
     bullish = frame[frame["Ocena"].isin(bullish_labels)]
     bearish = frame[frame["Ocena"].isin(bearish_labels)]
     discoveries = frame[frame["Radar momentum"].isin({"PEREŁKA MOMENTUM", "BREAKOUT WATCH", "MOMENTUM WATCH"})]
-    errors = snapshot.get("errors", {})
-    crypto_errors = [symbol for symbol in errors if str(symbol).upper().endswith("-USD")]
-    visible_symbols = _unique_symbols(frame)
+    data_contract = signal_scan_contract(frame, snapshot)
+    crypto_no_data = [symbol for symbol in data_contract["no_data"] if str(symbol).upper().endswith("-USD")]
+    crypto_failed = [symbol for symbol in data_contract["failed"] if str(symbol).upper().endswith("-USD")]
     summary = st.columns(6)
-    summary[0].metric("Postęp skanu", f"{completed or visible_symbols}/{total or visible_symbols}")
-    summary[1].metric("Wiersze sygnałów", len(frame), help="Każdy instrument ma osobne wiersze dla horyzontów 1d/5d/20d.")
-    summary[2].metric("FAST rows", len(fast_rows), help="Lekkie wiersze techniczne, zanim pełny ML przeliczy shortlistę.")
-    summary[3].metric("ML rows", len(ml_rows), help="Wiersze po pełnej walidacji modelu.")
-    summary[4].metric("Ryzyko spadku", _unique_symbols(bearish), help="Liczba unikalnych symboli z co najmniej jednym sygnałem spadkowym.")
-    summary[5].metric("Pominięte", len(errors), help="Symbole bez danych lub z błędem pobierania.")
+    summary[0].metric(
+        "FAST skan",
+        f"{data_contract['fast_completed']}/{data_contract['universe_total']}",
+        help="Ile instrumentów przeszło lekki skan techniczny całego universe.",
+    )
+    summary[1].metric(
+        "W rankingu",
+        data_contract["ranked_symbols"],
+        help="Instrumenty, dla których zapisano wiersze rankingu; horyzonty 1d/5d/20d tworzą osobne wiersze.",
+    )
+    summary[1].caption(f"{data_contract['ranked_rows']} wierszy")
+    summary[2].metric("FAST rows", data_contract["fast_rows"], help="Wiersze techniczne bez pełnego potwierdzenia ML.")
+    summary[3].metric("ML rows", data_contract["ml_rows"], help="Wiersze po pełnej walidacji modelu.")
+    risk_label = "brak" if _unique_symbols(bearish) == 0 else str(_unique_symbols(bearish))
+    summary[4].metric("Alerty ryzyka", risk_label, help="To brak wykrytych alertów w radarze, nie gwarancja braku ryzyka.")
+    summary[4].caption("wykrytych alertów ryzyka")
+    summary[5].metric(
+        "Brak danych / błędy",
+        f"{len(data_contract['no_data'])}/{len(data_contract['failed'])}",
+        help="Pierwsza liczba to brak danych krypto z providera, druga to prawdziwe błędy runtime/pobierania.",
+    )
+    summary[5].caption("krypto / runtime")
     if snapshot.get("scan_mode") == "two_stage":
         st.caption(
-            f"Tryb dwustopniowy: FAST skanuje cały rynek, a Deep ML liczy pełne modele dla shortlisty "
-            f"do **{snapshot.get('deep_limit', '—')}** instrumentów. FAST rows nie są zapisywane do Journala jako sygnały."
+            f"Tryb dwustopniowy: FAST skanuje cały rynek (**{data_contract['fast_completed']}/{data_contract['universe_total']}**), "
+            f"a Deep ML wzbogaca shortlistę. Próby ML: **{data_contract['ml_attempted']}/{data_contract['ml_total']}**, "
+            f"zapisane ML rows: **{data_contract['ml_rows']}**. FAST rows nie są zapisywane do Journala jako directional signals."
         )
 
-    if crypto_errors:
+    if crypto_no_data:
         st.warning(
-            f"Ten zapisany skan pominął **{len(crypto_errors)} krypto** przez brak danych w momencie skanowania. "
-            "Ranking krypto jest więc niepełny — kliknij **Przelicz cały ranking teraz**, gdy masz połączenie z internetem."
+            f"Ten zapisany skan ma **{len(crypto_no_data)} krypto bez danych** w momencie pobierania. "
+            "To missing data z providera, nie awaria MarketScope. Ranking krypto jest więc niepełny."
         )
+    if crypto_failed:
+        st.error(f"Prawdziwe błędy pobierania krypto: **{len(crypto_failed)}**. Szczegóły są w surowym snapshotcie.")
+
+    radar_brief = build_signal_radar_brief(
+        frame,
+        snapshot,
+        bullish_labels=bullish_labels,
+        bearish_labels=bearish_labels,
+    )
+    radar_cards = "".join(
+        '<div class="signal-brief-card">'
+        f"<small>{clean_text(label)}</small>"
+        f"<strong>{clean_text(value)}</strong>"
+        f"<span>{clean_text(detail)}</span>"
+        "</div>"
+        for label, value, detail in radar_brief["cards"]
+    )
+    st.markdown(
+        '<div class="signal-brief">'
+        '<div class="signal-brief-main">'
+        "<small>Co teraz pokazuje radar?</small>"
+        f"<h3>{clean_text(radar_brief['headline'])}</h3>"
+        f"<p>{clean_text(radar_brief['body'])}</p>"
+        f"<div class=\"signal-brief-note\">📡 {clean_text(radar_brief['note'])}</div>"
+        "</div>"
+        f'<div class="signal-brief-grid">{radar_cards}</div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     formats = {
         "Cena": "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
@@ -2026,12 +2358,20 @@ def render_signal_dashboard() -> None:
             base[base["Akcja radaru"].isin(["PRIORYTET DO ANALIZY", "WATCHLIST", "FAST SHORTLIST", "MOMENTUM DO SPRAWDZENIA"])]
             .sort_values(["Deep score", "Setup score", "Edge score", "Risk/reward"], ascending=False)
             .drop_duplicates("Symbol")
-            .head(8)
+            .head(5)
         )
+        hot_pool = base.copy()
+        return_columns = [column for column in ["Zwrot 1d", "Zwrot 5d", "Zwrot 20d"] if column in hot_pool.columns]
+        hot_pool["_hot_move"] = hot_pool[return_columns].abs().max(axis=1).fillna(0.0) if return_columns else 0.0
+        priority_symbols = set(priority["Symbol"].dropna().astype(str))
+        hot_candidates = hot_pool[~hot_pool["Symbol"].astype(str).isin(priority_symbols)]
+        if hot_candidates.empty:
+            hot_candidates = hot_pool
         hot_now = (
-            base.sort_values(["Radar score", "Deep score", "Setup score"], ascending=False)
+            hot_candidates.sort_values(["_hot_move", "Radar score", "Deep score"], ascending=False)
             .drop_duplicates("Symbol")
-            .head(8)
+            .head(5)
+            .drop(columns=["_hot_move"], errors="ignore")
         )
         risk_now = (
             base[
@@ -2041,22 +2381,21 @@ def render_signal_dashboard() -> None:
             ]
             .sort_values(["Edge score", "Score"], ascending=True)
             .drop_duplicates("Symbol")
-            .head(8)
+            .head(5)
         )
-        radar_cols = st.columns(3)
         compact_columns = [
             "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Setup grade", "Akcja radaru", "Teza radaru",
-            "P(wzrost)", "Oczekiwany ruch", "Deep score", "Setup score", "Risk/reward", "Edge score",
+            "Ocena kierunku", "Ruch / impet", "Deep score", "Setup score", "Risk/reward", "Edge score",
         ]
-        radar_cols[0].subheader("Priorytet / watchlist")
-        radar_cols[0].dataframe(priority[[c for c in compact_columns if c in priority]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
-        radar_cols[1].subheader("Najmocniejsze ruchy")
-        radar_cols[1].dataframe(hot_now[[c for c in compact_columns if c in hot_now]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
-        radar_cols[2].subheader("Ryzyka / unikaj")
+        st.markdown("#### 1. Najważniejsze setupy do dalszej analizy")
+        st.dataframe(priority[[c for c in compact_columns if c in priority]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
+        st.markdown("#### 2. Autentyczne hot movers — wybrane innym kryterium")
+        st.dataframe(hot_now[[c for c in compact_columns if c in hot_now]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
+        st.markdown("#### 3. Alerty ryzyka / unikaj")
         if risk_now.empty:
-            radar_cols[2].info("Brak wyraźnych ryzyk w zapisanym rankingu.")
+            st.info("Brak wykrytych alertów ryzyka w zapisanym rankingu. To nie oznacza braku ryzyka rynkowego — tylko brak alertu według obecnych filtrów.")
         else:
-            radar_cols[2].dataframe(risk_now[[c for c in compact_columns if c in risk_now]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
+            st.dataframe(risk_now[[c for c in compact_columns if c in risk_now]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
     with horizon_tabs[1]:
         st.subheader("Setup intelligence")
         st.caption("Rozbicie score na elementy, które trader sprawdza ręcznie: impet, trend, kontrolę ryzyka, płynność i potwierdzenie modelu.")
@@ -2083,7 +2422,7 @@ def render_signal_dashboard() -> None:
         st.caption("Ten widok nie wymaga potwierdzenia ML. Łapie gwałtowne ruchy i breakouty do szybkiego sprawdzenia — szczególnie przy krypto.")
         hot_columns = [
             "Symbol", "Klasa", "Radar momentum", "Setup", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d",
-            "RSI 14", "Radar score", "Ocena", "P(wzrost)", "AUC walidacji", "Jakość modelu",
+            "RSI 14", "Radar score", "Ocena", "Ocena kierunku", "Ruch / impet", "AUC walidacji", "Jakość modelu",
         ]
         present = [column for column in hot_columns if column in hot.columns]
         st.dataframe(hot[present].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
@@ -2093,7 +2432,7 @@ def render_signal_dashboard() -> None:
         st.caption("Ranking łączy oczekiwany ruch, przedział niepewności, prawdopodobieństwo, AUC/Brier i zmienność. Wysoki wynik oznacza priorytet analizy, nie pewność zysku.")
         rr_columns = [
             "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Setup grade", "Akcja radaru", "Teza radaru", "Setup", "Ocena",
-            "P(wzrost)", "Oczekiwany ruch", "Risk/reward", "Edge score",
+            "Ocena kierunku", "Ruch / impet", "Risk/reward", "Edge score",
             "Deep score", "Setup score", "Risk control", "AUC walidacji", "Brier", "Jakość modelu", "Zmienność roczna",
         ]
         st.dataframe(rr[[c for c in rr_columns if c in rr]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
@@ -2139,19 +2478,33 @@ def render_signal_dashboard() -> None:
         st.download_button("Pobierz ranking CSV", filtered.to_csv(index=False).encode(), "marketscope_signals.csv", "text/csv")
 
     if not bearish.empty:
-        with st.expander(f"Ryzyko spadku ({len(bearish)})"):
-            columns = ["Symbol", "Klasa", "Horyzont", "Setup", "Ocena", "P(wzrost)", "Oczekiwany ruch", "AUC walidacji", "Jakość modelu"]
-            st.dataframe(bearish[columns].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
+        with st.expander(f"Alerty ryzyka ({_unique_symbols(bearish)} symboli)"):
+            columns = [
+                "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Setup grade", "Akcja radaru",
+                "Teza radaru", "Ocena kierunku", "Ruch / impet", "AUC walidacji", "Jakość modelu",
+            ]
+            present = [column for column in columns if column in bearish.columns]
+            st.dataframe(bearish[present].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
 
-    if errors:
-        with st.expander(f"Pominięte instrumenty i błędy danych ({len(errors)})"):
-            error_frame = pd.DataFrame(
-                [
-                    {"Symbol": symbol, "Klasa": _class_from_symbol(symbol), "Błąd": message}
-                    for symbol, message in sorted(errors.items())
-                ]
+    no_data_errors = data_contract["no_data"]
+    provider_no_data_errors = data_contract["provider_no_data"]
+    failed_errors = data_contract["failed"]
+    if no_data_errors or failed_errors:
+        with st.expander(f"Brak danych i błędy ({len(no_data_errors)} brak danych / {len(failed_errors)} błędów)"):
+            error_rows = [
+                {"Symbol": symbol, "Klasa": _class_from_symbol(symbol), "Typ": "Brak danych", "Opis": message}
+                for symbol, message in sorted(no_data_errors.items())
+            ]
+            error_rows.extend(
+                {"Symbol": symbol, "Klasa": _class_from_symbol(symbol), "Typ": "Błąd", "Opis": message}
+                for symbol, message in sorted(failed_errors.items())
             )
-            st.dataframe(error_frame, use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(error_rows), use_container_width=True, hide_index=True)
+            if len(provider_no_data_errors) > len(no_data_errors):
+                st.caption(
+                    f"Surowy log providera zawiera {len(provider_no_data_errors)} wpisy no-data. "
+                    f"W głównym panelu pokazuję {len(no_data_errors)} braków krypto, bo to one wpływają na kompletność segmentu krypto."
+                )
 
 
 _hero_snapshot = load_snapshot() or {}
@@ -2164,8 +2517,8 @@ _hero_portfolio = (_hero_forward or {}).get("portfolio") or {}
 _hero_coverage = (_hero_forward or {}).get("coverage") or {}
 _hero_auto_launchd = (_hero_automation or {}).get("launchd") or {}
 _hero_status = "Skan trwa" if _hero_snapshot.get("status") == "running" else ("Gotowy" if _hero_snapshot.get("status") == "complete" else "Offline")
-_hero_completed = _hero_snapshot.get("completed", 0)
-_hero_total = _hero_snapshot.get("total", _hero_universe)
+_hero_completed = _hero_snapshot.get("fast_completed", _hero_snapshot.get("completed", 0))
+_hero_total = _hero_snapshot.get("universe_total", _hero_snapshot.get("total", _hero_universe))
 _hero_forward_coverage = (
     f"{_hero_coverage.get('completed', 0)}/{_hero_coverage.get('requested', 0)}"
     if _hero_coverage.get("requested")
@@ -2182,7 +2535,7 @@ st.markdown(f"""
     </div>
     <div class="ms-status-strip">
         <span class="ms-chip"><i class="ms-led"></i>{_hero_status}</span>
-        <span class="ms-chip">Radar {_hero_completed}/{_hero_total}</span>
+        <span class="ms-chip">FAST {_hero_completed}/{_hero_total}</span>
         <span class="ms-chip">Proof {clean_text(_hero_proof["label"])}</span>
         <span class="ms-chip">Forward {_hero_forward_coverage}</span>
         <span class="ms-chip">Portfolio {_hero_portfolio.get("open", 0)}/{_hero_portfolio.get("slots", 5)}</span>
