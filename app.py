@@ -599,6 +599,89 @@ st.markdown("""
         font-size: .82rem;
         line-height: 1.35;
     }
+    .setup-cockpit {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(360px, .95fr);
+        gap: 14px;
+        margin: 14px 0 24px;
+    }
+    .setup-panel, .setup-side {
+        border-radius: 18px;
+        border: 1px solid rgba(56, 189, 248, .18);
+        background:
+            radial-gradient(circle at 0% 0%, rgba(99, 102, 241, .10), transparent 18rem),
+            linear-gradient(150deg, rgba(15, 23, 42, .82), rgba(5, 10, 23, .76));
+        box-shadow: 0 18px 42px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.035);
+    }
+    .setup-panel {
+        padding: 18px;
+    }
+    .setup-panel small {
+        display:block;
+        margin-bottom: 8px;
+        color: #93c5fd;
+        font-size: .70rem;
+        font-weight: 950;
+        letter-spacing: .11em;
+        text-transform: uppercase;
+    }
+    .setup-panel h3 {
+        margin: 0 0 10px;
+        color: #f8fafc;
+        font-size: clamp(1.25rem, 1.7vw, 1.82rem);
+        line-height: 1.10;
+        letter-spacing: -.045em;
+    }
+    .setup-panel p {
+        margin: 0;
+        color: #aab7d5;
+        font-size: .95rem;
+        line-height: 1.55;
+    }
+    .setup-note {
+        margin-top: 13px;
+        padding: 11px 12px;
+        border-radius: 13px;
+        border: 1px solid rgba(251, 191, 36, .20);
+        background: rgba(251, 191, 36, .07);
+        color: #fde68a;
+        font-size: .86rem;
+        line-height: 1.42;
+    }
+    .setup-side {
+        padding: 13px;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+    }
+    .setup-tile {
+        padding: 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(148, 163, 184, .14);
+        background: rgba(8, 13, 28, .76);
+    }
+    .setup-tile small {
+        display:block;
+        color: #94a3b8;
+        font-size: .65rem;
+        font-weight: 900;
+        letter-spacing: .09em;
+        text-transform: uppercase;
+    }
+    .setup-tile strong {
+        display:block;
+        margin-top: 5px;
+        color: #f8fafc;
+        font-size: 1.02rem;
+        line-height: 1.22;
+    }
+    .setup-tile span {
+        display:block;
+        margin-top: 4px;
+        color: #97a7c7;
+        font-size: .81rem;
+        line-height: 1.34;
+    }
     .position-strip {
         display:grid;
         grid-template-columns: minmax(0, 1.2fr) repeat(4, minmax(0, .7fr));
@@ -654,6 +737,7 @@ st.markdown("""
         .dashboard-grid {grid-template-columns: repeat(2, minmax(0, 1fr));}
         .daily-brief {grid-template-columns: 1fr;}
         .signal-brief {grid-template-columns: 1fr;}
+        .setup-cockpit {grid-template-columns: 1fr;}
         .position-strip {grid-template-columns: repeat(2, minmax(0, 1fr));}
         .next-actions {grid-template-columns: 1fr;}
     }
@@ -1201,6 +1285,149 @@ def build_signal_radar_brief(
             ("Ryzyko / dane", risk_value, status_text),
         ],
     }
+
+
+def radar_row_number(row: pd.Series, column: str) -> float | None:
+    if column not in row:
+        return None
+    value = row.get(column)
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def setup_destination(symbol: str, klass: str) -> tuple[str, str]:
+    upper = str(symbol).upper()
+    label = "Spółki"
+    detail = "Przejdź do zakładki Spółki → Wpisz symbol i uruchom pełną analizę."
+    if upper.endswith("-USD"):
+        label = "Krypto"
+        detail = "Przejdź do zakładki Krypto → Wpisz symbol i uruchom pełną analizę."
+    elif "ETF" in str(klass).upper() or upper in {"SPY", "QQQ", "VOO", "VTI", "IWM", "GLD", "IAU"}:
+        label = "ETF-y / Spółki"
+        detail = "Jeśli instrument jest w katalogu ETF, użyj ETF-y; w innym wypadku Spółki → Wpisz symbol."
+    return label, detail
+
+
+def setup_risk_note(row: pd.Series) -> tuple[str, str]:
+    notes: list[str] = []
+    mode = signal_brief_value(row, "Tryb analizy")
+    quality = signal_brief_value(row, "Jakość modelu")
+    rsi = radar_row_number(row, "RSI 14")
+    risk_control = radar_row_number(row, "Risk control")
+    max_drawdown = radar_row_number(row, "Max drawdown")
+    risk_reward = radar_row_number(row, "Risk/reward")
+    if mode != "ML":
+        notes.append("brak potwierdzenia ML")
+    if "BRAK" in quality.upper() or "FAST" in quality.upper():
+        notes.append("jakość modelu nie potwierdza przewagi")
+    if rsi is not None and rsi >= 72:
+        notes.append("RSI wysoko — możliwe przegrzanie")
+    elif rsi is not None and rsi <= 30:
+        notes.append("RSI nisko — ruch może być nerwowy")
+    if risk_reward is not None and risk_reward < 1:
+        notes.append("risk/reward poniżej 1")
+    if risk_control is not None and risk_control < 45:
+        notes.append("słabsza kontrola ryzyka")
+    if max_drawdown is not None and max_drawdown <= -0.30:
+        notes.append("historycznie duże obsunięcia")
+    if not notes:
+        return "bez alertu", "Brak dodatkowego alertu według obecnych filtrów. To nadal nie znaczy brak ryzyka rynkowego."
+    return "uwaga", " · ".join(dict.fromkeys(notes))
+
+
+def build_setup_drilldown(row: pd.Series, bullish_labels: set[str]) -> dict:
+    symbol = signal_brief_value(row, "Symbol")
+    klass = signal_brief_value(row, "Klasa")
+    mode = signal_brief_value(row, "Tryb analizy")
+    horizon = signal_brief_horizon(row.get("Horyzont") if "Horyzont" in row else None)
+    action = signal_brief_value(row, "Akcja radaru")
+    thesis = signal_brief_value(row, "Teza radaru")
+    grade = signal_brief_value(row, "Setup grade")
+    direction = signal_brief_value(row, "Ocena kierunku")
+    move = signal_brief_value(row, "Ruch / impet")
+    quality = signal_brief_value(row, "Jakość modelu")
+    score = radar_row_number(row, "Deep score")
+    risk_label, risk_detail = setup_risk_note(row)
+    dest_label, dest_detail = setup_destination(symbol, klass)
+    confirmed = mode == "ML" and signal_brief_value(row, "Ocena") in bullish_labels
+
+    if confirmed:
+        headline = f"{symbol} ma potwierdzony setup ML na horyzoncie {horizon}."
+        body = (
+            f"Radar widzi {action.lower()} i modelowy kierunek: {direction}. "
+            f"Teza: {thesis}. To jest kandydat do pełnej ręcznej analizy, nadal bez gwarancji ruchu."
+        )
+    elif mode == "ML":
+        headline = f"{symbol} ma policzony ML, ale bez wzrostowego potwierdzenia."
+        body = (
+            f"Model został uruchomiony, lecz ocena nie przeszła progów Candidate/ML. "
+            f"Teza radaru: {thesis}. Najrozsądniej traktować to jako obserwację, nie sygnał."
+        )
+    else:
+        headline = f"{symbol} jest na watchliście FAST — dobry kandydat do sprawdzenia, nie sygnał ML."
+        body = (
+            f"FAST wskazuje {action.lower()} na horyzoncie {horizon}. "
+            f"Teza: {thesis}. Liczby są heurystyką radaru, a nie skalibrowanym P(wzrost) z modelu."
+        )
+
+    return {
+        "headline": headline,
+        "body": body,
+        "note": "To briefing badawczy: pomaga ustalić kolejność pracy, ale nie jest rekomendacją kupna ani sprzedaży.",
+        "cards": [
+            ("Instrument", f"{symbol} · {klass}", f"horyzont {horizon}"),
+            ("Tryb", mode, "ML = pełny model; FAST = szybka heurystyka radaru"),
+            ("Setup", grade, action),
+            ("Kierunek", direction, move),
+            ("Ryzyko", risk_label, risk_detail),
+            ("Pełna analiza", dest_label, dest_detail),
+            ("Jakość", quality, f"Deep score: {score:.0f}" if score is not None else "Deep score: —"),
+        ],
+    }
+
+
+def render_setup_cockpit(frame: pd.DataFrame, bullish_labels: set[str]) -> None:
+    if frame.empty or "Symbol" not in frame:
+        return
+    sort_columns = [column for column in ["Deep score", "Setup score", "Radar score", "Edge score"] if column in frame.columns]
+    work = frame.copy()
+    if sort_columns:
+        work = work.sort_values(sort_columns, ascending=False)
+    work = work.drop_duplicates("Symbol").head(20).reset_index(drop=True)
+    options = {
+        f"{row['Symbol']} · {signal_brief_horizon(row.get('Horyzont'))} · {row.get('Tryb analizy', '—')} · {row.get('Akcja radaru', '—')}": idx
+        for idx, row in work.iterrows()
+    }
+    if not options:
+        return
+    selected = st.selectbox("Rozłóż setup na czynniki", list(options), key="radar_setup_focus")
+    row = work.iloc[options[selected]]
+    drilldown = build_setup_drilldown(row, bullish_labels)
+    cards = "".join(
+        '<div class="setup-tile">'
+        f"<small>{clean_text(label)}</small>"
+        f"<strong>{clean_text(value)}</strong>"
+        f"<span>{clean_text(detail)}</span>"
+        "</div>"
+        for label, value, detail in drilldown["cards"]
+    )
+    st.markdown(
+        '<div class="setup-cockpit">'
+        '<div class="setup-panel">'
+        "<small>Analiza wybranego setupu</small>"
+        f"<h3>{clean_text(drilldown['headline'])}</h3>"
+        f"<p>{clean_text(drilldown['body'])}</p>"
+        f"<div class=\"setup-note\">⚠️ {clean_text(drilldown['note'])}</div>"
+        "</div>"
+        f'<div class="setup-side">{cards}</div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_start_dashboard(
@@ -2360,6 +2587,7 @@ def render_signal_dashboard() -> None:
             .drop_duplicates("Symbol")
             .head(5)
         )
+        render_setup_cockpit(priority if not priority.empty else base, bullish_labels)
         hot_pool = base.copy()
         return_columns = [column for column in ["Zwrot 1d", "Zwrot 5d", "Zwrot 20d"] if column in hot_pool.columns]
         hot_pool["_hot_move"] = hot_pool[return_columns].abs().max(axis=1).fillna(0.0) if return_columns else 0.0
