@@ -1303,13 +1303,13 @@ def radar_row_number(row: pd.Series, column: str) -> float | None:
 def setup_destination(symbol: str, klass: str) -> tuple[str, str]:
     upper = str(symbol).upper()
     label = "Spółki"
-    detail = "Przejdź do zakładki Spółki → Wpisz symbol i uruchom pełną analizę."
+    detail = "Kliknij przycisk pod panelem — MarketScope uruchomi pełną analizę tutaj."
     if upper.endswith("-USD"):
         label = "Krypto"
-        detail = "Przejdź do zakładki Krypto → Wpisz symbol i uruchom pełną analizę."
+        detail = "Kliknij przycisk pod panelem — MarketScope uruchomi pełną analizę tutaj."
     elif "ETF" in str(klass).upper() or upper in {"SPY", "QQQ", "VOO", "VTI", "IWM", "GLD", "IAU"}:
         label = "ETF-y / Spółki"
-        detail = "Jeśli instrument jest w katalogu ETF, użyj ETF-y; w innym wypadku Spółki → Wpisz symbol."
+        detail = "Kliknij przycisk pod panelem — MarketScope uruchomi pełną analizę tutaj."
     return label, detail
 
 
@@ -1365,7 +1365,7 @@ def build_setup_drilldown(row: pd.Series, bullish_labels: set[str]) -> dict:
     elif mode == "ML":
         headline = f"{symbol} ma policzony ML, ale bez wzrostowego potwierdzenia."
         body = (
-            f"Model został uruchomiony, lecz ocena nie przeszła progów Candidate/ML. "
+            f"Model został uruchomiony, lecz ocena nie uzyskała wzrostowego potwierdzenia ML. "
             f"Teza radaru: {thesis}. Najrozsądniej traktować to jako obserwację, nie sygnał."
         )
     else:
@@ -1428,6 +1428,20 @@ def render_setup_cockpit(frame: pd.DataFrame, bullish_labels: set[str]) -> None:
         "</div>",
         unsafe_allow_html=True,
     )
+    symbol = signal_brief_value(row, "Symbol")
+    button_key = f"radar_full_analysis_{str(symbol).replace('.', '_').replace('-', '_')}"
+    if st.button(f"Uruchom pełną analizę: {symbol}", type="primary", key=button_key, use_container_width=True):
+        try:
+            with st.spinner(f"Pobieram dane i liczę pełny model dla {symbol}…"):
+                result = cached_analysis(symbol, (1, 5, 20, 60), years)
+                profile = cached_profile(symbol)
+            st.session_state["radar_full_analysis"] = {"result": result, "profile": profile, "years": years}
+        except Exception as exc:
+            st.error(f"Nie udało się uruchomić pełnej analizy dla {symbol}: {exc}")
+    saved = st.session_state.get("radar_full_analysis")
+    if saved and saved["result"]["symbol"] == symbol and saved.get("years") == years:
+        st.caption("Pełna analiza uruchomiona z radaru — bez przepisywania tickera.")
+        render_analysis(saved["result"], saved["profile"])
 
 
 def render_start_dashboard(
@@ -2587,7 +2601,7 @@ def render_signal_dashboard() -> None:
             .drop_duplicates("Symbol")
             .head(5)
         )
-        render_setup_cockpit(priority if not priority.empty else base, bullish_labels)
+        render_setup_cockpit(base, bullish_labels)
         hot_pool = base.copy()
         return_columns = [column for column in ["Zwrot 1d", "Zwrot 5d", "Zwrot 20d"] if column in hot_pool.columns]
         hot_pool["_hot_move"] = hot_pool[return_columns].abs().max(axis=1).fillna(0.0) if return_columns else 0.0
