@@ -24,6 +24,7 @@ from market_oracle.journal import (
     journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results,
 )
 from market_oracle.monitor import default_universe, load_snapshot, snapshot_is_stale
+from market_oracle.presentation import build_analysis_report
 from market_oracle.search import search_assets
 from market_oracle.signals import DEFAULT_SIGNAL_THRESHOLD
 
@@ -682,6 +683,134 @@ st.markdown("""
         font-size: .81rem;
         line-height: 1.34;
     }
+    .analysis-report {
+        display: grid;
+        grid-template-columns: minmax(0, 1.08fr) minmax(360px, .92fr);
+        gap: 16px;
+        margin: 14px 0 22px;
+    }
+    .analysis-main, .analysis-side, .analysis-horizons {
+        border-radius: 20px;
+        border: 1px solid rgba(56, 189, 248, .18);
+        background:
+            radial-gradient(circle at 0% 0%, rgba(14, 165, 233, .10), transparent 18rem),
+            linear-gradient(150deg, rgba(15, 23, 42, .84), rgba(5, 10, 23, .78));
+        box-shadow: 0 18px 42px rgba(0,0,0,.20), inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    .analysis-main {
+        padding: 20px;
+    }
+    .analysis-main small, .analysis-side small, .analysis-horizons small {
+        display:block;
+        color: #93c5fd;
+        font-size: .70rem;
+        font-weight: 950;
+        letter-spacing: .11em;
+        text-transform: uppercase;
+    }
+    .analysis-main h3 {
+        margin: 9px 0 11px;
+        color: #f8fafc;
+        font-size: clamp(1.45rem, 2.25vw, 2.25rem);
+        line-height: 1.05;
+        letter-spacing: -.052em;
+    }
+    .analysis-main p {
+        margin: 0;
+        color: #aab7d5;
+        font-size: .98rem;
+        line-height: 1.56;
+    }
+    .analysis-note {
+        margin-top: 14px;
+        padding: 12px 13px;
+        border-radius: 14px;
+        border: 1px solid rgba(251, 191, 36, .20);
+        background: rgba(251, 191, 36, .07);
+        color: #fde68a;
+        font-size: .88rem;
+        line-height: 1.42;
+    }
+    .analysis-side {
+        padding: 14px;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+    }
+    .analysis-card {
+        padding: 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(148, 163, 184, .14);
+        background: rgba(8, 13, 28, .76);
+    }
+    .analysis-card strong {
+        display:block;
+        margin-top: 5px;
+        color: #f8fafc;
+        font-size: 1.02rem;
+        line-height: 1.22;
+    }
+    .analysis-card span {
+        display:block;
+        margin-top: 4px;
+        color: #97a7c7;
+        font-size: .81rem;
+        line-height: 1.34;
+    }
+    .analysis-lists {
+        display:grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+        margin: 12px 0 18px;
+    }
+    .analysis-list {
+        padding: 16px;
+        border-radius: 17px;
+        border: 1px solid rgba(148, 163, 184, .14);
+        background: rgba(15, 23, 42, .48);
+    }
+    .analysis-list h4 {
+        margin: 0 0 10px;
+        color: #f8fafc;
+        font-size: 1.02rem;
+        letter-spacing: -.02em;
+    }
+    .analysis-list ul {
+        margin: 0;
+        padding-left: 1.1rem;
+        color: #aab7d5;
+        line-height: 1.48;
+        font-size: .90rem;
+    }
+    .analysis-list li {margin: 0 0 7px;}
+    .analysis-horizons {
+        padding: 14px;
+        margin: 10px 0 20px;
+    }
+    .analysis-horizon-grid {
+        display:grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 10px;
+    }
+    .analysis-horizon-card {
+        padding: 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(148, 163, 184, .14);
+        background: rgba(8, 13, 28, .74);
+    }
+    .analysis-horizon-card strong {
+        display:block;
+        color: #f8fafc;
+        margin: 5px 0 2px;
+        font-size: 1.05rem;
+    }
+    .analysis-horizon-card span {
+        display:block;
+        color: #97a7c7;
+        font-size: .80rem;
+        line-height: 1.32;
+    }
     .position-strip {
         display:grid;
         grid-template-columns: minmax(0, 1.2fr) repeat(4, minmax(0, .7fr));
@@ -738,11 +867,14 @@ st.markdown("""
         .daily-brief {grid-template-columns: 1fr;}
         .signal-brief {grid-template-columns: 1fr;}
         .setup-cockpit {grid-template-columns: 1fr;}
+        .analysis-report {grid-template-columns: 1fr;}
+        .analysis-horizon-grid {grid-template-columns: repeat(2, minmax(0, 1fr));}
         .position-strip {grid-template-columns: repeat(2, minmax(0, 1fr));}
         .next-actions {grid-template-columns: 1fr;}
     }
     @media (max-width: 700px) {
         .dashboard-grid, .proof-grid, .position-strip {grid-template-columns: 1fr;}
+        .analysis-side, .analysis-lists, .analysis-horizon-grid {grid-template-columns: 1fr;}
     }
 
     div[data-testid="stTabs"] [role="tablist"] {
@@ -1391,7 +1523,7 @@ def build_setup_drilldown(row: pd.Series, bullish_labels: set[str]) -> dict:
     }
 
 
-def render_setup_cockpit(frame: pd.DataFrame, bullish_labels: set[str]) -> None:
+def render_setup_cockpit(frame: pd.DataFrame, bullish_labels: set[str], snapshot: dict | None = None) -> None:
     if frame.empty or "Symbol" not in frame:
         return
     sort_columns = [column for column in ["Deep score", "Setup score", "Radar score", "Edge score"] if column in frame.columns]
@@ -1399,14 +1531,29 @@ def render_setup_cockpit(frame: pd.DataFrame, bullish_labels: set[str]) -> None:
     if sort_columns:
         work = work.sort_values(sort_columns, ascending=False)
     work = work.drop_duplicates("Symbol").head(20).reset_index(drop=True)
-    options = {
-        f"{row['Symbol']} · {signal_brief_horizon(row.get('Horyzont'))} · {row.get('Tryb analizy', '—')} · {row.get('Akcja radaru', '—')}": idx
-        for idx, row in work.iterrows()
+    previous_symbol = st.session_state.get("radar_setup_focus_symbol")
+    if previous_symbol and previous_symbol not in set(work["Symbol"].astype(str)):
+        previous_rows = frame[frame["Symbol"].astype(str).eq(str(previous_symbol))].copy()
+        if not previous_rows.empty:
+            if sort_columns:
+                previous_rows = previous_rows.sort_values(sort_columns, ascending=False)
+            work = pd.concat([previous_rows.head(1), work], ignore_index=True).drop_duplicates("Symbol").reset_index(drop=True)
+    labels = {
+        str(row["Symbol"]): f"{row['Symbol']} · {signal_brief_horizon(row.get('Horyzont'))} · {row.get('Tryb analizy', '—')} · {row.get('Akcja radaru', '—')}"
+        for _, row in work.iterrows()
     }
+    options = list(labels.keys())
     if not options:
         return
-    selected = st.selectbox("Rozłóż setup na czynniki", list(options), key="radar_setup_focus")
-    row = work.iloc[options[selected]]
+    if st.session_state.get("radar_setup_focus_symbol") not in options:
+        st.session_state["radar_setup_focus_symbol"] = options[0]
+    selected = st.selectbox(
+        "Rozłóż setup na czynniki",
+        options,
+        format_func=lambda value: labels.get(str(value), str(value)),
+        key="radar_setup_focus_symbol",
+    )
+    row = work[work["Symbol"].astype(str).eq(str(selected))].iloc[0]
     drilldown = build_setup_drilldown(row, bullish_labels)
     cards = "".join(
         '<div class="setup-tile">'
@@ -1435,13 +1582,19 @@ def render_setup_cockpit(frame: pd.DataFrame, bullish_labels: set[str]) -> None:
             with st.spinner(f"Pobieram dane i liczę pełny model dla {symbol}…"):
                 result = cached_analysis(symbol, (1, 5, 20, 60), years)
                 profile = cached_profile(symbol)
-            st.session_state["radar_full_analysis"] = {"result": result, "profile": profile, "years": years}
+            st.session_state["radar_full_analysis"] = {
+                "result": result,
+                "profile": profile,
+                "years": years,
+                "source_context": {"radar_updated_at": (snapshot or {}).get("updated_at")},
+            }
         except Exception as exc:
             st.error(f"Nie udało się uruchomić pełnej analizy dla {symbol}: {exc}")
     saved = st.session_state.get("radar_full_analysis")
     if saved and saved["result"]["symbol"] == symbol and saved.get("years") == years:
         st.caption("Pełna analiza uruchomiona z radaru — bez przepisywania tickera.")
-        render_analysis(saved["result"], saved["profile"])
+        source_context = saved.get("source_context") or {"radar_updated_at": (snapshot or {}).get("updated_at")}
+        render_analysis(saved["result"], saved["profile"], source_context)
 
 
 def render_start_dashboard(
@@ -1707,12 +1860,64 @@ def render_profile(profile: dict) -> None:
         column.metric(label, value)
 
 
-def render_analysis(result: dict, profile: dict) -> None:
+def render_analysis_report(result: dict, profile: dict, source_context: dict | None = None) -> None:
+    report = build_analysis_report(result, profile, source_context)
+    cards = "".join(
+        '<div class="analysis-card">'
+        f"<small>{clean_text(label)}</small>"
+        f"<strong>{clean_text(value)}</strong>"
+        f"<span>{clean_text(detail)}</span>"
+        "</div>"
+        for label, value, detail in report["cards"]
+    )
+    evidence = "".join(f"<li>{clean_text(item)}</li>" for item in report["evidence"])
+    counterpoints = "".join(f"<li>{clean_text(item)}</li>" for item in report["counterpoints"])
+    horizons = "".join(
+        '<div class="analysis-horizon-card">'
+        f"<small>{clean_text(row['label'])}</small>"
+        f"<strong>{clean_text(row['probability'])}</strong>"
+        f"<span>oczekiwany ruch {clean_text(row['expected'])}</span>"
+        f"<span>AUC {clean_text(row['auc'])} · Brier {clean_text(row['brier'])} · {clean_text(row['quality'])}</span>"
+        "</div>"
+        for row in report["horizon_cards"]
+    )
+    freshness = report["freshness"]
+    st.markdown(
+        '<div class="analysis-report">'
+        '<div class="analysis-main">'
+        '<small>Wniosek w 10 sekund</small>'
+        f"<h3>{clean_text(report['headline'])}</h3>"
+        f"<p>{clean_text(report['body'])}</p>"
+        '<div class="analysis-note">'
+        f"🕒 Radar z: {clean_text(freshness['radar'])} · pełna analiza na danych do: {clean_text(freshness['analysis'])} · benchmark: {clean_text(freshness['benchmark'])}. "
+        f"{clean_text(freshness['note'])}"
+        '</div>'
+        '</div>'
+        f'<div class="analysis-side">{cards}</div>'
+        '</div>'
+        '<div class="analysis-lists">'
+        '<div class="analysis-list"><h4>Co wspiera tezę?</h4><ul>'
+        f"{evidence}"
+        '</ul></div>'
+        '<div class="analysis-list"><h4>Co może pójść źle?</h4><ul>'
+        f"{counterpoints}"
+        '</ul></div>'
+        '</div>'
+        '<div class="analysis-horizons">'
+        '<small>Mapa horyzontów</small>'
+        f'<div class="analysis-horizon-grid">{horizons}</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_analysis(result: dict, profile: dict, source_context: dict | None = None) -> None:
     symbol = result["symbol"]
     st.divider()
     title_col, date_col = st.columns([3, 1])
     title_col.subheader(f"{profile_name(profile, symbol)} · {symbol}")
     date_col.caption(f"Dane do {result['last_date'].date()} · benchmark: {result['benchmark']}")
+    render_analysis_report(result, profile, source_context)
 
     technical = result["technical"]
     view = aggregate_model_view(result)
@@ -2601,7 +2806,7 @@ def render_signal_dashboard() -> None:
             .drop_duplicates("Symbol")
             .head(5)
         )
-        render_setup_cockpit(base, bullish_labels)
+        render_setup_cockpit(base, bullish_labels, snapshot)
         hot_pool = base.copy()
         return_columns = [column for column in ["Zwrot 1d", "Zwrot 5d", "Zwrot 20d"] if column in hot_pool.columns]
         hot_pool["_hot_move"] = hot_pool[return_columns].abs().max(axis=1).fillna(0.0) if return_columns else 0.0

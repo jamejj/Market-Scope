@@ -44,6 +44,7 @@ import market_oracle.auto_forward as auto_forward_module
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast, fit_forecast_state
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
+from market_oracle.presentation import build_analysis_report
 from market_oracle.risk import periods_per_year, risk_metrics
 from market_oracle.reality import RealityConfig, reality_check_report, select_non_overlapping_trades
 from market_oracle.signals import (
@@ -1610,3 +1611,48 @@ def test_forward_automation_launchd_status_uses_gui_domain_and_detects_privacy_b
     assert status["last_exit_code"] == "1"
     assert status["privacy_block_detected"] is True
     assert "Full Disk Access" in status["privacy_hint"]
+
+
+def test_analysis_report_separates_radar_and_full_analysis_dates():
+    result = {
+        "symbol": "LPP.WA",
+        "last_date": pd.Timestamp("2026-08-07"),
+        "benchmark": "ETFBW20TR.WA",
+        "technical": {
+            "return_1d": 0.01,
+            "return_5d": 0.04,
+            "return_20d": 0.08,
+            "rsi_14": 61.0,
+            "above_sma_50": True,
+            "above_sma_200": True,
+        },
+        "risk": {"max_drawdown": -0.22},
+        "forecasts": {
+            5: {
+                "probability_up": 0.51,
+                "expected_return": 0.002,
+                "lower_return": -0.03,
+                "upper_return": 0.04,
+                "auc": 0.51,
+                "brier": 0.25,
+                "quality": "NISKA — BRAK PRZEWAGI",
+            },
+            20: {
+                "probability_up": 0.635,
+                "expected_return": 0.029,
+                "lower_return": -0.05,
+                "upper_return": 0.12,
+                "auc": 0.64,
+                "brier": 0.22,
+                "quality": "WYSOKA",
+            },
+        },
+    }
+    report = build_analysis_report(result, {}, {"radar_updated_at": "2026-08-05T07:13:00+02:00"})
+
+    assert "20 sesji" in report["headline"]
+    assert report["freshness"]["radar"] == "2026-08-05 07:13"
+    assert report["freshness"]["analysis"] == "2026-08-07"
+    assert "Candidate v1" not in report["headline"]
+    assert "Candidate v1" not in report["body"]
+    assert any("Dolny zakres 90%" in item for item in report["counterpoints"])
