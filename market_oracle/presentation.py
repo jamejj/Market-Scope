@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .signals import DEFAULT_SIGNAL_THRESHOLD, SignalInputs, SignalVerdict, signal_verdict
+
 
 def _finite_float(value: Any) -> float | None:
     try:
@@ -20,6 +22,11 @@ def _pct(value: Any) -> str:
 def _signed_pct(value: Any) -> str:
     number = _finite_float(value)
     return "—" if number is None else f"{number:+.1%}"
+
+
+def _decimal(value: Any) -> str:
+    number = _finite_float(value)
+    return "—" if number is None else f"{number:.3f}"
 
 
 def _horizon_label(horizon: int, crypto: bool) -> str:
@@ -43,46 +50,89 @@ def _forecast_items(forecasts: dict[Any, dict]) -> list[tuple[int, dict]]:
     return sorted(items, key=lambda item: item[0])
 
 
-def _is_confirmed(forecast: dict) -> bool:
-    return not str(forecast.get("quality") or "").startswith("NISKA")
+def _forecast_inputs(forecast: dict) -> SignalInputs:
+    probability = _finite_float(forecast.get("probability_up"))
+    expected_return = _finite_float(forecast.get("expected_return"))
+    return SignalInputs(
+        probability=0.5 if probability is None else probability,
+        expected_return=0.0 if expected_return is None else expected_return,
+        quality=str(forecast.get("quality") or "NISKA — BRAK PRZEWAGI"),
+        auc=_finite_float(forecast.get("auc")),
+        brier=_finite_float(forecast.get("brier")),
+        source="FULL_ANALYSIS",
+    )
+
+
+def _forecast_verdict(forecast: dict) -> SignalVerdict:
+    return signal_verdict(_forecast_inputs(forecast), threshold=DEFAULT_SIGNAL_THRESHOLD)
+
+
+def _quality_rank(quality: str) -> int:
+    if quality == "WYSOKA":
+        return 3
+    if quality == "UMIARKOWANA":
+        return 2
+    if quality and not quality.startswith("NISKA"):
+        return 1
+    return 0
+
+
+def _verdict_rank(verdict: SignalVerdict) -> int:
+    if verdict.decision != 0:
+        return 3
+    if verdict.reason == "EXPECTED_RETURN_CONFLICT":
+        return 1
+    if verdict.reason == "LOW_QUALITY":
+        return 0
+    return 2
 
 
 def _primary_forecast(forecasts: dict[Any, dict]) -> tuple[int, dict]:
     items = _forecast_items(forecasts)
     if not items:
         raise ValueError("Brak prognoz do zbudowania raportu analizy.")
-    confirmed = [(horizon, forecast) for horizon, forecast in items if _is_confirmed(forecast)]
-    if confirmed:
-        return max(
-            confirmed,
-            key=lambda item: (
-                str(item[1].get("quality") or "") == "WYSOKA",
-                abs(float(item[1].get("probability_up") or 0.5) - 0.5),
-                item[0],
-            ),
-        )
     preferred = {20: 4, 5: 3, 60: 2, 1: 1}
-    return max(items, key=lambda item: (preferred.get(item[0], 0), abs(float(item[1].get("probability_up") or 0.5) - 0.5)))
+    return max(
+        items,
+        key=lambda item: (
+            _verdict_rank(_forecast_verdict(item[1])),
+            _quality_rank(str(item[1].get("quality") or "")),
+            abs((_finite_float(item[1].get("probability_up")) or 0.5) - 0.5),
+            abs(_finite_float(item[1].get("expected_return")) or 0.0),
+            preferred.get(item[0], 0),
+        ),
+    )
 
 
-def _direction(probability: float, quality: str) -> tuple[str, str]:
-    if quality.startswith("NISKA"):
+def _reason_label(reason: str) -> str:
+    labels = {
+        "LONG_CONFIRMED": "wzrost potwierdzony przez wspólną bramkę",
+        "SHORT_CONFIRMED": "spadek potwierdzony przez wspólną bramkę",
+        "LOW_QUALITY": "niska jakość walidacji",
+        "EXPECTED_RETURN_CONFLICT": "konflikt P(wzrost) z oczekiwanym ruchem",
+        "EXPECTED_RETURN_TOO_SMALL": "oczekiwany ruch za mały",
+        "PROBABILITY_INSIDE_BAND": "prawdopodobieństwo wewnątrz pasma obserwacji",
+    }
+    return labels.get(reason, reason.replace("_", " ").lower())
+
+
+def _direction(verdict: SignalVerdict) -> tuple[str, str]:
+    reason = _reason_label(verdict.reason)
+    if verdict.decision == 1:
+        return "Potwierdzony kandydat wzrostowy", f"Wspólna bramka MarketScope zwraca LONG: {reason}."
+    if verdict.decision == -1:
+        return "Potwierdzone ryzyko spadku", f"Wspólna bramka MarketScope zwraca SHORT: {reason}."
+    if verdict.reason == "LOW_QUALITY":
         return "Brak potwierdzonej przewagi", "Model został celowo ściągnięty w stronę 50%, bo walidacja nie pokazała stabilnej przewagi."
-    if probability >= 0.62:
-        return "Silny kandydat wzrostowy", "Prawdopodobieństwo i jakość modelu wspierają kierunek wzrostowy."
-    if probability >= 0.54:
-        return "Kandydat wzrostowy", "Kierunek jest dodatni, ale nadal wymaga kontroli ryzyka i kontekstu wykresu."
-    if probability <= 0.38:
-        return "Silne ryzyko spadku", "Model wskazuje podwyższone ryzyko kierunku spadkowego."
-    if probability <= 0.46:
-        return "Ryzyko spadku", "Kierunek jest negatywny, ale decyzja nadal zależy od kontekstu i ryzyka."
-    return "Obserwuj", "Model jest blisko neutralnego 50/50; większe znaczenie ma trend, momentum i ryzyko."
+    return "Obserwuj", f"Wspólna bramka MarketScope nie potwierdza wejścia: {reason}."
 
 
 def _trend_label(technical: dict) -> str:
+    return_20d = _finite_float(technical.get("return_20d"))
+    rsi_14 = _finite_float(technical.get("rsi_14"))
     points = sum([
-        bool((technical.get("return_20d") or 0) > 0),
-        bool((technical.get("rsi_14") or 0) >= 50),
+        bool(return_20d is not None and return_20d > 0),
+        bool(rsi_14 is not None and rsi_14 >= 50),
         bool(technical.get("above_sma_50")),
         bool(technical.get("above_sma_200")),
     ])
@@ -100,6 +150,18 @@ def _freshness_value(value: Any) -> str:
     return text[:16]
 
 
+def _radar_freshness(source_context: dict) -> tuple[str, str | None]:
+    updated = _freshness_value(source_context.get("radar_updated_at"))
+    if updated != "—":
+        return updated, None
+    if source_context.get("radar_status") == "running":
+        started = _freshness_value(source_context.get("radar_started_at"))
+        if started != "—":
+            return f"skan w toku od {started}", "Pełna analiza została uruchomiona w trakcie odświeżania radaru; wartości mogą różnić się od ostatniego kompletnego snapshotu."
+        return "skan w toku", "Pełna analiza została uruchomiona w trakcie odświeżania radaru; timestamp startu nie jest dostępny."
+    return "snapshot niedostępny", "Raport uruchomiono poza zapisanym kompletnym snapshotem radaru albo snapshot nie ma timestampu."
+
+
 def build_analysis_report(result: dict, profile: dict | None = None, source_context: dict | None = None) -> dict:
     """Human-readable report layer for full instrument analysis.
 
@@ -113,8 +175,9 @@ def build_analysis_report(result: dict, profile: dict | None = None, source_cont
     forecasts = result.get("forecasts") or {}
     horizon, forecast = _primary_forecast(forecasts)
     quality = str(forecast.get("quality") or "—")
-    probability = float(forecast.get("probability_up") or 0.5)
-    direction, direction_detail = _direction(probability, quality)
+    probability = _finite_float(forecast.get("probability_up"))
+    verdict = _forecast_verdict(forecast)
+    direction, direction_detail = _direction(verdict)
     technical = result.get("technical") or {}
     risk = result.get("risk") or {}
     trend = _trend_label(technical)
@@ -125,19 +188,30 @@ def build_analysis_report(result: dict, profile: dict | None = None, source_cont
     auc = _finite_float(forecast.get("auc"))
     brier = _finite_float(forecast.get("brier"))
 
-    headline = f"{symbol}: {direction.lower()} na horyzoncie {horizon_text}."
-    if quality.startswith("NISKA"):
+    if verdict.decision == 1:
+        headline = f"{symbol}: potwierdzony kandydat wzrostowy na horyzoncie {horizon_text}."
+    elif verdict.decision == -1:
+        headline = f"{symbol}: potwierdzone ryzyko spadku na horyzoncie {horizon_text}."
+    elif verdict.reason == "LOW_QUALITY":
         headline = f"{symbol}: brak potwierdzonej przewagi modelu — obserwuj, nie zakładaj edge."
+    else:
+        headline = f"{symbol}: obserwuj — bramka MarketScope nie potwierdza wejścia na horyzoncie {horizon_text}."
+
+    rsi = _finite_float(technical.get("rsi_14"))
+    rsi_text = "—" if rsi is None else f"{rsi:.1f}"
 
     evidence = [
         f"Horyzont roboczy raportu: {horizon_text}; jakość walidacji: {quality}.",
         f"P(wzrost) { _pct(probability) }, oczekiwany ruch {expected}, zakres 90%: {lower} – {upper}.",
-        f"Technicznie: {trend}; zwrot 20 sesji/dni { _signed_pct(technical.get('return_20d')) }, RSI 14: {(_finite_float(technical.get('rsi_14')) or 0):.1f}.",
+        f"Decyzja bramki: {verdict.label} — {_reason_label(verdict.reason)}.",
+        f"Technicznie: {trend}; zwrot 20 sesji/dni { _signed_pct(technical.get('return_20d')) }, RSI 14: {rsi_text}.",
     ]
     if auc is not None and brier is not None:
         evidence.append(f"Walidacja: AUC {auc:.3f}, Brier {brier:.3f}; to mówi o jakości kierunku i kalibracji, nie o gwarancji zysku.")
 
     counterpoints: list[str] = []
+    if verdict.decision == 0 and not quality.startswith("NISKA"):
+        counterpoints.append(f"Wspólna bramka MarketScope zwraca OBSERWUJ ({_reason_label(verdict.reason)}), więc raport nie promuje wejścia mimo pojedynczych mocnych metryk.")
     if quality.startswith("NISKA"):
         counterpoints.append("Model sam oznacza jakość jako niską — brak przewagi jest ważniejszy niż pojedynczy ładny ruch ceny.")
     if _finite_float(forecast.get("lower_return")) is not None and float(forecast.get("lower_return")) < 0:
@@ -167,19 +241,22 @@ def build_analysis_report(result: dict, profile: dict | None = None, source_cont
             "probability": _pct(f.get("probability_up")),
             "expected": _signed_pct(f.get("expected_return")),
             "quality": str(f.get("quality") or "—"),
-            "auc": f"{float(f.get('auc') or 0.5):.3f}",
-            "brier": f"{float(f.get('brier') or 0.25):.3f}",
+            "auc": _decimal(f.get("auc")),
+            "brier": _decimal(f.get("brier")),
         })
 
     full_data_as_of = result.get("last_date")
     if hasattr(full_data_as_of, "date"):
         full_data_as_of = str(full_data_as_of.date())
+    radar_freshness, radar_note = _radar_freshness(source_context)
     freshness = {
-        "radar": _freshness_value(source_context.get("radar_updated_at")),
+        "radar": radar_freshness,
         "analysis": _freshness_value(full_data_as_of),
         "benchmark": str(result.get("benchmark") or "—"),
     }
-    if freshness["radar"] != "—" and freshness["analysis"] != "—" and not freshness["radar"].startswith(freshness["analysis"]):
+    if radar_note:
+        freshness["note"] = radar_note
+    elif freshness["radar"] != "snapshot niedostępny" and freshness["analysis"] != "—" and not freshness["radar"].startswith(freshness["analysis"]):
         freshness["note"] = "Radar i pełna analiza mogą mieć minimalnie różne wartości, bo pełna analiza liczy aktualnie dostępne dane."
     else:
         freshness["note"] = "Radar i raport są spójne datowo albo raport został uruchomiony ręcznie poza snapshotem radaru."

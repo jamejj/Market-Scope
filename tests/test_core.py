@@ -1656,3 +1656,63 @@ def test_analysis_report_separates_radar_and_full_analysis_dates():
     assert "Candidate v1" not in report["headline"]
     assert "Candidate v1" not in report["body"]
     assert any("Dolny zakres 90%" in item for item in report["counterpoints"])
+
+
+def test_analysis_report_uses_shared_verdict_for_expected_return_conflict():
+    result = {
+        "symbol": "TEST",
+        "last_date": pd.Timestamp("2026-08-07"),
+        "benchmark": "^GSPC",
+        "technical": {
+            "return_1d": 0.01,
+            "return_5d": 0.03,
+            "return_20d": 0.10,
+            "rsi_14": 62.0,
+            "above_sma_50": True,
+            "above_sma_200": True,
+        },
+        "risk": {"max_drawdown": -0.18},
+        "forecasts": {
+            20: {
+                "probability_up": 0.63,
+                "expected_return": -0.01,
+                "lower_return": -0.06,
+                "upper_return": 0.08,
+                "auc": 0.66,
+                "brier": 0.21,
+                "quality": "WYSOKA",
+            }
+        },
+    }
+    report = build_analysis_report(result, {}, {"radar_updated_at": "2026-08-05T07:13:00+02:00"})
+
+    assert "obserwuj" in report["headline"].lower()
+    assert "kandydat wzrostowy" not in report["headline"].lower()
+    assert report["cards"][0][1] == "Obserwuj"
+    assert any("konflikt" in item.lower() for item in report["evidence"] + report["counterpoints"])
+
+
+def test_analysis_report_describes_running_radar_snapshot_without_dash():
+    result = {
+        "symbol": "TEST",
+        "last_date": pd.Timestamp("2026-08-07"),
+        "benchmark": "^GSPC",
+        "technical": {"above_sma_50": True, "above_sma_200": True},
+        "risk": {},
+        "forecasts": {
+            20: {
+                "probability_up": 0.57,
+                "expected_return": 0.02,
+                "quality": "UMIARKOWANA",
+            }
+        },
+    }
+    report = build_analysis_report(
+        result,
+        {},
+        {"radar_status": "running", "radar_started_at": "2026-08-08T20:05:12+02:00"},
+    )
+
+    assert report["freshness"]["radar"] == "skan w toku od 2026-08-08 20:05"
+    assert report["freshness"]["radar"] != "—"
+    assert "trakcie odświeżania" in report["freshness"]["note"]

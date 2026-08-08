@@ -1526,6 +1526,11 @@ def build_setup_drilldown(row: pd.Series, bullish_labels: set[str]) -> dict:
 def render_setup_cockpit(frame: pd.DataFrame, bullish_labels: set[str], snapshot: dict | None = None) -> None:
     if frame.empty or "Symbol" not in frame:
         return
+    radar_context = {
+        "radar_updated_at": (snapshot or {}).get("updated_at"),
+        "radar_started_at": (snapshot or {}).get("started_at"),
+        "radar_status": (snapshot or {}).get("status"),
+    }
     sort_columns = [column for column in ["Deep score", "Setup score", "Radar score", "Edge score"] if column in frame.columns]
     work = frame.copy()
     if sort_columns:
@@ -1586,14 +1591,14 @@ def render_setup_cockpit(frame: pd.DataFrame, bullish_labels: set[str], snapshot
                 "result": result,
                 "profile": profile,
                 "years": years,
-                "source_context": {"radar_updated_at": (snapshot or {}).get("updated_at")},
+                "source_context": radar_context,
             }
         except Exception as exc:
             st.error(f"Nie udało się uruchomić pełnej analizy dla {symbol}: {exc}")
     saved = st.session_state.get("radar_full_analysis")
     if saved and saved["result"]["symbol"] == symbol and saved.get("years") == years:
         st.caption("Pełna analiza uruchomiona z radaru — bez przepisywania tickera.")
-        source_context = saved.get("source_context") or {"radar_updated_at": (snapshot or {}).get("updated_at")}
+        source_context = saved.get("source_context") or radar_context
         render_analysis(saved["result"], saved["profile"], source_context)
 
 
