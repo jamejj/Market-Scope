@@ -1759,15 +1759,29 @@ def test_start_guidance_empty_state_has_safe_cards():
 
 def test_start_guidance_running_scan_warns_about_partial_data():
     guidance = build_start_guidance(
-        snapshot={"status": "running", "started_at": "2026-08-08T20:05:12+02:00", "records": []},
+        snapshot={
+            "status": "running",
+            "started_at": "2026-08-08T20:05:12+02:00",
+            "records": [],
+            "universe_total": 163,
+            "fast_completed": 163,
+            "completed": 165,
+            "total": 199,
+        },
         cockpit={},
         automation={},
         proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+        universe_size=163,
     )
 
     assert guidance["freshness"] == "skan w toku od 2026-08-08 20:05"
     assert "częściow" in guidance["warning"]
     assert guidance["cards"][0]["id"] == "radar_running"
+    assert "aktualizowany" in guidance["cards"][0]["title"]
+    assert "mieli" not in guidance["cards"][0]["title"]
+    assert "FAST 163/163" in guidance["cards"][0]["body"]
+    assert "Deep ML" in guidance["cards"][0]["body"]
+    assert "199 instrument" not in guidance["cards"][0]["body"]
 
 
 def test_start_guidance_prioritizes_proof_problem():

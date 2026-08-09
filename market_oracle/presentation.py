@@ -155,6 +155,44 @@ def _freshness_value(value: Any) -> str:
     return text[:16]
 
 
+def _int_value(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(number, 0)
+
+
+def _scan_stage_text(snapshot: dict, universe_size: int = 0) -> tuple[str, str]:
+    """Human label for the two-step radar without changing scan logic."""
+    universe_total = _int_value(snapshot.get("universe_total") or universe_size)
+    fast_completed = _int_value(snapshot.get("fast_completed"))
+    if not fast_completed and snapshot.get("status") == "complete" and universe_total:
+        fast_completed = universe_total
+    completed = _int_value(snapshot.get("completed"))
+    total = _int_value(snapshot.get("total"))
+    ml_completed = _int_value(snapshot.get("ml_completed"))
+    ml_total = _int_value(snapshot.get("ml_total"))
+    fast = f"FAST {fast_completed}/{universe_total}" if universe_total else "FAST —"
+    if str(snapshot.get("status") or "") == "running":
+        if universe_total and fast_completed >= universe_total:
+            headline = f"{fast} · Deep ML w toku"
+        else:
+            headline = f"{fast} · skan w toku"
+    elif str(snapshot.get("status") or "") == "complete":
+        headline = f"{fast} · radar gotowy"
+    else:
+        headline = f"{fast} · status {snapshot.get('status') or 'offline'}"
+
+    if ml_total:
+        detail = f"Deep ML: {ml_completed}/{ml_total} kandydatów"
+    elif total:
+        detail = f"Pełny workflow: {completed}/{total} kroków"
+    else:
+        detail = "Dwustopniowy radar FAST → Deep ML"
+    return headline, detail
+
+
 def _radar_freshness(source_context: dict) -> tuple[str, str | None]:
     updated = _freshness_value(source_context.get("radar_updated_at"))
     if updated != "—":
@@ -451,14 +489,15 @@ def build_start_guidance(
         ))
 
     if status == "running":
+        stage_headline, stage_detail = _scan_stage_text(snapshot, universe_size)
         warning = "Radar jest w trakcie odświeżania — guidance może mieszać gotowe wiersze z częściowym skanem."
         add(_card(
             card_id="radar_running",
             priority=95,
-            title="Radar właśnie mieli rynek — traktuj wyniki jako częściowe.",
-            body=f"Skan rozpoczął się {started}. Poczekaj na kompletne ML enrichment, jeśli chcesz pełny obraz.",
+            title="Radar jest właśnie aktualizowany — traktuj wyniki jako częściowe.",
+            body=f"{stage_headline}. {stage_detail}. Skan rozpoczął się {started}; poczekaj na kompletne ML enrichment, jeśli chcesz pełny obraz.",
             source="Radar",
-            status="skan w toku",
+            status=stage_headline,
             cta="Pokaż bieżący snapshot",
             action="show_radar_snapshot",
             tone="warn",
@@ -571,13 +610,14 @@ def build_start_guidance(
         ))
 
     if records:
+        stage_headline, stage_detail = _scan_stage_text(snapshot, universe_size)
         add(_card(
             card_id="radar_overview",
             priority=30,
             title="Przejrzyj dzisiejszy radar po filtrach FAST/ML.",
-            body=f"Snapshot zawiera {len(records)} wierszy z universe około {universe_size or snapshot.get('total') or '—'} instrumentów. Użyj go jako mapy pracy, nie listy transakcji.",
+            body=f"Snapshot zawiera {len(records)} wierszy/horyzontów dla universe {universe_size or snapshot.get('universe_total') or '—'} instrumentów. {stage_detail}. Użyj go jako mapy pracy, nie listy transakcji.",
             source="Radar",
-            status=f"świeżość: {radar_freshness}",
+            status=f"{stage_headline} · świeżość: {radar_freshness}",
             cta="Pokaż top snapshotu",
             action="show_radar_snapshot",
             tone="neutral",

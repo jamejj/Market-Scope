@@ -1413,6 +1413,61 @@ def signal_scan_contract(frame: pd.DataFrame, snapshot: dict) -> dict:
     }
 
 
+def scan_stage_summary(snapshot: dict, universe_size: int = 0) -> dict:
+    """Presentation-only summary of FAST vs full scan progress."""
+
+    def to_int(value, default: int = 0) -> int:
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return default
+
+    snapshot = snapshot or {}
+    status = str(snapshot.get("status") or "offline")
+    universe_total = to_int(snapshot.get("universe_total") or universe_size)
+    fast_completed = to_int(snapshot.get("fast_completed"))
+    if not fast_completed and status == "complete" and universe_total:
+        fast_completed = universe_total
+    completed = to_int(snapshot.get("completed"))
+    total = to_int(snapshot.get("total"))
+    ml_completed = to_int(snapshot.get("ml_completed"))
+    ml_total = to_int(snapshot.get("ml_total"))
+
+    fast_label = f"FAST {fast_completed}/{universe_total}" if universe_total else "FAST —"
+    if status == "running" and universe_total and fast_completed >= universe_total:
+        top_status = "Deep ML trwa"
+        primary = fast_label
+        detail = "Deep ML w toku"
+    elif status == "running":
+        top_status = "Skan trwa"
+        primary = fast_label
+        detail = "FAST / Deep ML w toku"
+    elif status == "complete":
+        top_status = "Gotowy"
+        primary = fast_label
+        detail = "Radar gotowy"
+    else:
+        top_status = "Offline" if status == "offline" else status
+        primary = fast_label
+        detail = f"Status radaru: {status}"
+
+    if ml_total:
+        progress = f"Deep ML {ml_completed}/{ml_total} kandydatów"
+    elif total:
+        progress = f"pełny workflow {completed}/{total} kroków"
+    else:
+        progress = "dwustopniowy radar FAST → Deep ML"
+    return {
+        "top_status": top_status,
+        "primary": primary,
+        "detail": detail,
+        "progress": progress,
+        "status": status,
+        "fast_completed": fast_completed,
+        "universe_total": universe_total,
+    }
+
+
 def with_signal_display_columns(frame: pd.DataFrame) -> pd.DataFrame:
     output = frame.copy()
     if output.empty:
@@ -1854,6 +1909,7 @@ def render_start_dashboard(
     last_auto = stored.get("automation_status") or "—"
     launchd_text = "aktywny" if launchd.get("loaded") else "nieaktywny"
     launchd_exit = launchd.get("last_exit_code") if launchd.get("last_exit_code") is not None else "—"
+    scan_stage = scan_stage_summary(snapshot, universe_size)
 
     st.markdown(f"""
     <div class="command-hero">
@@ -1916,7 +1972,7 @@ def render_start_dashboard(
         <div class="dashboard-card"><small>Portfel testowy</small><h3>{clean_text(open_positions)}/{clean_text(slots)}</h3><p>Aktywne pozycje forward; wolne sloty: {clean_text(free_slots)}.</p></div>
         <div class="dashboard-card"><small>Ostatni sygnał</small><h3>{clean_text(latest_signal)}</h3><p>Najnowszy dzień, w którym system coś zauważył.</p></div>
         <div class="dashboard-card"><small>Instrumenty</small><h3>{clean_text(universe_size)}</h3><p>Szeroki radar MarketScope: akcje, ETF-y i krypto.</p></div>
-        <div class="dashboard-card"><small>Skan rynku</small><h3>{clean_text(snapshot.get('completed', 0))}/{clean_text(snapshot.get('total', universe_size))}</h3><p>Ostatni zapisany status radaru: {clean_text(snapshot.get('status', 'offline'))}.</p></div>
+        <div class="dashboard-card"><small>Postęp radaru</small><h3>{clean_text(scan_stage['primary'])}</h3><p>{clean_text(scan_stage['detail'])} · {clean_text(scan_stage['progress'])}.</p></div>
         <div class="dashboard-card"><small>Dni z sygnałem</small><h3>{clean_text(signal_days)}</h3><p>Dni forward, w których pojawiła się co najmniej jedna obserwacja.</p></div>
         <div class="dashboard-card"><small>Dziennik</small><h3>{clean_text(journal.get('total', 0))}</h3><p>Osobny paper-performance historycznych sygnałów poza Candidate v1.</p></div>
     </div>
@@ -3168,9 +3224,10 @@ _hero_proof = proof_state(_hero_forward, _hero_automation, _hero_forward_error, 
 _hero_portfolio = (_hero_forward or {}).get("portfolio") or {}
 _hero_coverage = (_hero_forward or {}).get("coverage") or {}
 _hero_auto_launchd = (_hero_automation or {}).get("launchd") or {}
-_hero_status = "Skan trwa" if _hero_snapshot.get("status") == "running" else ("Gotowy" if _hero_snapshot.get("status") == "complete" else "Offline")
-_hero_completed = _hero_snapshot.get("fast_completed", _hero_snapshot.get("completed", 0))
-_hero_total = _hero_snapshot.get("universe_total", _hero_snapshot.get("total", _hero_universe))
+_hero_scan_stage = scan_stage_summary(_hero_snapshot, _hero_universe)
+_hero_status = _hero_scan_stage["top_status"]
+_hero_completed = _hero_scan_stage["fast_completed"]
+_hero_total = _hero_scan_stage["universe_total"]
 _hero_forward_coverage = (
     f"{_hero_coverage.get('completed', 0)}/{_hero_coverage.get('requested', 0)}"
     if _hero_coverage.get("requested")
