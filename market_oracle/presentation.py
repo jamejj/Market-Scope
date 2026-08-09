@@ -92,12 +92,17 @@ def _primary_forecast(forecasts: dict[Any, dict]) -> tuple[int, dict]:
     if not items:
         raise ValueError("Brak prognoz do zbudowania raportu analizy.")
     preferred = {20: 4, 5: 3, 60: 2, 1: 1}
+
+    def probability_distance(forecast: dict) -> float:
+        probability = _finite_float(forecast.get("probability_up"))
+        return abs((0.5 if probability is None else probability) - 0.5)
+
     return max(
         items,
         key=lambda item: (
             _verdict_rank(_forecast_verdict(item[1])),
             _quality_rank(str(item[1].get("quality") or "")),
-            abs((_finite_float(item[1].get("probability_up")) or 0.5) - 0.5),
+            probability_distance(item[1]),
             abs(_finite_float(item[1].get("expected_return")) or 0.0),
             preferred.get(item[0], 0),
         ),
@@ -272,4 +277,348 @@ def build_analysis_report(result: dict, profile: dict | None = None, source_cont
         "counterpoints": counterpoints,
         "horizon_cards": horizon_cards,
         "freshness": freshness,
+    }
+
+
+def _as_list(value: Any) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _row_text(row: dict, key: str, default: str = "—") -> str:
+    value = row.get(key)
+    if value is None or value == "":
+        return default
+    return str(value)
+
+
+def _row_number(row: dict, key: str) -> float | None:
+    return _finite_float(row.get(key))
+
+
+def _row_decimal(row: dict, key: str, digits: int = 2) -> str:
+    number = _row_number(row, key)
+    if number is None:
+        return _row_text(row, key)
+    return f"{number:,.{digits}f}"
+
+
+def _horizon_short(row: dict) -> str:
+    horizon = _row_number(row, "Horyzont")
+    if horizon is None:
+        return "—"
+    return f"{int(horizon)}d"
+
+
+def _row_signal_verdict(row: dict) -> SignalVerdict:
+    probability = _row_number(row, "P(wzrost)")
+    expected = _row_number(row, "Oczekiwany ruch")
+    return signal_verdict(
+        SignalInputs(
+            probability=0.5 if probability is None else probability,
+            expected_return=0.0 if expected is None else expected,
+            quality=_row_text(row, "Jakość modelu", "NISKA — BRAK PRZEWAGI"),
+            auc=_row_number(row, "AUC walidacji"),
+            brier=_row_number(row, "Brier"),
+            source="START_GUIDANCE",
+        ),
+        threshold=DEFAULT_SIGNAL_THRESHOLD,
+    )
+
+
+def _row_score(row: dict) -> tuple:
+    score_keys = ["Deep score", "Setup score", "Radar score", "Edge score", "Score"]
+    scores = tuple(_row_number(row, key) or 0.0 for key in score_keys)
+    probability = _row_number(row, "P(wzrost)")
+    expected = _row_number(row, "Oczekiwany ruch")
+    return (*scores, abs((0.5 if probability is None else probability) - 0.5), abs(expected or 0.0))
+
+
+def _best_row(rows: list[dict]) -> dict | None:
+    return max(rows, key=_row_score) if rows else None
+
+
+def _risk_rows(records: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for row in records:
+        action = _row_text(row, "Akcja radaru", "").upper()
+        grade = _row_text(row, "Setup grade", "").upper()
+        thesis = _row_text(row, "Teza radaru", "").upper()
+        if "RYZYKO" in action or "UNIKAJ" in action or grade.startswith("R") or "WYSOKIE RYZYKO" in thesis:
+            rows.append(row)
+    return rows
+
+
+def _confirmed_ml_rows(records: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for row in records:
+        if _row_text(row, "Tryb analizy") != "ML":
+            continue
+        if _row_signal_verdict(row).decision != 0:
+            rows.append(row)
+    return rows
+
+
+def _fast_rows(records: list[dict]) -> list[dict]:
+    allowed_actions = {"FAST SHORTLIST", "MOMENTUM DO SPRAWDZENIA", "WATCHLIST", "PRIORYTET DO ANALIZY"}
+    rows: list[dict] = []
+    for row in records:
+        action = _row_text(row, "Akcja radaru")
+        if _row_text(row, "Tryb analizy") == "FAST" and action in allowed_actions:
+            rows.append(row)
+    return rows
+
+
+def _card(
+    *,
+    card_id: str,
+    priority: int,
+    title: str,
+    body: str,
+    source: str,
+    status: str,
+    cta: str,
+    action: str,
+    symbol: str | None = None,
+    tone: str = "info",
+    meta: dict | None = None,
+) -> dict:
+    return {
+        "id": card_id,
+        "priority": priority,
+        "title": title,
+        "body": body,
+        "source": source,
+        "status": status,
+        "cta": cta,
+        "action": action,
+        "symbol": symbol,
+        "tone": tone,
+        "meta": meta or {},
+    }
+
+
+def build_start_guidance(
+    *,
+    snapshot: dict | None,
+    cockpit: dict | None,
+    automation: dict | None,
+    proof_state: dict | None,
+    journal: dict | None = None,
+    universe_size: int = 0,
+    radar_stale: bool = False,
+    max_cards: int = 5,
+) -> dict:
+    """Build a short home-screen action plan from existing MarketScope state.
+
+    This is a presentation layer only: it does not change models, thresholds,
+    Candidate v1, the forward ledger or scan artifacts. Cards tell the user what
+    to inspect inside MarketScope, not what to buy or sell.
+    """
+    snapshot = snapshot or {}
+    cockpit = cockpit or {}
+    automation = automation or {}
+    proof_state = proof_state or {}
+    records = [row for row in _as_list(snapshot.get("records")) if isinstance(row, dict)]
+    status = str(snapshot.get("status") or "offline")
+    updated = _freshness_value(snapshot.get("updated_at"))
+    started = _freshness_value(snapshot.get("started_at"))
+    radar_freshness = updated if updated != "—" else (f"skan w toku od {started}" if status == "running" and started != "—" else "brak kompletnego snapshotu")
+    warning = None
+    cards: list[dict] = []
+    used_symbols: set[str] = set()
+
+    def add(card: dict) -> None:
+        symbol = card.get("symbol")
+        if symbol and symbol in used_symbols:
+            return
+        if symbol:
+            used_symbols.add(symbol)
+        cards.append(card)
+
+    proof_label = str(proof_state.get("label") or "—")
+    proof_detail = str(proof_state.get("detail") or "")
+    if proof_state.get("klass") in {"bad", "warn"}:
+        add(_card(
+            card_id="proof_attention",
+            priority=100,
+            title="Sprawdź proof flow — system wymaga uwagi.",
+            body=proof_detail or "Forward ledger albo automatyzacja zgłaszają problem diagnostyczny.",
+            source="Proof / Forward",
+            status=proof_label,
+            cta="Pokaż szczegóły proof",
+            action="show_forward_details",
+            tone="danger" if proof_state.get("klass") == "bad" else "warn",
+        ))
+
+    if status == "running":
+        warning = "Radar jest w trakcie odświeżania — guidance może mieszać gotowe wiersze z częściowym skanem."
+        add(_card(
+            card_id="radar_running",
+            priority=95,
+            title="Radar właśnie mieli rynek — traktuj wyniki jako częściowe.",
+            body=f"Skan rozpoczął się {started}. Poczekaj na kompletne ML enrichment, jeśli chcesz pełny obraz.",
+            source="Radar",
+            status="skan w toku",
+            cta="Pokaż bieżący snapshot",
+            action="show_radar_snapshot",
+            tone="warn",
+        ))
+    elif radar_stale:
+        warning = "Ostatni radar jest stary albo niepełny — karty służą tylko jako orientacyjna lista pracy."
+        add(_card(
+            card_id="radar_stale",
+            priority=92,
+            title="Odśwież radar przed głębszą interpretacją rynku.",
+            body=f"Ostatni kompletny snapshot: {updated}. MarketScope może już mieć świeższe ceny niż zapisany ranking.",
+            source="Radar",
+            status="snapshot wymaga odświeżenia",
+            cta="Pokaż status radaru",
+            action="show_radar_snapshot",
+            tone="warn",
+        ))
+    elif status not in {"complete", "running"}:
+        warning = "Brakuje kompletnego snapshotu radaru — guidance ogranicza się do forward proof i statusu operacyjnego."
+
+    risk_leader = _best_row(_risk_rows(records))
+    if risk_leader:
+        symbol = _row_text(risk_leader, "Symbol")
+        add(_card(
+            card_id="risk_alert",
+            priority=90,
+            title=f"Przejrzyj ryzyko: {symbol} ma alert radaru.",
+            body=f"{_row_text(risk_leader, 'Teza radaru')}. Horyzont {_horizon_short(risk_leader)}, ruch/impet {_signed_pct(risk_leader.get('Oczekiwany ruch'))}.",
+            source="Radar FAST/ML",
+            status=_row_text(risk_leader, "Akcja radaru"),
+            cta=f"Uruchom pełną analizę: {symbol}",
+            action="full_analysis",
+            symbol=symbol,
+            tone="danger",
+            meta={"horizon": _horizon_short(risk_leader)},
+        ))
+
+    ml_leader = _best_row(_confirmed_ml_rows(records))
+    if ml_leader:
+        symbol = _row_text(ml_leader, "Symbol")
+        verdict = _row_signal_verdict(ml_leader)
+        add(_card(
+            card_id="ml_candidate",
+            priority=80,
+            title=f"Przeanalizuj {symbol}: ML ma potwierdzony setup {_horizon_short(ml_leader)}.",
+            body=(
+                f"Bramka zwraca {verdict.label}; P(wzrost) {_pct(ml_leader.get('P(wzrost)'))}, "
+                f"oczekiwany ruch {_signed_pct(ml_leader.get('Oczekiwany ruch'))}. To kandydat do analizy, nie polecenie transakcji."
+            ),
+            source="Deep ML",
+            status=_row_text(ml_leader, "Jakość modelu"),
+            cta=f"Uruchom pełną analizę: {symbol}",
+            action="full_analysis",
+            symbol=symbol,
+            tone="success",
+            meta={"horizon": _horizon_short(ml_leader)},
+        ))
+
+    open_positions = _as_list(cockpit.get("open_positions"))
+    if open_positions:
+        position = open_positions[0]
+        symbol = _row_text(position, "Symbol")
+        add(_card(
+            card_id="forward_position",
+            priority=70,
+            title=f"Monitoruj aktywną hipotezę forward: {symbol}.",
+            body=(
+                f"Pozycja testowa jest otwarta od {_row_text(position, 'Data wejścia')} po {_row_decimal(position, 'Cena wejścia')}. "
+                f"Do planowego rozliczenia zostało około {_row_text(position, 'Sesje do wyjścia')} sesji."
+            ),
+            source="Forward proof",
+            status=f"portfel {((cockpit.get('portfolio') or {}).get('open', 0))}/{((cockpit.get('portfolio') or {}).get('slots', 5))}",
+            cta="Pokaż szczegóły Forward",
+            action="show_forward_details",
+            symbol=symbol,
+            tone="info",
+        ))
+
+    fast_leader = _best_row(_fast_rows(records))
+    if fast_leader:
+        symbol = _row_text(fast_leader, "Symbol")
+        add(_card(
+            card_id="fast_setup",
+            priority=60,
+            title=f"Zobacz, dlaczego {symbol} trafił na shortlistę FAST.",
+            body=(
+                f"{_row_text(fast_leader, 'Akcja radaru')} na horyzoncie {_horizon_short(fast_leader)}. "
+                f"Teza: {_row_text(fast_leader, 'Teza radaru')}. FAST pomaga ustawić kolejność pracy, ale nie jest potwierdzeniem ML."
+            ),
+            source="FAST Radar",
+            status="bez potwierdzenia ML",
+            cta=f"Uruchom pełną analizę: {symbol}",
+            action="full_analysis",
+            symbol=symbol,
+            tone="neutral",
+            meta={"horizon": _horizon_short(fast_leader)},
+        ))
+
+    if not open_positions:
+        add(_card(
+            card_id="forward_empty",
+            priority=40,
+            title="Forward proof nie ma teraz otwartej pozycji.",
+            body="To poprawny stan selektywnego systemu: czasem najlepszą decyzją badawczą jest brak nowej ekspozycji.",
+            source="Forward proof",
+            status=proof_label,
+            cta="Pokaż Forward",
+            action="show_forward_details",
+            tone="info",
+        ))
+
+    if records:
+        add(_card(
+            card_id="radar_overview",
+            priority=30,
+            title="Przejrzyj dzisiejszy radar po filtrach FAST/ML.",
+            body=f"Snapshot zawiera {len(records)} wierszy z universe około {universe_size or snapshot.get('total') or '—'} instrumentów. Użyj go jako mapy pracy, nie listy transakcji.",
+            source="Radar",
+            status=f"świeżość: {radar_freshness}",
+            cta="Pokaż top snapshotu",
+            action="show_radar_snapshot",
+            tone="neutral",
+        ))
+    else:
+        add(_card(
+            card_id="radar_empty",
+            priority=30,
+            title="Radar nie ma jeszcze danych do prowadzenia użytkownika.",
+            body="Uruchom albo poczekaj na skan. Na razie Start pokazuje głównie status proof flow i automatu.",
+            source="Radar",
+            status=status,
+            cta="Pokaż status radaru",
+            action="show_radar_snapshot",
+            tone="warn",
+        ))
+
+    cards = sorted(cards, key=lambda card: card["priority"], reverse=True)[:max_cards]
+    if len(cards) < 3:
+        cards.append(_card(
+            card_id="methodology_guardrail",
+            priority=10,
+            title="Czytaj guidance jako plan pracy w aplikacji.",
+            body="MarketScope wskazuje, co sprawdzić i dlaczego. Nie zastępuje decyzji inwestora ani kontroli ryzyka.",
+            source="Metodologia",
+            status="research only",
+            cta="Pokaż zasady interpretacji",
+            action="show_methodology_hint",
+            tone="info",
+        ))
+
+    return {
+        "title": "Co dziś warto zrobić w MarketScope?",
+        "subtitle": "Krótka lista pracy w aplikacji: co sprawdzić, dlaczego to ważne i z jakiego źródła pochodzi sygnał.",
+        "freshness": radar_freshness,
+        "warning": warning,
+        "cards": cards[:max_cards],
+        "stats": {
+            "cards": len(cards[:max_cards]),
+            "radar_records": len(records),
+            "journal_total": (journal or {}).get("total"),
+            "proof": proof_label,
+        },
     }

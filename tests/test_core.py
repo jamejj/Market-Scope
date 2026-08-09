@@ -44,7 +44,7 @@ import market_oracle.auto_forward as auto_forward_module
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast, fit_forecast_state
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
-from market_oracle.presentation import build_analysis_report
+from market_oracle.presentation import build_analysis_report, build_start_guidance
 from market_oracle.risk import periods_per_year, risk_metrics
 from market_oracle.reality import RealityConfig, reality_check_report, select_non_overlapping_trades
 from market_oracle.signals import (
@@ -1716,3 +1716,138 @@ def test_analysis_report_describes_running_radar_snapshot_without_dash():
     assert report["freshness"]["radar"] == "skan w toku od 2026-08-08 20:05"
     assert report["freshness"]["radar"] != "—"
     assert "trakcie odświeżania" in report["freshness"]["note"]
+
+
+def guidance_row(symbol="XTB.WA", *, mode="ML", action="PRIORYTET DO ANALIZY", probability=0.63,
+                 expected_return=0.025, quality="WYSOKA", grade="B — watchlist",
+                 thesis="silne momentum · trend 50/200 wspiera ruch"):
+    return {
+        "Symbol": symbol,
+        "Klasa": "GPW" if symbol.endswith(".WA") else "USA / ETF",
+        "Tryb analizy": mode,
+        "Horyzont": 20,
+        "Akcja radaru": action,
+        "Setup grade": grade,
+        "Teza radaru": thesis,
+        "P(wzrost)": probability,
+        "Oczekiwany ruch": expected_return,
+        "Jakość modelu": quality,
+        "AUC walidacji": 0.64,
+        "Brier": 0.21,
+        "Deep score": 140,
+        "Setup score": 88,
+        "Radar score": 12,
+        "Edge score": 8,
+    }
+
+
+def test_start_guidance_empty_state_has_safe_cards():
+    guidance = build_start_guidance(
+        snapshot={},
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+        universe_size=163,
+    )
+
+    ids = [card["id"] for card in guidance["cards"]]
+    assert ids == ["forward_empty", "radar_empty", "methodology_guardrail"]
+    text = " ".join(card["title"] + " " + card["body"] for card in guidance["cards"]).lower()
+    assert "kup" not in text
+    assert "sprzedaj" not in text
+
+
+def test_start_guidance_running_scan_warns_about_partial_data():
+    guidance = build_start_guidance(
+        snapshot={"status": "running", "started_at": "2026-08-08T20:05:12+02:00", "records": []},
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+    )
+
+    assert guidance["freshness"] == "skan w toku od 2026-08-08 20:05"
+    assert "częściow" in guidance["warning"]
+    assert guidance["cards"][0]["id"] == "radar_running"
+
+
+def test_start_guidance_prioritizes_proof_problem():
+    guidance = build_start_guidance(
+        snapshot={"status": "complete", "updated_at": "2026-08-08T07:13:00+02:00", "records": [guidance_row()]},
+        cockpit={},
+        automation={},
+        proof_state={"label": "Wymaga uwagi", "klass": "bad", "detail": "hash snapshotu nie pasuje"},
+    )
+
+    assert guidance["cards"][0]["id"] == "proof_attention"
+    assert guidance["cards"][0]["action"] == "show_forward_details"
+    assert "hash snapshotu" in guidance["cards"][0]["body"]
+
+
+def test_start_guidance_deduplicates_forward_and_ml_symbol():
+    cockpit = {
+        "open_positions": [{"Symbol": "SPY", "Data wejścia": "2026-07-21", "Cena wejścia": 746.29, "Sesje do wyjścia": 10}],
+        "portfolio": {"open": 1, "slots": 5},
+    }
+    guidance = build_start_guidance(
+        snapshot={"status": "complete", "updated_at": "2026-08-08T07:13:00+02:00", "records": [guidance_row("SPY")]},
+        cockpit=cockpit,
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+    )
+
+    spy_cards = [card for card in guidance["cards"] if card.get("symbol") == "SPY"]
+    assert len(spy_cards) == 1
+    assert spy_cards[0]["id"] == "ml_candidate"
+    assert spy_cards[0]["action"] == "full_analysis"
+
+
+def test_start_guidance_fast_only_is_not_ml_confirmation():
+    guidance = build_start_guidance(
+        snapshot={
+            "status": "complete",
+            "updated_at": "2026-08-08T07:13:00+02:00",
+            "records": [guidance_row("LPP.WA", mode="FAST", action="FAST SHORTLIST", probability=None, quality="FAST — BEZ ML")],
+        },
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+    )
+
+    fast = next(card for card in guidance["cards"] if card["id"] == "fast_setup")
+    assert fast["source"] == "FAST Radar"
+    assert fast["status"] == "bez potwierdzenia ML"
+    assert "nie jest potwierdzeniem ML" in fast["body"]
+
+
+def test_start_guidance_risk_alert_wins_before_ml_candidate():
+    risk = guidance_row(
+        "DEXE-USD",
+        mode="FAST",
+        action="RYZYKO / UNIKAJ",
+        expected_return=-0.18,
+        quality="FAST — BEZ ML",
+        grade="R — ryzyko dominuje",
+        thesis="ML bez przewagi · wysokie ryzyko/zmienność",
+    )
+    guidance = build_start_guidance(
+        snapshot={"status": "complete", "updated_at": "2026-08-08T07:13:00+02:00", "records": [guidance_row("XTB.WA"), risk]},
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+    )
+
+    assert guidance["cards"][0]["id"] == "risk_alert"
+    assert guidance["cards"][0]["symbol"] == "DEXE-USD"
+
+
+def test_start_guidance_stale_snapshot_warns():
+    guidance = build_start_guidance(
+        snapshot={"status": "complete", "updated_at": "2026-08-01T07:13:00+02:00", "records": [guidance_row()]},
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+        radar_stale=True,
+    )
+
+    assert guidance["warning"]
+    assert guidance["cards"][0]["id"] == "radar_stale"

@@ -24,7 +24,7 @@ from market_oracle.journal import (
     journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results,
 )
 from market_oracle.monitor import default_universe, load_snapshot, snapshot_is_stale
-from market_oracle.presentation import build_analysis_report
+from market_oracle.presentation import build_analysis_report, build_start_guidance
 from market_oracle.search import search_assets
 from market_oracle.signals import DEFAULT_SIGNAL_THRESHOLD
 
@@ -517,6 +517,119 @@ st.markdown("""
         font-size: .82rem;
         line-height: 1.35;
     }
+    .guidance-shell {
+        margin: 18px 0 24px;
+        padding: 18px;
+        border-radius: 22px;
+        border: 1px solid rgba(56, 189, 248, .18);
+        background:
+            radial-gradient(circle at 0% 0%, rgba(56, 189, 248, .10), transparent 21rem),
+            radial-gradient(circle at 100% 12%, rgba(99, 102, 241, .09), transparent 18rem),
+            linear-gradient(150deg, rgba(15, 23, 42, .82), rgba(5, 10, 23, .76));
+        box-shadow: 0 20px 54px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    .guidance-head {
+        display:flex;
+        justify-content:space-between;
+        gap: 18px;
+        align-items:flex-start;
+        margin-bottom: 14px;
+    }
+    .guidance-head small,
+    .guidance-card small {
+        display:block;
+        color: #93c5fd;
+        font-size: .70rem;
+        font-weight: 950;
+        letter-spacing: .11em;
+        text-transform: uppercase;
+    }
+    .guidance-head h3 {
+        margin: 6px 0 4px;
+        font-size: clamp(1.35rem, 2vw, 2.05rem);
+        line-height: 1.08;
+    }
+    .guidance-head p {
+        margin: 0;
+        max-width: 760px;
+        color: #aab7d5;
+        line-height: 1.5;
+    }
+    .guidance-freshness {
+        flex: 0 0 auto;
+        padding: 9px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, .16);
+        background: rgba(15, 23, 42, .58);
+        color: #cbd5e1;
+        font-size: .80rem;
+        font-weight: 850;
+        white-space: nowrap;
+    }
+    .guidance-warning {
+        margin: 0 0 14px;
+        padding: 11px 13px;
+        border-radius: 14px;
+        border: 1px solid rgba(251, 191, 36, .22);
+        background: rgba(251, 191, 36, .07);
+        color: #fde68a;
+        font-size: .88rem;
+        line-height: 1.42;
+    }
+    .guidance-grid {
+        display:grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+    }
+    .guidance-card {
+        min-height: 205px;
+        display:flex;
+        flex-direction:column;
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid rgba(148, 163, 184, .15);
+        background: linear-gradient(150deg, rgba(11, 18, 34, .94), rgba(7, 12, 28, .82));
+        box-shadow: 0 16px 40px rgba(0,0,0,.19), inset 0 1px 0 rgba(255,255,255,.035);
+    }
+    .guidance-card.success {border-color: rgba(34, 197, 94, .24); background: radial-gradient(circle at 100% 0%, rgba(34,197,94,.10), transparent 13rem), linear-gradient(150deg, rgba(11,18,34,.94), rgba(7,12,28,.82));}
+    .guidance-card.warn {border-color: rgba(251, 191, 36, .25); background: radial-gradient(circle at 100% 0%, rgba(251,191,36,.10), transparent 13rem), linear-gradient(150deg, rgba(11,18,34,.94), rgba(7,12,28,.82));}
+    .guidance-card.danger {border-color: rgba(251, 113, 133, .25); background: radial-gradient(circle at 100% 0%, rgba(251,113,133,.12), transparent 13rem), linear-gradient(150deg, rgba(11,18,34,.94), rgba(7,12,28,.82));}
+    .guidance-card.neutral {border-color: rgba(99, 102, 241, .22);}
+    .guidance-card h4 {
+        margin: 9px 0 8px;
+        color: #f8fafc;
+        font-size: 1.05rem;
+        line-height: 1.18;
+        letter-spacing: -.035em;
+    }
+    .guidance-card p {
+        margin: 0;
+        color: #aab7d5;
+        font-size: .88rem;
+        line-height: 1.45;
+    }
+    .guidance-meta {
+        display:flex;
+        flex-wrap:wrap;
+        gap: 7px;
+        margin-top: auto;
+        padding-top: 14px;
+    }
+    .guidance-pill {
+        display:inline-flex;
+        align-items:center;
+        max-width: 100%;
+        padding: 6px 9px;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, .14);
+        background: rgba(15, 23, 42, .54);
+        color: #cbd5e1;
+        font-size: .72rem;
+        font-weight: 850;
+        overflow:hidden;
+        text-overflow:ellipsis;
+        white-space:nowrap;
+    }
     .signal-brief {
         display: grid;
         grid-template-columns: minmax(0, 1.1fr) minmax(360px, .9fr);
@@ -865,6 +978,9 @@ st.markdown("""
         .command-hero {grid-template-columns: 1fr;}
         .dashboard-grid {grid-template-columns: repeat(2, minmax(0, 1fr));}
         .daily-brief {grid-template-columns: 1fr;}
+        .guidance-head {display:block;}
+        .guidance-freshness {display:inline-flex; margin-top: 10px;}
+        .guidance-grid {grid-template-columns: repeat(2, minmax(0, 1fr));}
         .signal-brief {grid-template-columns: 1fr;}
         .setup-cockpit {grid-template-columns: 1fr;}
         .analysis-report {grid-template-columns: 1fr;}
@@ -873,7 +989,7 @@ st.markdown("""
         .next-actions {grid-template-columns: 1fr;}
     }
     @media (max-width: 700px) {
-        .dashboard-grid, .proof-grid, .position-strip {grid-template-columns: 1fr;}
+        .dashboard-grid, .proof-grid, .position-strip, .guidance-grid {grid-template-columns: 1fr;}
         .analysis-side, .analysis-lists, .analysis-horizon-grid {grid-template-columns: 1fr;}
     }
 
@@ -1138,6 +1254,15 @@ def latest_observation(cockpit: dict | None) -> dict:
 def active_position(cockpit: dict | None) -> dict:
     positions = (cockpit or {}).get("open_positions") or []
     return positions[0] if positions else {}
+
+
+def snapshot_source_context(snapshot: dict | None) -> dict:
+    snapshot = snapshot or {}
+    return {
+        "radar_updated_at": snapshot.get("updated_at"),
+        "radar_started_at": snapshot.get("started_at"),
+        "radar_status": snapshot.get("status"),
+    }
 
 
 def build_daily_brief(cockpit: dict | None, automation: dict | None, state: dict) -> dict:
@@ -1526,11 +1651,7 @@ def build_setup_drilldown(row: pd.Series, bullish_labels: set[str]) -> dict:
 def render_setup_cockpit(frame: pd.DataFrame, bullish_labels: set[str], snapshot: dict | None = None) -> None:
     if frame.empty or "Symbol" not in frame:
         return
-    radar_context = {
-        "radar_updated_at": (snapshot or {}).get("updated_at"),
-        "radar_started_at": (snapshot or {}).get("started_at"),
-        "radar_status": (snapshot or {}).get("status"),
-    }
+    radar_context = snapshot_source_context(snapshot)
     sort_columns = [column for column in ["Deep score", "Setup score", "Radar score", "Edge score"] if column in frame.columns]
     work = frame.copy()
     if sort_columns:
@@ -1600,6 +1721,105 @@ def render_setup_cockpit(frame: pd.DataFrame, bullish_labels: set[str], snapshot
         st.caption("Pełna analiza uruchomiona z radaru — bez przepisywania tickera.")
         source_context = saved.get("source_context") or radar_context
         render_analysis(saved["result"], saved["profile"], source_context)
+
+
+def render_start_guidance(guidance: dict, snapshot: dict, cockpit: dict | None) -> None:
+    cards = guidance.get("cards") or []
+    warning_html = (
+        f'<div class="guidance-warning">⚠️ {clean_text(guidance.get("warning"))}</div>'
+        if guidance.get("warning")
+        else ""
+    )
+    st.markdown(
+        '<div class="guidance-shell">'
+        '<div class="guidance-head">'
+        '<div>'
+        '<small>MarketScope Guidance</small>'
+        f"<h3>{clean_text(guidance.get('title'))}</h3>"
+        f"<p>{clean_text(guidance.get('subtitle'))}</p>"
+        '</div>'
+        f'<div class="guidance-freshness">źródło: {clean_text(guidance.get("freshness"))}</div>'
+        '</div>'
+        f'{warning_html}'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    if not cards:
+        st.info("Brak kart guidance. MarketScope czeka na snapshot radaru albo forward proof.")
+        return
+
+    columns = st.columns(min(3, len(cards)))
+    for index, card in enumerate(cards):
+        column = columns[index % len(columns)]
+        with column:
+            tone = clean_text(card.get("tone") or "info")
+            st.markdown(
+                f'<div class="guidance-card {tone}">'
+                f"<small>{clean_text(card.get('source'))}</small>"
+                f"<h4>{clean_text(card.get('title'))}</h4>"
+                f"<p>{clean_text(card.get('body'))}</p>"
+                '<div class="guidance-meta">'
+                f"<span class=\"guidance-pill\">{clean_text(card.get('status'))}</span>"
+                + (f"<span class=\"guidance-pill\">{clean_text(card.get('symbol'))}</span>" if card.get("symbol") else "")
+                + "</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            action = card.get("action")
+            symbol = str(card.get("symbol") or "")
+            key_symbol = symbol.replace(".", "_").replace("-", "_") or str(index)
+            if st.button(card.get("cta") or "Pokaż", key=f"start_guidance_{card.get('id')}_{key_symbol}_{index}", use_container_width=True):
+                if action == "full_analysis" and symbol:
+                    try:
+                        with st.spinner(f"Pobieram dane i liczę pełną analizę dla {symbol}…"):
+                            result = cached_analysis(symbol, (1, 5, 20, 60), years)
+                            profile = cached_profile(symbol)
+                        st.session_state["start_guidance_panel"] = "analysis"
+                        st.session_state["start_guidance_analysis"] = {
+                            "result": result,
+                            "profile": profile,
+                            "years": years,
+                            "source_context": snapshot_source_context(snapshot),
+                        }
+                    except Exception as exc:
+                        st.error(f"Nie udało się uruchomić pełnej analizy dla {symbol}: {exc}")
+                else:
+                    st.session_state["start_guidance_panel"] = str(action or "none")
+
+    panel = st.session_state.get("start_guidance_panel")
+    saved = st.session_state.get("start_guidance_analysis")
+    if panel == "analysis" and saved and saved.get("years") == years:
+        st.caption("Pełna analiza uruchomiona z Guidance — bez przepisywania tickera.")
+        render_analysis(saved["result"], saved["profile"], saved.get("source_context") or snapshot_source_context(snapshot))
+    elif panel == "show_forward_details":
+        st.subheader("Szczegóły Forward z guidance")
+        open_rows = pd.DataFrame((cockpit or {}).get("open_positions") or [])
+        latest_rows = pd.DataFrame((cockpit or {}).get("latest_observations") or [])
+        if open_rows.empty and latest_rows.empty:
+            st.info("Forward proof nie ma teraz otwartych pozycji ani ostatnich obserwacji do pokazania.")
+        if not open_rows.empty:
+            st.caption("Aktywne pozycje testowe")
+            st.dataframe(open_rows, use_container_width=True, hide_index=True)
+        if not latest_rows.empty:
+            st.caption("Ostatnie decyzje proof flow")
+            st.dataframe(prepare_start_observations(latest_rows), use_container_width=True, hide_index=True)
+    elif panel == "show_radar_snapshot":
+        st.subheader("Top ostatniego snapshotu radaru")
+        records = pd.DataFrame((snapshot or {}).get("records") or [])
+        if records.empty:
+            st.info("Brak wierszy w snapshotcie radaru. Poczekaj na skan albo uruchom radar w zakładce Sygnały.")
+        else:
+            preferred = [
+                "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Akcja radaru", "Teza radaru",
+                "Ocena kierunku", "Ruch / impet", "Jakość modelu", "Deep score", "Setup score",
+            ]
+            present = [column for column in preferred if column in records.columns]
+            st.dataframe(records[present].head(10), use_container_width=True, hide_index=True)
+    elif panel == "show_methodology_hint":
+        st.info(
+            "Guidance wskazuje, co warto sprawdzić w MarketScope: Radar, Forward, pełną analizę instrumentu albo metodologię. "
+            "Nie jest rekomendacją kupna ani sprzedaży i nie zmienia żadnych progów modelu."
+        )
 
 
 def render_start_dashboard(
@@ -1678,27 +1898,16 @@ def render_start_dashboard(
     else:
         st.caption(f"✅ Proof flow zdrowy · {state['detail']}")
 
-    brief = build_daily_brief(cockpit, automation, state)
-    brief_rows = "".join(
-        '<div class="brief-row">'
-        f"<small>{clean_text(label)}</small>"
-        f"<strong>{clean_text(value)}</strong>"
-        f"<span>{clean_text(detail)}</span>"
-        "</div>"
-        for label, value, detail in brief["rows"]
+    guidance = build_start_guidance(
+        snapshot=snapshot,
+        cockpit=cockpit,
+        automation=automation,
+        proof_state=state,
+        journal=journal,
+        universe_size=universe_size,
+        radar_stale=snapshot_is_stale(snapshot, max_age_hours=30),
     )
-    st.markdown(
-        '<div class="daily-brief">'
-        '<div class="brief-main">'
-        "<small>Co dziś jest ważne?</small>"
-        f"<h3>{clean_text(brief['headline'])}</h3>"
-        f"<p>{clean_text(brief['body'])}</p>"
-        f"<div class=\"brief-risk\">⚠️ {clean_text(brief['risk'])}</div>"
-        "</div>"
-        f'<div class="brief-side">{brief_rows}</div>'
-        "</div>",
-        unsafe_allow_html=True,
-    )
+    render_start_guidance(guidance, snapshot, cockpit)
 
     st.markdown(f"""
     <div class="dashboard-grid">
@@ -1740,15 +1949,6 @@ def render_start_dashboard(
             use_container_width=True,
             hide_index=True,
         )
-
-    st.subheader("Co warto sprawdzić dalej?")
-    st.markdown("""
-    <div class="next-actions">
-        <div class="action-card"><strong>Forward</strong><span>Sprawdź pełną historię audytów, pozycji i decyzji Candidate v1.</span></div>
-        <div class="action-card"><strong>Sygnały</strong><span>Zobacz ranking setupów: hot movers, swing, trend i ryzyko spadku.</span></div>
-        <div class="action-card"><strong>Analiza instrumentu</strong><span>Wejdź w Spółki, ETF-y albo Krypto i zobacz pełną prognozę dla symbolu.</span></div>
-    </div>
-    """, unsafe_allow_html=True)
 
     with st.expander("Jak czytać prognozę?"):
         st.markdown("""
