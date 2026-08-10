@@ -61,6 +61,9 @@ from market_oracle.validation import (
     save_validation_artifacts,
     validation_report,
 )
+from market_oracle.watchlist import (
+    archive_watch_item, load_watchlist, upsert_watch_item, watch_item_from_analysis, watchlist_summary,
+)
 import market_oracle.validation as validation_module
 
 
@@ -671,6 +674,73 @@ def test_journal_summary_risk_metrics():
     assert summary["profit_factor"] == 3.0
     assert summary["payoff_ratio"] == 1.5
     assert summary["max_drawdown"] < 0
+
+
+def test_watchlist_upsert_deduplicates_active_symbol_horizon(tmp_path):
+    path = tmp_path / "watchlist.json"
+    item = {
+        "symbol": "xtb.wa",
+        "horizon": 20,
+        "source": "ML",
+        "verdict": "LONG_CONFIRMED",
+        "probability_up": 0.66,
+        "expected_return": 0.035,
+        "quality": "WYSOKA",
+    }
+
+    first, created = upsert_watch_item(item, path=path)
+    duplicate, created_again = upsert_watch_item({**item, "probability_up": 0.70}, path=path)
+
+    assert created is True
+    assert created_again is False
+    assert first["id"] == duplicate["id"]
+    assert first["symbol"] == "XTB.WA"
+    assert len(load_watchlist(path)) == 1
+    assert watchlist_summary(load_watchlist(path))["active"] == 1
+
+
+def test_watchlist_archive_allows_fresh_observation(tmp_path):
+    path = tmp_path / "watchlist.json"
+    first, _ = upsert_watch_item({"symbol": "SPY", "horizon": 20}, path=path)
+
+    assert archive_watch_item(first["id"], path=path, archived_at="2026-08-10T22:00:00+02:00") is True
+    second, created = upsert_watch_item({"symbol": "SPY", "horizon": 20}, path=path)
+
+    entries = load_watchlist(path)
+    assert created is True
+    assert first["id"] != second["id"]
+    assert watchlist_summary(entries) == {"total": 2, "active": 1, "archived": 1, "symbols": 1}
+
+
+def test_watchlist_item_from_analysis_preserves_seen_snapshot():
+    result = {
+        "symbol": "XTB.WA",
+        "last_date": pd.Timestamp("2026-08-07"),
+        "last_price": 168.0,
+        "benchmark": "ETFBW20TR.WA",
+        "forecasts": {
+            20: {"probability_up": 0.658, "expected_return": 0.035, "quality": "WYSOKA"},
+        },
+    }
+    report = {
+        "symbol": "XTB.WA",
+        "primary_horizon": 20,
+        "headline": "XTB.WA: potwierdzony kandydat wzrostowy na horyzoncie 20 sesji.",
+        "verdict": {"label": "LONG", "reason": "LONG_CONFIRMED", "decision": 1},
+        "evidence": ["Horyzont roboczy raportu: 20 sesji; jakość walidacji: WYSOKA."],
+        "counterpoints": ["RSI wysoko — możliwe przegrzanie."],
+        "freshness": {"radar": "2026-08-07 20:26", "analysis": "2026-08-07", "benchmark": "ETFBW20TR.WA"},
+    }
+
+    item = watch_item_from_analysis(result, report, {"radar_updated_at": "2026-08-07T20:26:00+02:00"})
+
+    assert item["symbol"] == "XTB.WA"
+    assert item["horizon"] == 20
+    assert item["verdict"] == "LONG_CONFIRMED"
+    assert item["probability_up"] == pytest.approx(0.658)
+    assert item["expected_return"] == pytest.approx(0.035)
+    assert item["risk_note"] == "RSI wysoko — możliwe przegrzanie."
+    assert item["data_as_of"] == "2026-08-07"
 
 
 def test_paper_portfolio_applies_sizing_and_costs():

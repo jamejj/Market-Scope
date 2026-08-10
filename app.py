@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from market_oracle.backtest import walk_forward_backtest
 from market_oracle.auto_forward import load_automation_status
@@ -27,6 +28,10 @@ from market_oracle.monitor import default_universe, load_snapshot, snapshot_is_s
 from market_oracle.presentation import build_analysis_report, build_start_guidance
 from market_oracle.search import search_assets
 from market_oracle.signals import DEFAULT_SIGNAL_THRESHOLD
+from market_oracle.watchlist import (
+    archive_watch_item, find_active_duplicate, load_watchlist, upsert_watch_item,
+    watch_item_from_analysis, watchlist_summary,
+)
 
 
 st.set_page_config(page_title="MarketScope PRO", page_icon="📈", layout="wide")
@@ -1769,13 +1774,23 @@ def render_setup_cockpit(frame: pd.DataFrame, bullish_labels: set[str], snapshot
                 "years": years,
                 "source_context": radar_context,
             }
+            st.toast(f"Pełna analiza {symbol} gotowa — pokazuję ją pod radarem.", icon="🔎")
+            st.rerun()
         except Exception as exc:
             st.error(f"Nie udało się uruchomić pełnej analizy dla {symbol}: {exc}")
+
+
+def render_radar_saved_analysis(snapshot: dict | None = None) -> None:
     saved = st.session_state.get("radar_full_analysis")
-    if saved and saved["result"]["symbol"] == symbol and saved.get("years") == years:
-        st.caption("Pełna analiza uruchomiona z radaru — bez przepisywania tickera.")
-        source_context = saved.get("source_context") or radar_context
-        render_analysis(saved["result"], saved["profile"], source_context)
+    if not saved or saved.get("years") != years:
+        return
+    symbol = saved.get("result", {}).get("symbol", "instrumentu")
+    st.markdown("### Pełna analiza z radaru")
+    st.caption(
+        f"Raport dla {symbol} jest pokazany poza auto-odświeżanym radarem, więc przyciski i Watchlista nie znikają podczas skanu w tle."
+    )
+    source_context = saved.get("source_context") or snapshot_source_context(snapshot)
+    render_analysis(saved["result"], saved["profile"], source_context)
 
 
 def render_start_guidance(guidance: dict, snapshot: dict, cockpit: dict | None) -> None:
@@ -2121,7 +2136,7 @@ def render_profile(profile: dict) -> None:
         column.metric(label, value)
 
 
-def render_analysis_report(result: dict, profile: dict, source_context: dict | None = None) -> None:
+def render_analysis_report(result: dict, profile: dict, source_context: dict | None = None) -> dict:
     report = build_analysis_report(result, profile, source_context)
     cards = "".join(
         '<div class="analysis-card">'
@@ -2170,6 +2185,185 @@ def render_analysis_report(result: dict, profile: dict, source_context: dict | N
         '</div>',
         unsafe_allow_html=True,
     )
+    return report
+
+
+def watch_age_days(item: dict) -> int | None:
+    created_at = item.get("created_at")
+    if not created_at:
+        return None
+    try:
+        created = pd.to_datetime(created_at, utc=True)
+        now = pd.Timestamp.now(tz="UTC")
+    except Exception:
+        return None
+    return max(int((now - created).days), 0)
+
+
+def watch_status_label(item: dict) -> str:
+    status = str(item.get("status") or "ACTIVE").upper()
+    if status == "ARCHIVED":
+        return "Zarchiwizowana"
+    age = watch_age_days(item)
+    try:
+        horizon = int(item.get("horizon") or 0)
+    except (TypeError, ValueError):
+        horizon = 0
+    if age is not None and horizon and age >= max(horizon, 1):
+        return "Do ponownej analizy"
+    return "Aktywna"
+
+
+def watchlist_dataframe(items: list[dict]) -> pd.DataFrame:
+    rows = []
+    for item in items:
+        rows.append({
+            "Symbol": item.get("symbol"),
+            "Status": watch_status_label(item),
+            "Horyzont": f"{item.get('horizon', '—')} sesji/dni",
+            "Źródło": item.get("source"),
+            "Dodano": short_datetime(item.get("created_at")),
+            "P(wzrost)": item.get("probability_up"),
+            "Oczekiwany ruch": item.get("expected_return"),
+            "Jakość": item.get("quality"),
+            "Teza z momentu dodania": item.get("thesis"),
+        })
+    return pd.DataFrame(rows)
+
+
+def render_watchlist_capture(result: dict, report: dict, source_context: dict | None = None) -> None:
+    item = watch_item_from_analysis(result, report, source_context, source="ML", origin="full_analysis")
+    existing = find_active_duplicate(load_watchlist(), item["symbol"], item["horizon"])
+    st.markdown("---")
+    st.subheader("Moje obserwacje")
+    st.caption("Zapisuje snapshot tezy z tego momentu. To nie jest część Candidate v1 ani forward ledgera.")
+    if existing:
+        st.info(
+            f"Już obserwujesz {item['symbol']} na horyzoncie {item['horizon']} sesji/dni. "
+            f"Dodano: {short_datetime(existing.get('created_at'))}."
+        )
+        return
+    if st.button(f"Dodaj do obserwowanych: {item['symbol']} · {item['horizon']}d", key=f"watch_add_{item['symbol']}_{item['horizon']}", use_container_width=True):
+        saved, created = upsert_watch_item(item)
+        if created:
+            st.toast(f"Dodano {saved['symbol']} do obserwowanych.", icon="✅")
+            st.session_state["watchlist_last_added"] = f"{saved['symbol']} · {saved['horizon']}d"
+            st.rerun()
+        else:
+            st.info(f"Ten setup jest już na watchliście od {short_datetime(saved.get('created_at'))}.")
+
+
+def render_watchlist() -> None:
+    st.header("Moje obserwacje")
+    st.write("Zapisuj instrumenty i setupy, które chcesz sprawdzić później. Watchlista pamięta, co system widział w dniu dodania, i nie miesza się z forward proof.")
+    st.caption("To prywatna lista pracy użytkownika: odkryj → zrozum → zapisz → wróć → porównaj. Nie jest rekomendacją transakcji.")
+    last_added = st.session_state.pop("watchlist_last_added", None)
+    if last_added:
+        st.success(f"Dodano do obserwowanych: {last_added}. Możesz teraz wrócić do tej tezy później i porównać, co się zmieniło.")
+
+    items = load_watchlist()
+    summary = watchlist_summary(items)
+    st.markdown(f"""
+    <div class="dashboard-grid">
+        <div class="dashboard-card"><small>Aktywne</small><h3>{clean_text(summary['active'])}</h3><p>Setupy do późniejszego sprawdzenia.</p></div>
+        <div class="dashboard-card"><small>Symbole</small><h3>{clean_text(summary['symbols'])}</h3><p>Unikalne instrumenty na aktywnej liście.</p></div>
+        <div class="dashboard-card"><small>Archiwum</small><h3>{clean_text(summary['archived'])}</h3><p>Zamknięte lub już nieistotne obserwacje.</p></div>
+        <div class="dashboard-card"><small>Zapis</small><h3>Lokalnie</h3><p>Plik data/watchlist.json jest prywatny i nie trafia do GitHuba.</p></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if not items:
+        st.markdown("""
+        <div class="analysis-report">
+            <div class="analysis-main">
+                <small>Pierwsza obserwacja</small>
+                <h3>Zapisz pomysł, do którego chcesz wrócić później.</h3>
+                <p>Nie musisz pamiętać tickerów ani przepisywać symboli. MarketScope zapisze tezę, horyzont, jakość modelu i powód dodania z tamtego momentu. Później porównasz, czy sytuacja się wzmocniła, osłabła albo wygasła.</p>
+                <div class="analysis-note">To prywatna lista pracy w aplikacji — nie rekomendacja kupna ani sprzedaży.</div>
+            </div>
+            <div class="analysis-side">
+                <div class="analysis-card"><small>1</small><strong>Kliknij Sygnały u góry</strong><span>Wybierz instrument z radaru FAST/ML.</span></div>
+                <div class="analysis-card"><small>2</small><strong>Uruchom pełną analizę</strong><span>Kliknij przycisk pod wybranym setupem.</span></div>
+                <div class="analysis-card"><small>3</small><strong>Dodaj do obserwowanych</strong><span>Przycisk pojawi się pod raportem analizy.</span></div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Przejdź do Sygnałów →", key="watchlist_go_to_signals", type="primary", use_container_width=True):
+            components.html(
+                """
+                <script>
+                const tabs = Array.from(window.parent.document.querySelectorAll('[role="tab"]'));
+                const target = tabs.find((tab) => (tab.innerText || tab.textContent || '').includes('Sygnały'));
+                if (target) {
+                    target.click();
+                    target.scrollIntoView({behavior: 'smooth', block: 'center', inline: 'center'});
+                }
+                </script>
+                """,
+                height=0,
+            )
+            st.success("Przełączam na Sygnały. Jeśli przeglądarka nie przełączy zakładki automatycznie, kliknij `Sygnały` w górnym menu.")
+        return
+
+    active_items = [item for item in items if str(item.get("status") or "ACTIVE").upper() == "ACTIVE"]
+    archived_items = [item for item in items if str(item.get("status") or "").upper() == "ARCHIVED"]
+    tabs = st.tabs(["Aktywne obserwacje", "Archiwum"])
+
+    with tabs[0]:
+        if not active_items:
+            st.info("Brak aktywnych obserwacji.")
+        else:
+            frame = watchlist_dataframe(active_items)
+            st.dataframe(
+                frame.style.format({"P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:+.1%}"}, na_rep="—"),
+                use_container_width=True,
+                hide_index=True,
+            )
+            labels = {
+                f"{item.get('symbol')} · {item.get('horizon')}d · {short_datetime(item.get('created_at'))}": item
+                for item in active_items
+            }
+            selected_label = st.selectbox("Rozwiń obserwację", list(labels), key="watchlist_selected")
+            selected = labels[selected_label]
+            st.markdown(f"""
+            <div class="analysis-report">
+                <div class="analysis-main">
+                    <small>Snapshot tezy z momentu dodania</small>
+                    <h3>{clean_text(selected.get('thesis'))}</h3>
+                    <p>{clean_text(selected.get('reason'))}</p>
+                    <div class="analysis-note">Ryzyko zapisane wtedy: {clean_text(selected.get('risk_note'))}</div>
+                </div>
+                <div class="analysis-side">
+                    <div class="analysis-card"><small>Symbol</small><strong>{clean_text(selected.get('symbol'))}</strong><span>{clean_text(selected.get('source'))}</span></div>
+                    <div class="analysis-card"><small>Horyzont</small><strong>{clean_text(selected.get('horizon'))}d</strong><span>status: {clean_text(watch_status_label(selected))}</span></div>
+                    <div class="analysis-card"><small>P(wzrost)</small><strong>{clean_text(value_pct(selected.get('probability_up')))}</strong><span>expected {clean_text(signed_pct(selected.get('expected_return')))}</span></div>
+                    <div class="analysis-card"><small>Jakość</small><strong>{clean_text(selected.get('quality'))}</strong><span>{clean_text(selected.get('verdict_label'))}</span></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            action_cols = st.columns(2)
+            if action_cols[0].button(f"Uruchom pełną analizę: {selected.get('symbol')}", key="watchlist_full_analysis", use_container_width=True):
+                symbol = str(selected.get("symbol") or "")
+                try:
+                    with st.spinner(f"Liczenie aktualnej analizy dla {symbol}…"):
+                        result = cached_analysis(symbol, (1, 5, 20, 60), years)
+                        profile = cached_profile(symbol)
+                    st.session_state["watchlist_analysis"] = {"result": result, "profile": profile, "years": years}
+                except Exception as exc:
+                    st.error(f"Nie udało się uruchomić analizy: {exc}")
+            if action_cols[1].button("Archiwizuj obserwację", key="watchlist_archive", use_container_width=True):
+                archive_watch_item(str(selected.get("id")))
+                st.success("Obserwacja przeniesiona do archiwum.")
+                st.rerun()
+            saved = st.session_state.get("watchlist_analysis")
+            if saved and saved.get("years") == years:
+                render_analysis(saved["result"], saved["profile"], {"radar_updated_at": selected.get("radar_as_of")})
+
+    with tabs[1]:
+        if not archived_items:
+            st.info("Archiwum jest puste.")
+        else:
+            st.dataframe(watchlist_dataframe(archived_items), use_container_width=True, hide_index=True)
 
 
 def render_analysis(result: dict, profile: dict, source_context: dict | None = None) -> None:
@@ -2178,7 +2372,8 @@ def render_analysis(result: dict, profile: dict, source_context: dict | None = N
     title_col, date_col = st.columns([3, 1])
     title_col.subheader(f"{profile_name(profile, symbol)} · {symbol}")
     date_col.caption(f"Dane do {result['last_date'].date()} · benchmark: {result['benchmark']}")
-    render_analysis_report(result, profile, source_context)
+    report = render_analysis_report(result, profile, source_context)
+    render_watchlist_capture(result, report, source_context)
 
     technical = result["technical"]
     view = aggregate_model_view(result)
@@ -3254,8 +3449,8 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-home, stocks, etfs, crypto, radar, forward_tab, journal, backtest, settings, method = st.tabs([
-    "Start", "Spółki", "ETF-y", "Krypto", "Sygnały", "Forward", "Journal", "Backtest", "Model", "Metodologia",
+home, stocks, etfs, crypto, radar, watchlist_tab, forward_tab, journal, backtest, settings, method = st.tabs([
+    "Start", "Spółki", "ETF-y", "Krypto", "Sygnały", "Obserwacje", "Forward", "Journal", "Backtest", "Model", "Metodologia",
 ])
 
 with home:
@@ -3332,6 +3527,7 @@ with radar:
     )
     render_signal_dashboard()
     radar_snapshot = load_snapshot()
+    render_radar_saved_analysis(radar_snapshot)
     scan_running = bool(radar_snapshot and radar_snapshot.get("status") == "running")
     if scan_running:
         st.caption("Pełny skan już trwa. Przycisk przeliczenia jest zablokowany, żeby nie startować drugiego procesu na tych samych danych.")
@@ -3368,6 +3564,9 @@ with radar:
 
 with forward_tab:
     render_forward_cockpit()
+
+with watchlist_tab:
+    render_watchlist()
 
 with journal:
     render_signal_journal()

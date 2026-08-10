@@ -305,6 +305,13 @@ def build_analysis_report(result: dict, profile: dict | None = None, source_cont
         freshness["note"] = "Radar i raport są spójne datowo albo raport został uruchomiony ręcznie poza snapshotem radaru."
 
     return {
+        "symbol": symbol,
+        "primary_horizon": horizon,
+        "verdict": {
+            "label": verdict.label,
+            "reason": verdict.reason,
+            "decision": verdict.decision,
+        },
         "headline": headline,
         "body": (
             f"Raport łączy istniejące prognozy ML, trend, momentum, ryzyko i świeżość danych. "
