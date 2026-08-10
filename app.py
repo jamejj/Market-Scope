@@ -30,7 +30,7 @@ from market_oracle.search import search_assets
 from market_oracle.signals import DEFAULT_SIGNAL_THRESHOLD
 from market_oracle.watchlist import (
     archive_watch_item, find_active_duplicate, load_watchlist, upsert_watch_item,
-    watch_item_from_analysis, watchlist_summary,
+    watch_item_from_analysis, watchlist_analysis_matches_selection, watchlist_summary,
 )
 
 
@@ -2348,7 +2348,14 @@ def render_watchlist() -> None:
                     with st.spinner(f"Liczenie aktualnej analizy dla {symbol}…"):
                         result = cached_analysis(symbol, (1, 5, 20, 60), years)
                         profile = cached_profile(symbol)
-                    st.session_state["watchlist_analysis"] = {"result": result, "profile": profile, "years": years}
+                    st.session_state["watchlist_analysis"] = {
+                        "result": result,
+                        "profile": profile,
+                        "years": years,
+                        "item_id": selected.get("id"),
+                        "symbol": symbol.upper(),
+                        "horizon": selected.get("horizon"),
+                    }
                 except Exception as exc:
                     st.error(f"Nie udało się uruchomić analizy: {exc}")
             if action_cols[1].button("Archiwizuj obserwację", key="watchlist_archive", use_container_width=True):
@@ -2356,8 +2363,10 @@ def render_watchlist() -> None:
                 st.success("Obserwacja przeniesiona do archiwum.")
                 st.rerun()
             saved = st.session_state.get("watchlist_analysis")
-            if saved and saved.get("years") == years:
+            if watchlist_analysis_matches_selection(saved, selected, years):
                 render_analysis(saved["result"], saved["profile"], {"radar_updated_at": selected.get("radar_as_of")})
+            elif saved:
+                st.caption("Uruchom pełną analizę dla aktualnie wybranej obserwacji, żeby porównać ją z zapisanym snapshotem.")
 
     with tabs[1]:
         if not archived_items:

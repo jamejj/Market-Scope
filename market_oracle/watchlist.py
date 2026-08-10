@@ -72,6 +72,42 @@ def find_active_duplicate(items: list[dict], symbol: str, horizon: int) -> dict 
     return None
 
 
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def watchlist_analysis_matches_selection(
+    saved: dict | None,
+    selected: dict | None,
+    current_years: int | None = None,
+) -> bool:
+    """Return True only when a cached watchlist analysis belongs to the selected item."""
+    if not isinstance(saved, dict) or not isinstance(selected, dict):
+        return False
+    if current_years is not None and saved.get("years") != current_years:
+        return False
+
+    selected_id = str(selected.get("id") or "")
+    saved_id = str(saved.get("item_id") or "")
+    if selected_id and saved_id != selected_id:
+        return False
+
+    selected_symbol = str(selected.get("symbol") or "").upper()
+    result = saved.get("result") if isinstance(saved.get("result"), dict) else {}
+    saved_symbol = str(saved.get("symbol") or result.get("symbol") or "").upper()
+    if selected_symbol and saved_symbol != selected_symbol:
+        return False
+
+    selected_horizon = _safe_int(selected.get("horizon"))
+    saved_horizon = _safe_int(saved.get("horizon"))
+    if selected_horizon is not None and saved_horizon is not None and selected_horizon != saved_horizon:
+        return False
+    return True
+
+
 def upsert_watch_item(item: dict, path: Path = WATCHLIST_PATH) -> tuple[dict, bool]:
     items = load_watchlist(path)
     symbol = str(item.get("symbol") or "").upper().strip()

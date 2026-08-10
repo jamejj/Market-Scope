@@ -63,6 +63,7 @@ from market_oracle.validation import (
 )
 from market_oracle.watchlist import (
     archive_watch_item, load_watchlist, upsert_watch_item, watch_item_from_analysis, watchlist_summary,
+    watchlist_analysis_matches_selection,
 )
 import market_oracle.validation as validation_module
 
@@ -741,6 +742,23 @@ def test_watchlist_item_from_analysis_preserves_seen_snapshot():
     assert item["expected_return"] == pytest.approx(0.035)
     assert item["risk_note"] == "RSI wysoko — możliwe przegrzanie."
     assert item["data_as_of"] == "2026-08-07"
+
+
+def test_watchlist_analysis_must_match_selected_item():
+    xtb_item = {"id": "watch-xtb", "symbol": "XTB.WA", "horizon": 20}
+    spy_item = {"id": "watch-spy", "symbol": "SPY", "horizon": 20}
+    saved_xtb = {
+        "item_id": "watch-xtb",
+        "symbol": "XTB.WA",
+        "horizon": 20,
+        "years": 5,
+        "result": {"symbol": "XTB.WA"},
+    }
+
+    assert watchlist_analysis_matches_selection(saved_xtb, xtb_item, current_years=5) is True
+    assert watchlist_analysis_matches_selection(saved_xtb, spy_item, current_years=5) is False
+    assert watchlist_analysis_matches_selection(saved_xtb, xtb_item, current_years=3) is False
+    assert watchlist_analysis_matches_selection({**saved_xtb, "item_id": ""}, xtb_item, current_years=5) is False
 
 
 def test_paper_portfolio_applies_sizing_and_costs():
