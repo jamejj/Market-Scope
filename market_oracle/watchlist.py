@@ -239,21 +239,30 @@ def _nyse_holidays(year: int) -> set[date]:
         return set()
 
 
-def _gpw_holidays(year: int) -> set[date]:
-    easter = _easter_sunday(year)
-    return {
-        date(year, 1, 1),
-        date(year, 1, 6),
-        easter + timedelta(days=1),
-        date(year, 5, 1),
-        date(year, 5, 3),
-        easter + timedelta(days=60),
-        date(year, 8, 15),
-        date(year, 11, 1),
-        date(year, 11, 11),
-        date(year, 12, 25),
-        date(year, 12, 26),
-    }
+_GPW_OFFICIAL_CLOSED_DATES: dict[int, tuple[str, ...]] = {
+    # Official GPW non-trading days verified against the exchange calendar.
+    # Do not extrapolate from Polish public holidays: GPW also marks exchange-
+    # specific closures such as Good Friday, Christmas Eve and New Year's Eve.
+    2026: (
+        "2026-01-01",
+        "2026-01-06",
+        "2026-04-03",
+        "2026-04-06",
+        "2026-05-01",
+        "2026-06-04",
+        "2026-11-11",
+        "2026-12-24",
+        "2026-12-25",
+        "2026-12-31",
+    ),
+}
+
+
+def _gpw_holidays(year: int) -> set[date] | None:
+    raw_dates = _GPW_OFFICIAL_CLOSED_DATES.get(year)
+    if raw_dates is None:
+        return None
+    return {date.fromisoformat(raw) for raw in raw_dates}
 
 
 def _infer_asset_class(symbol: str, result: dict | None = None, source_context: dict | None = None) -> str:
@@ -313,7 +322,10 @@ def _is_counted_period(day: date, calendar_kind: str) -> bool | None:
     if kind == "NYSE":
         return day.weekday() < 5 and day not in _nyse_holidays(day.year)
     if kind == "GPW":
-        return day.weekday() < 5 and day not in _gpw_holidays(day.year)
+        holidays = _gpw_holidays(day.year)
+        if holidays is None:
+            return None
+        return day.weekday() < 5 and day not in holidays
     return None
 
 

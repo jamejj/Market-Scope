@@ -924,6 +924,58 @@ def test_watchlist_lifecycle_nyse_skips_exchange_holiday():
     assert lifecycle["anchor_source"] == "data_as_of"
 
 
+def test_watchlist_lifecycle_gpw_skips_official_exchange_holiday():
+    item = {
+        "symbol": "XTB.WA",
+        "horizon": 1,
+        "data_as_of": "2026-12-23",
+        "created_at": "2026-12-24T10:00:00+01:00",
+        "asset_class": "GPW",
+        "calendar_kind": "GPW",
+    }
+
+    christmas_eve = watch_item_lifecycle(item, now="2026-12-24T12:00:00+01:00")
+    year_end = watch_item_lifecycle(item, now="2026-12-31T12:00:00+01:00")
+    first_counted_session = watch_item_lifecycle(item, now="2026-12-28T12:00:00+01:00")
+    good_friday = watch_item_lifecycle(
+        {**item, "data_as_of": "2026-04-02", "created_at": "2026-04-03T10:00:00+02:00"},
+        now="2026-04-03T12:00:00+02:00",
+    )
+
+    assert christmas_eve["status"] == "ACTIVE"
+    assert christmas_eve["elapsed"] == 0
+    assert christmas_eve["remaining"] == 1
+    assert christmas_eve["unit"] == "sesji"
+    assert christmas_eve["calendar_kind"] == "GPW"
+    assert christmas_eve["anchor_source"] == "data_as_of"
+    assert christmas_eve["is_approximate"] is False
+    assert year_end["elapsed"] == 3
+    assert good_friday["status"] == "ACTIVE"
+    assert good_friday["elapsed"] == 0
+    assert first_counted_session["status"] == "HORIZON_ENDED"
+    assert first_counted_session["elapsed"] == 1
+    assert first_counted_session["remaining"] == 0
+
+
+def test_watchlist_lifecycle_gpw_unknown_outside_verified_calendar():
+    item = {
+        "symbol": "XTB.WA",
+        "horizon": 5,
+        "data_as_of": "2029-01-02",
+        "asset_class": "GPW",
+        "calendar_kind": "GPW",
+    }
+
+    lifecycle = watch_item_lifecycle(item, now="2029-01-10T12:00:00+01:00")
+
+    assert lifecycle["status"] == "UNKNOWN"
+    assert lifecycle["elapsed"] is None
+    assert lifecycle["remaining"] is None
+    assert lifecycle["is_approximate"] is True
+    assert lifecycle["calendar_kind"] == "GPW"
+    assert lifecycle["calendar_label"] == "sesje GPW"
+
+
 def test_watchlist_lifecycle_unknown_calendar_does_not_fake_sessions():
     item = {
         "symbol": "ABC.L",
