@@ -749,6 +749,8 @@ def test_watchlist_item_from_analysis_preserves_seen_snapshot():
     assert item["expected_return"] == pytest.approx(0.035)
     assert item["risk_note"] == "RSI wysoko — możliwe przegrzanie."
     assert item["data_as_of"] == "2026-08-07"
+    assert item["asset_class"] == "GPW"
+    assert item["calendar_kind"] == "GPW"
 
 
 def test_watchlist_analysis_must_match_selected_item():
@@ -877,6 +879,66 @@ def test_watchlist_lifecycle_expiry_is_separate_from_current_verdict():
     assert lifecycle["status"] == "HORIZON_ENDED"
     assert comparison["comparison_status"] == "STILL_CONFIRMED"
     assert comparison["lifecycle"]["status"] == "HORIZON_ENDED"
+
+
+def test_watchlist_lifecycle_crypto_uses_7_day_calendar_and_data_anchor():
+    item = {
+        "symbol": "BTC-USD",
+        "horizon": 2,
+        "data_as_of": "2026-08-07",
+        "created_at": "2026-08-11T00:00:00+02:00",
+        "asset_class": "Krypto",
+        "calendar_kind": "CRYPTO_24_7",
+        "verdict_label": "LONG",
+        "verdict_decision": 1,
+    }
+
+    lifecycle = watch_item_lifecycle(item, now="2026-08-09T12:00:00+02:00")
+
+    assert lifecycle["status"] == "HORIZON_ENDED"
+    assert lifecycle["elapsed"] == 2
+    assert lifecycle["remaining"] == 0
+    assert lifecycle["unit"] == "dni"
+    assert lifecycle["calendar_kind"] == "CRYPTO_24_7"
+    assert lifecycle["anchor_source"] == "data_as_of"
+    assert lifecycle["is_approximate"] is False
+
+
+def test_watchlist_lifecycle_nyse_skips_exchange_holiday():
+    item = {
+        "symbol": "SPY",
+        "horizon": 1,
+        "data_as_of": "2026-07-02",
+        "created_at": "2026-07-06T00:00:00+02:00",
+        "asset_class": "USA / ETF",
+        "calendar_kind": "NYSE",
+    }
+
+    lifecycle = watch_item_lifecycle(item, now="2026-07-06T12:00:00+02:00")
+
+    assert lifecycle["status"] == "HORIZON_ENDED"
+    assert lifecycle["elapsed"] == 1
+    assert lifecycle["remaining"] == 0
+    assert lifecycle["unit"] == "sesji"
+    assert lifecycle["calendar_kind"] == "NYSE"
+    assert lifecycle["anchor_source"] == "data_as_of"
+
+
+def test_watchlist_lifecycle_unknown_calendar_does_not_fake_sessions():
+    item = {
+        "symbol": "ABC.L",
+        "horizon": 5,
+        "created_at": "2026-08-01T10:00:00+02:00",
+        "calendar_kind": "UNKNOWN",
+    }
+
+    lifecycle = watch_item_lifecycle(item, now="2026-08-05T10:00:00+02:00")
+
+    assert lifecycle["status"] == "UNKNOWN"
+    assert lifecycle["elapsed"] is None
+    assert lifecycle["remaining"] is None
+    assert lifecycle["is_approximate"] is True
+    assert lifecycle["calendar_label"] == "kalendarz nieznany"
 
 
 def test_paper_portfolio_applies_sizing_and_costs():

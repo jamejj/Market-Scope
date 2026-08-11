@@ -2253,9 +2253,19 @@ def render_watchlist_comparison(item: dict, current: dict, comparison: dict) -> 
     lifecycle_text = clean_text(lifecycle.get("label"))
     elapsed = lifecycle.get("elapsed")
     remaining = lifecycle.get("remaining")
+    lifecycle_unit = clean_text(lifecycle.get("unit") or "sesji")
+    calendar_label = clean_text(lifecycle.get("calendar_label") or "")
+    approx_prefix = "ok. " if lifecycle.get("is_approximate") else ""
     lifecycle_detail = ""
     if elapsed is not None and remaining is not None:
-        lifecycle_detail = f" · minęło ok. {elapsed} sesji, zostało ok. {remaining}"
+        lifecycle_detail = f" · minęło {approx_prefix}{elapsed} {lifecycle_unit}, zostało {approx_prefix}{remaining}"
+        if calendar_label:
+            lifecycle_detail += f" · {calendar_label}"
+    elif str(lifecycle.get("status") or "").upper() == "UNKNOWN":
+        lifecycle_detail = " · kalendarz instrumentu nieznany — nie udajemy dokładnej liczby sesji"
+    lifecycle_card_text = lifecycle_text
+    if calendar_label:
+        lifecycle_card_text = f"{lifecycle_text} · {calendar_label}"
 
     now_available = bool(current.get("available"))
     now_label = current.get("verdict_label") if now_available else "—"
@@ -2281,7 +2291,7 @@ def render_watchlist_comparison(item: dict, current: dict, comparison: dict) -> 
             <div class="analysis-card"><small>Zmiana P(wzrost)</small><strong>{clean_text(signed_pp(comparison.get('delta_probability')))}</strong><span>Pokazane jako kontekst, nie osobny verdict.</span></div>
             <div class="analysis-card"><small>Zmiana ruchu</small><strong>{clean_text(signed_pp(comparison.get('delta_expected_return')))}</strong><span>Expected return wtedy vs teraz.</span></div>
             <div class="analysis-card"><small>Jakość</small><strong>{clean_text(comparison.get('quality_change'))}</strong><span>Aktualne dane do: {clean_text(now_data)}</span></div>
-            <div class="analysis-card"><small>Lifecycle</small><strong>{clean_text(lifecycle.get('status'))}</strong><span>{lifecycle_text}</span></div>
+            <div class="analysis-card"><small>Lifecycle</small><strong>{clean_text(lifecycle.get('status'))}</strong><span>{clean_text(lifecycle_card_text)}</span></div>
         </div>
     </div>
     """, unsafe_allow_html=True)

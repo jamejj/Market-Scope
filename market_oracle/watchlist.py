@@ -205,16 +205,131 @@ def _parse_date(value: Any) -> date | None:
         return None
 
 
-def _business_days_between(start: date, end: date) -> int:
+def _easter_sunday(year: int) -> date:
+    """Return Gregorian Easter Sunday for exchange-holiday calculations."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def _nyse_holidays(year: int) -> set[date]:
+    try:
+        from market_oracle.auto_forward import nyse_full_holidays
+
+        holidays: set[date] = set()
+        for item in nyse_full_holidays(year):
+            try:
+                holidays.add(date.fromisoformat(str(item)[:10]))
+            except ValueError:
+                continue
+        return holidays
+    except Exception:
+        return set()
+
+
+def _gpw_holidays(year: int) -> set[date]:
+    easter = _easter_sunday(year)
+    return {
+        date(year, 1, 1),
+        date(year, 1, 6),
+        easter + timedelta(days=1),
+        date(year, 5, 1),
+        date(year, 5, 3),
+        easter + timedelta(days=60),
+        date(year, 8, 15),
+        date(year, 11, 1),
+        date(year, 11, 11),
+        date(year, 12, 25),
+        date(year, 12, 26),
+    }
+
+
+def _infer_asset_class(symbol: str, result: dict | None = None, source_context: dict | None = None) -> str:
+    for payload in (source_context, result):
+        if not isinstance(payload, dict):
+            continue
+        for key in ("asset_class", "assetClass", "class", "klasa", "market"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+
+    normalized = str(symbol or "").upper()
+    if normalized.endswith("-USD"):
+        return "Krypto"
+    if normalized.endswith(".WA"):
+        return "GPW"
+    return "USA / ETF"
+
+
+def _infer_calendar_kind(symbol: str, asset_class: str | None = None, benchmark: str | None = None) -> str:
+    text = " ".join(str(value or "").upper() for value in (symbol, asset_class, benchmark))
+    normalized = str(symbol or "").upper()
+    if normalized.endswith("-USD") or "KRYPTO" in text or "CRYPTO" in text:
+        return "CRYPTO_24_7"
+    if normalized.endswith(".WA") or "GPW" in text or "WIG" in text or "ETFBW" in text:
+        return "GPW"
+    if normalized and "." not in normalized and "-" not in normalized:
+        return "NYSE"
+    if "USA" in text or "ETF" in text or "^GSPC" in text:
+        return "NYSE"
+    return "UNKNOWN"
+
+
+def _calendar_label(calendar_kind: str) -> str:
+    labels = {
+        "CRYPTO_24_7": "kalendarz crypto 24/7",
+        "NYSE": "sesje USA/NYSE",
+        "GPW": "sesje GPW",
+        "UNKNOWN": "kalendarz nieznany",
+    }
+    return labels.get(str(calendar_kind or "UNKNOWN").upper(), "kalendarz nieznany")
+
+
+def _calendar_unit(calendar_kind: str) -> str:
+    kind = str(calendar_kind or "UNKNOWN").upper()
+    if kind == "CRYPTO_24_7":
+        return "dni"
+    if kind in {"NYSE", "GPW"}:
+        return "sesji"
+    return "okresów"
+
+
+def _is_counted_period(day: date, calendar_kind: str) -> bool | None:
+    kind = str(calendar_kind or "UNKNOWN").upper()
+    if kind == "CRYPTO_24_7":
+        return True
+    if kind == "NYSE":
+        return day.weekday() < 5 and day not in _nyse_holidays(day.year)
+    if kind == "GPW":
+        return day.weekday() < 5 and day not in _gpw_holidays(day.year)
+    return None
+
+
+def _calendar_periods_between(start: date, end: date, calendar_kind: str) -> int | None:
     if end <= start:
         return 0
-    days = 0
+    periods = 0
     current = start + timedelta(days=1)
     while current <= end:
-        if current.weekday() < 5:
-            days += 1
+        counted = _is_counted_period(current, calendar_kind)
+        if counted is None:
+            return None
+        if counted:
+            periods += 1
         current += timedelta(days=1)
-    return days
+    return periods
 
 
 def watch_item_lifecycle(item: dict, now: date | datetime | str | None = None) -> dict:
@@ -223,22 +338,53 @@ def watch_item_lifecycle(item: dict, now: date | datetime | str | None = None) -
     This is deliberately separate from the model verdict: an observation can reach
     its planned horizon even if the current model still confirms the thesis.
     """
+    data_anchor = _parse_date(item.get("data_as_of"))
     created = _parse_date(item.get("created_at"))
+    anchor = data_anchor or created
+    anchor_source = "data_as_of" if data_anchor is not None else "created_at"
     current = _parse_date(now) if now is not None else datetime.now(timezone.utc).astimezone().date()
     horizon = _safe_int(item.get("horizon"))
-    if created is None or current is None or horizon is None or horizon <= 0:
+    symbol = str(item.get("symbol") or "").upper()
+    asset_class = str(item.get("asset_class") or "")
+    benchmark = str(item.get("benchmark") or "")
+    calendar_kind = str(
+        item.get("calendar_kind") or _infer_calendar_kind(symbol, asset_class, benchmark)
+    ).upper()
+    base = {
+        "calendar_kind": calendar_kind,
+        "calendar_label": _calendar_label(calendar_kind),
+        "unit": _calendar_unit(calendar_kind),
+        "anchor_date": anchor.isoformat() if anchor is not None else None,
+        "anchor_source": anchor_source,
+        "is_approximate": False,
+    }
+    if anchor is None or current is None or horizon is None or horizon <= 0:
         return {
+            **base,
             "status": "UNKNOWN",
             "label": "Cykl obserwacji nieznany",
             "elapsed": None,
             "remaining": None,
             "is_expired": False,
+            "is_approximate": True,
         }
 
-    elapsed = _business_days_between(created, current)
+    elapsed = _calendar_periods_between(anchor, current, calendar_kind)
+    if elapsed is None:
+        return {
+            **base,
+            "status": "UNKNOWN",
+            "label": "Cykl obserwacji nieznany",
+            "elapsed": None,
+            "remaining": None,
+            "is_expired": False,
+            "is_approximate": True,
+        }
+
     remaining = max(horizon - elapsed, 0)
     expired = elapsed >= horizon
     return {
+        **base,
         "status": "HORIZON_ENDED" if expired else "ACTIVE",
         "label": "Horyzont obserwacji zakończony" if expired else "Horyzont obserwacji nadal trwa",
         "elapsed": elapsed,
@@ -405,9 +551,14 @@ def watch_item_from_analysis(
     evidence = report.get("evidence") or []
     counterpoints = report.get("counterpoints") or []
     freshness = report.get("freshness") or {}
+    asset_class = _infer_asset_class(symbol, result, source_context)
+    benchmark = result.get("benchmark") or freshness.get("benchmark") or "—"
+    calendar_kind = _infer_calendar_kind(symbol, asset_class, benchmark)
     return {
         "symbol": symbol,
         "horizon": horizon,
+        "asset_class": asset_class,
+        "calendar_kind": calendar_kind,
         "source": source,
         "origin": origin,
         "status": "ACTIVE",
@@ -422,6 +573,6 @@ def watch_item_from_analysis(
         "risk_note": str(counterpoints[0] if counterpoints else "Brak głównej kontrtezy w raporcie."),
         "data_as_of": _date_text(result.get("last_date") or freshness.get("analysis")),
         "radar_as_of": freshness.get("radar") or source_context.get("radar_updated_at") or "—",
-        "benchmark": result.get("benchmark") or freshness.get("benchmark") or "—",
+        "benchmark": benchmark,
         "last_price": _safe_float(result.get("last_price")),
     }
