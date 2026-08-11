@@ -2097,7 +2097,7 @@ def aggregate_model_view(result: dict) -> dict:
                 f"Rynek jest mieszany, a model 5d nie ma przewagi: AUC {five_day['auc']:.3f}, "
                 f"Brier {five_day['brier']:.3f}. Warto patrzeć na hot movers, trend i dłuższe horyzonty."
             )
-        best_label = "Brak potwierdzonego horyzontu"
+        best_label = "Brak przewagi"
     else:
         direction = signal_label(best["probability_up"], best["quality"]).lower()
         best_label = f"{horizon_text(best_horizon, result['symbol'].endswith('-USD'))} · {best['quality']}"
@@ -3458,8 +3458,8 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-home, stocks, etfs, crypto, radar, watchlist_tab, forward_tab, journal, backtest, settings, method = st.tabs([
-    "Start", "Spółki", "ETF-y", "Krypto", "Sygnały", "Obserwacje", "Forward", "Journal", "Backtest", "Model", "Metodologia",
+home, market, radar, watchlist_tab, lab = st.tabs([
+    "Start", "Rynek", "Sygnały", "Obserwacje", "Lab",
 ])
 
 with home:
@@ -3473,57 +3473,85 @@ with home:
         automation_error=_hero_automation_error,
     )
 
-with stocks:
-    st.header("Analiza spółek")
-    stock_mode = st.radio("Sposób wyboru", ["Katalog", "Wyszukiwarka globalna", "Wpisz symbol"], horizontal=True, key="stock_mode")
-    stock_symbol = ""
-    if stock_mode == "Katalog":
-        stock_category = st.selectbox("Rynek / sektor", list(CATEGORIES), key="stock_category")
-        stock_options = category_options(stock_category)
-        stock_choice = st.selectbox("Spółka", list(stock_options), key="stock_choice")
-        stock_symbol = stock_options[stock_choice]
-    elif stock_mode == "Wyszukiwarka globalna":
-        stock_symbol = search_picker("stocks")
+with market:
+    st.header("Rynek")
+    st.write(
+        "Jedno wejście do pełnej analizy instrumentu. Wpisz symbol albo wyszukaj nazwę — "
+        "MarketScope policzy raport niezależnie od tego, czy to spółka, ETF czy krypto."
+    )
+    st.caption("Katalogi poniżej zostają jako szybkie filtry, ale nie musisz najpierw zgadywać kategorii instrumentu.")
+    pending_market_symbol = st.session_state.pop("market_pending_symbol", None)
+    if pending_market_symbol:
+        normalized_pending_symbol = str(pending_market_symbol).strip().upper()
+        st.session_state["market_symbol_hint"] = normalized_pending_symbol
+        st.session_state["market_manual_symbol"] = normalized_pending_symbol
+        st.session_state["market_selected_symbol"] = normalized_pending_symbol
+        st.session_state["market_mode"] = "Wpisz symbol"
+    market_mode = st.radio(
+        "Jak chcesz znaleźć instrument?",
+        ["Wyszukiwarka globalna", "Wpisz symbol"],
+        horizontal=True,
+        key="market_mode",
+    )
+    market_symbol = st.session_state.get("market_selected_symbol", "")
+    if market_mode == "Wyszukiwarka globalna":
+        picked_market_symbol = search_picker("market")
+        if picked_market_symbol:
+            market_symbol = picked_market_symbol
     else:
-        stock_symbol = st.text_input("Symbol", "AAPL", help="GPW: np. PKO.WA, CDR.WA. USA: np. AAPL.", key="stock_manual").strip().upper()
-    if stock_symbol:
-        st.caption(f"Wybrany instrument: `{stock_symbol}`")
-    analysis_action(stock_symbol, "stock_analysis", "stock_analyze")
+        typed_market_symbol = st.text_input(
+            "Symbol instrumentu",
+            st.session_state.get("market_symbol_hint", "XTB.WA"),
+            help="Przykłady: XTB.WA, AAPL, SPY, BTC-USD, DEXE-USD.",
+            key="market_manual_symbol",
+        ).strip().upper()
+        if typed_market_symbol:
+            market_symbol = typed_market_symbol
+    if market_symbol:
+        st.session_state["market_symbol_hint"] = market_symbol
+        st.session_state["market_selected_symbol"] = market_symbol
+        st.caption(f"Wybrany instrument do analizy: `{market_symbol}`")
+    analysis_action(market_symbol, "market_analysis", "market_analyze")
 
-with etfs:
-    st.header("Analiza ETF-ów")
+    st.markdown("### Katalogi rynku")
+    st.caption("Dla szybkiego przeglądania gotowych list. Wybór z katalogu ustawia symbol w głównej analizie powyżej.")
+    market_stock_tab, market_etf_tab, market_crypto_tab = st.tabs(["Spółki", "ETF-y", "Krypto"])
+
+with market_stock_tab:
+    st.header("Przeglądaj spółki")
+    st.caption("Katalog pomaga szybko znaleźć ticker. Pełna analiza zawsze uruchamia się przez główne wejście w sekcji Rynek.")
+    stock_category = st.selectbox("Rynek / sektor", list(CATEGORIES), key="stock_category")
+    stock_options = category_options(stock_category)
+    stock_choice = st.selectbox("Spółka", list(stock_options), key="stock_choice")
+    stock_symbol = stock_options[stock_choice]
+    st.caption(f"Symbol z katalogu: `{stock_symbol}`")
+    if st.button(f"Ustaw w głównej analizie: {stock_symbol}", key="stock_catalog_select"):
+        st.session_state["market_pending_symbol"] = stock_symbol
+        st.rerun()
+
+with market_etf_tab:
+    st.header("Przeglądaj ETF-y")
     st.write("ETF pozwala analizować cały rynek, sektor, obligacje lub surowiec jednym instrumentem.")
     etf_category = st.selectbox("Kategoria ETF", list(ETF_CATEGORIES), key="etf_category")
     available_etfs = etf_options(etf_category)
     etf_choice = st.selectbox("ETF", list(available_etfs), key="etf_choice")
     etf_symbol = available_etfs[etf_choice]
-    st.caption(f"Wybrany ETF: `{etf_symbol}`")
-    analysis_action(etf_symbol, "etf_analysis", "etf_analyze")
+    st.caption(f"Symbol z katalogu: `{etf_symbol}`")
+    if st.button(f"Ustaw w głównej analizie: {etf_symbol}", key="etf_catalog_select"):
+        st.session_state["market_pending_symbol"] = etf_symbol
+        st.rerun()
 
-with crypto:
-    st.header("Analiza kryptowalut")
+with market_crypto_tab:
+    st.header("Przeglądaj kryptowaluty")
     st.warning("Krypto może poruszać się gwałtownie 24/7. Przedziały niepewności i ryzyko są tu szczególnie ważne.")
-    crypto_mode = st.radio("Sposób wyboru", ["Szukaj w całym krypto", "Segmenty", "Wpisz symbol"], horizontal=True, key="crypto_mode")
-    crypto_symbol = ""
-    if crypto_mode == "Szukaj w całym krypto":
-        crypto_available = crypto_options()
-        crypto_choice = st.selectbox(
-            "Kryptowaluta",
-            list(crypto_available),
-            key="crypto_global_choice",
-            help="To pole przeszukuje cały katalog krypto, więc znajdziesz tu np. DeXe, Uniswap, Render albo Bitcoin.",
-        )
-        crypto_symbol = crypto_available[crypto_choice]
-    elif crypto_mode == "Segmenty":
-        crypto_category = st.selectbox("Segment krypto", list(CRYPTO_CATEGORIES), key="crypto_category")
-        crypto_available = crypto_category_options(crypto_category)
-        crypto_choice = st.selectbox("Kryptowaluta", list(crypto_available), key="crypto_choice")
-        crypto_symbol = crypto_available[crypto_choice]
-    else:
-        crypto_symbol = st.text_input("Symbol", "DEXE-USD", help="Yahoo/yfinance format, np. BTC-USD, ETH-USD, DEXE-USD, UNI-USD.", key="crypto_manual").strip().upper()
-    if crypto_symbol:
-        st.caption(f"Wybrana para: `{crypto_symbol}`")
-    analysis_action(crypto_symbol, "crypto_analysis", "crypto_analyze")
+    crypto_category = st.selectbox("Segment krypto", list(CRYPTO_CATEGORIES), key="crypto_category")
+    crypto_available = crypto_category_options(crypto_category)
+    crypto_choice = st.selectbox("Kryptowaluta", list(crypto_available), key="crypto_choice")
+    crypto_symbol = crypto_available[crypto_choice]
+    st.caption(f"Symbol z katalogu: `{crypto_symbol}`")
+    if st.button(f"Ustaw w głównej analizie: {crypto_symbol}", key="crypto_catalog_select"):
+        st.session_state["market_pending_symbol"] = crypto_symbol
+        st.rerun()
 
 with radar:
     st.header("Automatyczny ranking rynku")
@@ -3571,16 +3599,27 @@ with radar:
             if custom_errors:
                 st.caption(f"Pominięte / bez danych: {', '.join(custom_errors)}")
 
-with forward_tab:
-    render_forward_cockpit()
-
 with watchlist_tab:
     render_watchlist()
 
-with journal:
+with lab:
+    st.header("Lab")
+    st.write(
+        "Zaplecze MarketScope: proof flow, dziennik skuteczności, backtest, ustawienia modelu i metodologia. "
+        "Tu są narzędzia kontroli jakości — główna ścieżka użytkownika zostaje w Start, Rynek, Sygnały i Obserwacje."
+    )
+    st.caption("Lab nie zmienia Candidate v1 ani forward ledgera; pokazuje, jak system jest testowany i audytowany.")
+    lab_forward_tab, lab_journal_tab, lab_backtest_tab, lab_model_tab, lab_method_tab = st.tabs([
+        "Forward Proof", "Journal", "Backtest", "Model i ustawienia", "Metodologia",
+    ])
+
+with lab_forward_tab:
+    render_forward_cockpit()
+
+with lab_journal_tab:
     render_signal_journal()
 
-with backtest:
+with lab_backtest_tab:
     st.header("Backtest walk-forward")
     st.write("Model zoo jest wielokrotnie trenowany wyłącznie na przeszłości, a następnie testowany na kolejnych, niewidzianych danych.")
     st.caption("Sygnał powstaje po zamknięciu świecy, wejście odbywa się na następnym open, a wynik uwzględnia koszt i uproszczony poślizg.")
@@ -3616,7 +3655,7 @@ with backtest:
             "Wyniki historyczne nie gwarantują przyszłych."
         )
 
-with settings:
+with lab_model_tab:
     st.header("Model i ustawienia")
     st.write("Ta sekcja tłumaczy ustawienia normalnym językiem. Domyślna konfiguracja jest zalecana — więcej danych lub bardziej agresywny sygnał nie oznacza automatycznie lepszej prognozy.")
 
@@ -3678,7 +3717,7 @@ with settings:
         - **Auto scan** — można wyłączyć przez `MARKETSCOPE_AUTO_SCAN=0` albo zmienić rytm monitora przez `MARKETSCOPE_SCAN_INTERVAL_HOURS`.
         """)
 
-with method:
+with lab_method_tab:
     st.header("Metodologia i ograniczenia")
     st.markdown("""
 ### Silnik prognostyczny
