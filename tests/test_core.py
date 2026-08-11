@@ -62,8 +62,15 @@ from market_oracle.validation import (
     validation_report,
 )
 from market_oracle.watchlist import (
-    archive_watch_item, load_watchlist, upsert_watch_item, watch_item_from_analysis, watchlist_summary,
+    archive_watch_item,
+    compare_watch_item_to_current,
+    load_watchlist,
+    upsert_watch_item,
+    watch_item_current_snapshot,
+    watch_item_from_analysis,
+    watch_item_lifecycle,
     watchlist_analysis_matches_selection,
+    watchlist_summary,
 )
 import market_oracle.validation as validation_module
 
@@ -759,6 +766,117 @@ def test_watchlist_analysis_must_match_selected_item():
     assert watchlist_analysis_matches_selection(saved_xtb, spy_item, current_years=5) is False
     assert watchlist_analysis_matches_selection(saved_xtb, xtb_item, current_years=3) is False
     assert watchlist_analysis_matches_selection({**saved_xtb, "item_id": ""}, xtb_item, current_years=5) is False
+
+
+def test_watchlist_current_snapshot_uses_saved_horizon_and_shared_gate():
+    item = {"id": "watch-xtb", "symbol": "XTB.WA", "horizon": 20}
+    result = {
+        "symbol": "XTB.WA",
+        "last_date": pd.Timestamp("2026-08-11"),
+        "last_price": 170.0,
+        "forecasts": {
+            5: {"probability_up": 0.90, "expected_return": 0.10, "quality": "WYSOKA", "auc": 0.80, "brier": 0.10},
+            20: {"probability_up": 0.60, "expected_return": 0.02, "quality": "WYSOKA", "auc": 0.70, "brier": 0.20},
+        },
+    }
+
+    current = watch_item_current_snapshot(result, item)
+
+    assert current["available"] is True
+    assert current["symbol"] == "XTB.WA"
+    assert current["horizon"] == 20
+    assert current["probability_up"] == pytest.approx(0.60)
+    assert current["expected_return"] == pytest.approx(0.02)
+    assert current["verdict"] == "LONG_CONFIRMED"
+
+    conflict = watch_item_current_snapshot(
+        {
+            **result,
+            "forecasts": {
+                20: {"probability_up": 0.63, "expected_return": -0.01, "quality": "WYSOKA", "auc": 0.70, "brier": 0.20},
+            },
+        },
+        item,
+    )
+
+    assert conflict["verdict"] == "EXPECTED_RETURN_CONFLICT"
+    assert conflict["verdict_decision"] == 0
+
+
+def test_watchlist_current_snapshot_rejects_wrong_symbol_or_missing_horizon():
+    item = {"symbol": "XTB.WA", "horizon": 20}
+
+    wrong_symbol = watch_item_current_snapshot({"symbol": "SPY", "forecasts": {20: {"probability_up": 0.60}}}, item)
+    missing_horizon = watch_item_current_snapshot(
+        {"symbol": "XTB.WA", "forecasts": {5: {"probability_up": 0.60}}},
+        item,
+    )
+
+    assert wrong_symbol["available"] is False
+    assert wrong_symbol["reason"] == "SYMBOL_MISMATCH"
+    assert missing_horizon["available"] is False
+    assert missing_horizon["reason"] == "HORIZON_NOT_AVAILABLE"
+
+
+def test_watchlist_comparison_uses_verdict_transition_not_delta_thresholds():
+    item = {
+        "symbol": "XTB.WA",
+        "horizon": 20,
+        "created_at": "2026-08-03T10:00:00+02:00",
+        "verdict_label": "LONG",
+        "verdict_decision": 1,
+        "probability_up": 0.66,
+        "expected_return": 0.05,
+        "quality": "WYSOKA",
+    }
+    still_long = {
+        "available": True,
+        "symbol": "XTB.WA",
+        "horizon": 20,
+        "verdict_label": "LONG",
+        "verdict_decision": 1,
+        "probability_up": 0.56,
+        "expected_return": 0.01,
+        "quality": "WYSOKA",
+    }
+
+    comparison = compare_watch_item_to_current(item, still_long, now="2026-08-05T10:00:00+02:00")
+
+    assert comparison["comparison_status"] == "STILL_CONFIRMED"
+    assert comparison["delta_probability"] == pytest.approx(-0.10)
+    assert comparison["delta_expected_return"] == pytest.approx(-0.04)
+
+    weakened = {**still_long, "verdict_label": "OBSERWUJ", "verdict_decision": 0}
+    neutral_item = {**item, "verdict_label": "OBSERWUJ", "verdict_decision": 0}
+    reversed_now = {**still_long, "verdict_label": "SHORT", "verdict_decision": -1}
+
+    assert compare_watch_item_to_current(item, weakened)["comparison_status"] == "WEAKENED"
+    assert compare_watch_item_to_current(neutral_item, still_long)["comparison_status"] == "GAINED_CONFIRMATION"
+    assert compare_watch_item_to_current(item, reversed_now)["comparison_status"] == "REVERSED"
+
+
+def test_watchlist_lifecycle_expiry_is_separate_from_current_verdict():
+    item = {
+        "symbol": "XTB.WA",
+        "horizon": 5,
+        "created_at": "2026-07-01T10:00:00+02:00",
+        "verdict_label": "LONG",
+        "verdict_decision": 1,
+    }
+    current = {
+        "available": True,
+        "symbol": "XTB.WA",
+        "horizon": 5,
+        "verdict_label": "LONG",
+        "verdict_decision": 1,
+    }
+
+    lifecycle = watch_item_lifecycle(item, now="2026-07-15T10:00:00+02:00")
+    comparison = compare_watch_item_to_current(item, current, now="2026-07-15T10:00:00+02:00")
+
+    assert lifecycle["status"] == "HORIZON_ENDED"
+    assert comparison["comparison_status"] == "STILL_CONFIRMED"
+    assert comparison["lifecycle"]["status"] == "HORIZON_ENDED"
 
 
 def test_paper_portfolio_applies_sizing_and_costs():

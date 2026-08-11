@@ -29,8 +29,8 @@ from market_oracle.presentation import build_analysis_report, build_start_guidan
 from market_oracle.search import search_assets
 from market_oracle.signals import DEFAULT_SIGNAL_THRESHOLD
 from market_oracle.watchlist import (
-    archive_watch_item, find_active_duplicate, load_watchlist, upsert_watch_item,
-    watch_item_from_analysis, watchlist_analysis_matches_selection, watchlist_summary,
+    archive_watch_item, compare_watch_item_to_current, find_active_duplicate, load_watchlist, upsert_watch_item,
+    watch_item_current_snapshot, watch_item_from_analysis, watchlist_analysis_matches_selection, watchlist_summary,
 )
 
 
@@ -1178,6 +1178,12 @@ def signed_pct(value, default: str = "—") -> str:
     return f"{value:+.1%}"
 
 
+def signed_pp(value, default: str = "—") -> str:
+    if value is None or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return default
+    return f"{value * 100:+.1f} pp"
+
+
 def safe_load_forward_cockpit() -> tuple[dict | None, str | None]:
     try:
         return load_forward_cockpit(), None
@@ -2231,6 +2237,56 @@ def watchlist_dataframe(items: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def render_watchlist_comparison(item: dict, current: dict, comparison: dict) -> None:
+    lifecycle = comparison.get("lifecycle") or {}
+    reasons = comparison.get("reasons") or []
+    reason_items = "".join(f"<li>{clean_text(reason)}</li>" for reason in reasons[:4]) or "<li>Brak dodatkowych zmian do pokazania.</li>"
+    status = str(comparison.get("comparison_status") or "")
+    tone = "success" if status in {"STILL_CONFIRMED", "GAINED_CONFIRMATION"} else "warning"
+    if status in {"REVERSED", "MISMATCH"}:
+        tone = "danger"
+    badge = {
+        "success": "🟢",
+        "warning": "🟡",
+        "danger": "🔴",
+    }[tone]
+    lifecycle_text = clean_text(lifecycle.get("label"))
+    elapsed = lifecycle.get("elapsed")
+    remaining = lifecycle.get("remaining")
+    lifecycle_detail = ""
+    if elapsed is not None and remaining is not None:
+        lifecycle_detail = f" · minęło ok. {elapsed} sesji, zostało ok. {remaining}"
+
+    now_available = bool(current.get("available"))
+    now_label = current.get("verdict_label") if now_available else "—"
+    now_prob = current.get("probability_up") if now_available else None
+    now_return = current.get("expected_return") if now_available else None
+    now_quality = current.get("quality") if now_available else "—"
+    now_data = current.get("data_as_of") if now_available else "—"
+
+    st.markdown(f"""
+    <div class="analysis-report">
+        <div class="analysis-main">
+            <small>Wtedy vs teraz</small>
+            <h3>{badge} {clean_text(comparison.get('label'))}</h3>
+            <p>Porównujemy ten sam symbol i ten sam horyzont: <strong>{clean_text(item.get('symbol'))} · {clean_text(item.get('horizon'))}d</strong>. Status wynika z przejścia istniejącej bramki MarketScope, a nie z nowych progów UI.</p>
+            <div class="analysis-note">{lifecycle_text}{clean_text(lifecycle_detail, '')}</div>
+            <div class="analysis-lists">
+                <div class="analysis-list"><h4>Co się zmieniło?</h4><ul>{reason_items}</ul></div>
+            </div>
+        </div>
+        <div class="analysis-side">
+            <div class="analysis-card"><small>Wtedy</small><strong>{clean_text(item.get('verdict_label'))}</strong><span>P(wzrost): {clean_text(value_pct(item.get('probability_up')))} · ruch {clean_text(signed_pct(item.get('expected_return')))}</span></div>
+            <div class="analysis-card"><small>Teraz</small><strong>{clean_text(now_label)}</strong><span>P(wzrost): {clean_text(value_pct(now_prob))} · ruch {clean_text(signed_pct(now_return))}</span></div>
+            <div class="analysis-card"><small>Zmiana P(wzrost)</small><strong>{clean_text(signed_pp(comparison.get('delta_probability')))}</strong><span>Pokazane jako kontekst, nie osobny verdict.</span></div>
+            <div class="analysis-card"><small>Zmiana ruchu</small><strong>{clean_text(signed_pp(comparison.get('delta_expected_return')))}</strong><span>Expected return wtedy vs teraz.</span></div>
+            <div class="analysis-card"><small>Jakość</small><strong>{clean_text(comparison.get('quality_change'))}</strong><span>Aktualne dane do: {clean_text(now_data)}</span></div>
+            <div class="analysis-card"><small>Lifecycle</small><strong>{clean_text(lifecycle.get('status'))}</strong><span>{lifecycle_text}</span></div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def render_watchlist_capture(result: dict, report: dict, source_context: dict | None = None) -> None:
     item = watch_item_from_analysis(result, report, source_context, source="ML", origin="full_analysis")
     existing = find_active_duplicate(load_watchlist(), item["symbol"], item["horizon"])
@@ -2364,9 +2420,14 @@ def render_watchlist() -> None:
                 st.rerun()
             saved = st.session_state.get("watchlist_analysis")
             if watchlist_analysis_matches_selection(saved, selected, years):
+                current_snapshot = watch_item_current_snapshot(saved["result"], selected)
+                comparison = compare_watch_item_to_current(selected, current_snapshot)
+                render_watchlist_comparison(selected, current_snapshot, comparison)
                 render_analysis(saved["result"], saved["profile"], {"radar_updated_at": selected.get("radar_as_of")})
             elif saved:
                 st.caption("Uruchom pełną analizę dla aktualnie wybranej obserwacji, żeby porównać ją z zapisanym snapshotem.")
+            else:
+                st.caption("Uruchom pełną analizę dla tej obserwacji, żeby zobaczyć porównanie „wtedy vs teraz”.")
 
     with tabs[1]:
         if not archived_items:
