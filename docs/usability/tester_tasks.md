@@ -4,7 +4,7 @@ To są zadania dla testera. Nie zawierają dokładnych instrukcji kliknięcia, b
 
 ## Wprowadzenie dla testera
 
-„To jest aplikacja badawcza do analizy rynku. Nie jest doradcą inwestycyjnym i nie wykonuje transakcji. Chcemy sprawdzić, czy rozumiesz, co aplikacja pokazuje i czy potrafisz samodzielnie znaleźć najważniejsze informacje. Myśl na głos podczas wykonywania zadań.”
+„To jest MarketScope. Chcemy sprawdzić, czy potrafisz samodzielnie zrozumieć aplikację i znaleźć najważniejsze informacje. Nie ma dobrych ani złych odpowiedzi. Myśl na głos podczas wykonywania zadań.”
 
 ## Zadanie 1 — konkretny instrument
 
@@ -14,7 +14,7 @@ Po wykonaniu odpowiedz:
 
 - Jaki jest główny wniosek?
 - Na jakim horyzoncie?
-- Czy aplikacja sugeruje pewny zysk, czy raczej pokazuje hipotezę?
+- Jak rozumiesz ten wynik?
 - Co może pójść źle?
 
 ## Zadanie 2 — co dziś jest ciekawe
@@ -25,7 +25,7 @@ Po wykonaniu odpowiedz:
 
 - Co wybrałeś?
 - Dlaczego aplikacja uznała to za warte uwagi?
-- Czy to jest pełny model ML, szybki radar, czy inny typ informacji?
+- Co według Ciebie oznacza typ/status tej informacji?
 
 ## Zadanie 3 — zapisz do późniejszego sprawdzenia
 
@@ -35,7 +35,7 @@ Po wykonaniu odpowiedz:
 
 - Co zostało zapisane?
 - Co aplikacja zapamiętała z momentu dodania?
-- Czy wygląda to jak prywatna lista pracy, czy jak realna transakcja?
+- Co według Ciebie właśnie się stało po kliknięciu?
 
 ## Zadanie 4 — wróć do obserwacji
 
@@ -45,7 +45,7 @@ Po wykonaniu odpowiedz:
 
 - Co aplikacja pokazała jako „wtedy”?
 - Co pokazuje jako „teraz”?
-- Czy teza się utrzymała, osłabła, zyskała potwierdzenie, czy została zanegowana?
+- Jak rozumiesz zmianę między „wtedy” i „teraz”?
 - Czy rozumiesz, skąd wynika ta ocena?
 
 ## Zadanie 5 — zaufanie i metodologia
@@ -63,6 +63,6 @@ Po wykonaniu odpowiedz:
 Własnymi słowami opisz:
 
 - Do czego służy MarketScope?
-- Czego nie powinno się z niego wnioskować?
+- Jakich decyzji lub wniosków nie podejmowałbyś wyłącznie na podstawie tej aplikacji?
 - Co było najbardziej intuicyjne?
 - Co było najbardziej mylące?
