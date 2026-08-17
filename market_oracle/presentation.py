@@ -121,15 +121,23 @@ def _reason_label(reason: str) -> str:
     return labels.get(reason, reason.replace("_", " ").lower())
 
 
+def _display_radar_action(value: Any) -> str:
+    labels = {
+        "RYZYKO / UNIKAJ": "Podwyższone ryzyko",
+    }
+    text = str(value or "—")
+    return labels.get(text, text)
+
+
 def _direction(verdict: SignalVerdict) -> tuple[str, str]:
     reason = _reason_label(verdict.reason)
     if verdict.decision == 1:
-        return "Potwierdzony kandydat wzrostowy", f"Wspólna bramka MarketScope zwraca LONG: {reason}."
+        return "Scenariusz wzrostowy spełnia warunki MarketScope", f"Werdykt techniczny: LONG — {reason}."
     if verdict.decision == -1:
-        return "Potwierdzone ryzyko spadku", f"Wspólna bramka MarketScope zwraca SHORT: {reason}."
+        return "Scenariusz spadkowy spełnia warunki MarketScope", f"Werdykt techniczny: SHORT — {reason}."
     if verdict.reason == "LOW_QUALITY":
         return "Brak potwierdzonej przewagi", "Model został celowo ściągnięty w stronę 50%, bo walidacja nie pokazała stabilnej przewagi."
-    return "Obserwuj", f"Wspólna bramka MarketScope nie potwierdza wejścia: {reason}."
+    return "Obserwuj", f"Reguły MarketScope nie potwierdzają kierunku: {reason}."
 
 
 def _trend_label(technical: dict) -> str:
@@ -232,13 +240,13 @@ def build_analysis_report(result: dict, profile: dict | None = None, source_cont
     brier = _finite_float(forecast.get("brier"))
 
     if verdict.decision == 1:
-        headline = f"{symbol}: potwierdzony kandydat wzrostowy na horyzoncie {horizon_text}."
+        headline = f"{symbol}: scenariusz wzrostowy spełnia warunki MarketScope na horyzoncie {horizon_text}."
     elif verdict.decision == -1:
-        headline = f"{symbol}: potwierdzone ryzyko spadku na horyzoncie {horizon_text}."
+        headline = f"{symbol}: scenariusz spadkowy spełnia warunki MarketScope na horyzoncie {horizon_text}."
     elif verdict.reason == "LOW_QUALITY":
         headline = f"{symbol}: brak potwierdzonej przewagi modelu — obserwuj, nie zakładaj edge."
     else:
-        headline = f"{symbol}: obserwuj — bramka MarketScope nie potwierdza wejścia na horyzoncie {horizon_text}."
+        headline = f"{symbol}: obserwuj — reguły MarketScope nie potwierdzają kierunku na horyzoncie {horizon_text}."
 
     rsi = _finite_float(technical.get("rsi_14"))
     rsi_text = "—" if rsi is None else f"{rsi:.1f}"
@@ -246,7 +254,7 @@ def build_analysis_report(result: dict, profile: dict | None = None, source_cont
     evidence = [
         f"Horyzont roboczy raportu: {horizon_text}; jakość walidacji: {quality}.",
         f"P(wzrost) { _pct(probability) }, oczekiwany ruch {expected}, zakres 90%: {lower} – {upper}.",
-        f"Decyzja bramki: {verdict.label} — {_reason_label(verdict.reason)}.",
+        f"Werdykt reguł MarketScope: {verdict.label} — {_reason_label(verdict.reason)}.",
         f"Technicznie: {trend}; zwrot 20 sesji/dni { _signed_pct(technical.get('return_20d')) }, RSI 14: {rsi_text}.",
     ]
     if auc is not None and brier is not None:
@@ -254,7 +262,7 @@ def build_analysis_report(result: dict, profile: dict | None = None, source_cont
 
     counterpoints: list[str] = []
     if verdict.decision == 0 and not quality.startswith("NISKA"):
-        counterpoints.append(f"Wspólna bramka MarketScope zwraca OBSERWUJ ({_reason_label(verdict.reason)}), więc raport nie promuje wejścia mimo pojedynczych mocnych metryk.")
+        counterpoints.append(f"Reguły MarketScope zwracają OBSERWUJ ({_reason_label(verdict.reason)}), więc raport nie wskazuje potwierdzonego kierunku mimo pojedynczych mocnych metryk.")
     if quality.startswith("NISKA"):
         counterpoints.append("Model sam oznacza jakość jako niską — brak przewagi jest ważniejszy niż pojedynczy ładny ruch ceny.")
     if _finite_float(forecast.get("lower_return")) is not None and float(forecast.get("lower_return")) < 0:
@@ -271,7 +279,7 @@ def build_analysis_report(result: dict, profile: dict | None = None, source_cont
 
     cards = [
         ("Co system widzi?", direction, direction_detail),
-        ("Jak mocny dowód?", quality, f"AUC {auc:.3f} · Brier {brier:.3f}" if auc is not None and brier is not None else "Brak pełnych metryk walidacji"),
+        ("Wsparcie w walidacji", quality, f"AUC {auc:.3f} · Brier {brier:.3f}" if auc is not None and brier is not None else "Brak pełnych metryk walidacji"),
         ("Horyzont", horizon_text, f"Ten horyzont ma teraz najwyższy priorytet raportu; pozostałe są poniżej."),
         ("Oczekiwany ruch", expected, f"Zakres 90%: {lower} – {upper}"),
         ("Trend", trend, f"1d {_signed_pct(technical.get('return_1d'))} · 5d {_signed_pct(technical.get('return_5d'))} · 20d {_signed_pct(technical.get('return_20d'))}"),
@@ -534,7 +542,7 @@ def build_start_guidance(
             title=f"Przejrzyj ryzyko: {symbol} ma alert radaru.",
             body=f"{_row_text(risk_leader, 'Teza radaru')}. Horyzont {_horizon_short(risk_leader)}, ruch/impet {_signed_pct(risk_leader.get('Oczekiwany ruch'))}.",
             source="Radar FAST/ML",
-            status=_row_text(risk_leader, "Akcja radaru"),
+            status=_display_radar_action(_row_text(risk_leader, "Akcja radaru")),
             cta=f"Uruchom pełną analizę: {symbol}",
             action="full_analysis",
             symbol=symbol,
@@ -551,7 +559,7 @@ def build_start_guidance(
             priority=80,
             title=f"Przeanalizuj {symbol}: ML ma potwierdzony setup {_horizon_short(ml_leader)}.",
             body=(
-                f"Bramka zwraca {verdict.label}; P(wzrost) {_pct(ml_leader.get('P(wzrost)'))}, "
+                f"Reguły MarketScope: {verdict.label}; P(wzrost) {_pct(ml_leader.get('P(wzrost)'))}, "
                 f"oczekiwany ruch {_signed_pct(ml_leader.get('Oczekiwany ruch'))}. To kandydat do analizy, nie polecenie transakcji."
             ),
             source="Deep ML",

@@ -1168,7 +1168,7 @@ def build_forward_cockpit(
         int(item.get("slot")) for item in active_items
         if item.get("slot") is not None
     })
-    health = "Proof flow zdrowy" if not problems else "Wymaga uwagi"
+    health = "Test forward działa prawidłowo" if not problems else "Wymaga uwagi"
     return {
         "healthy": not problems,
         "health": health,

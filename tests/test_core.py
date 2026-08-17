@@ -1971,6 +1971,9 @@ def test_analysis_report_separates_radar_and_full_analysis_dates():
     report = build_analysis_report(result, {}, {"radar_updated_at": "2026-08-05T07:13:00+02:00"})
 
     assert "20 sesji" in report["headline"]
+    assert "scenariusz wzrostowy spełnia warunki MarketScope" in report["headline"]
+    assert report["cards"][0][1] == "Scenariusz wzrostowy spełnia warunki MarketScope"
+    assert report["cards"][1][0] == "Wsparcie w walidacji"
     assert report["freshness"]["radar"] == "2026-08-05 07:13"
     assert report["freshness"]["analysis"] == "2026-08-07"
     assert "Candidate v1" not in report["headline"]
@@ -2007,6 +2010,7 @@ def test_analysis_report_uses_shared_verdict_for_expected_return_conflict():
     report = build_analysis_report(result, {}, {"radar_updated_at": "2026-08-05T07:13:00+02:00"})
 
     assert "obserwuj" in report["headline"].lower()
+    assert "reguły MarketScope nie potwierdzają kierunku" in report["headline"]
     assert "kandydat wzrostowy" not in report["headline"].lower()
     assert report["cards"][0][1] == "Obserwuj"
     assert any("konflikt" in item.lower() for item in report["evidence"] + report["counterpoints"])
@@ -2172,6 +2176,7 @@ def test_start_guidance_risk_alert_wins_before_ml_candidate():
 
     assert guidance["cards"][0]["id"] == "risk_alert"
     assert guidance["cards"][0]["symbol"] == "DEXE-USD"
+    assert guidance["cards"][0]["status"] == "Podwyższone ryzyko"
 
 
 def test_start_guidance_stale_snapshot_warns():
