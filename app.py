@@ -1096,17 +1096,17 @@ years = int(st.session_state["training_years"])
 APP_DIR = Path(__file__).resolve().parent
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=4, show_spinner=False)
 def cached_analysis(symbol: str, horizons: tuple[int, ...], years: int):
     return analyze_asset(symbol, horizons=horizons, years=years)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=32, show_spinner=False)
 def cached_profile(symbol: str):
     return download_profile(symbol)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=32, show_spinner=False)
 def cached_search(query: str):
     return search_assets(query)
 
@@ -3152,7 +3152,6 @@ def render_forward_cockpit() -> None:
         st.caption("Forward Cockpit jest tylko do odczytu. Główny run nadal odpalamy raz dziennie po 22:20.")
 
 
-@st.fragment(run_every="30s")
 def render_signal_dashboard() -> None:
     snapshot = load_snapshot()
     if not snapshot:
@@ -3638,7 +3637,15 @@ with radar:
     render_radar_saved_analysis(radar_snapshot)
     scan_running = bool(radar_snapshot and radar_snapshot.get("status") == "running")
     if scan_running:
-        st.caption("Pełny skan już trwa. Przycisk przeliczenia jest zablokowany, żeby nie startować drugiego procesu na tych samych danych.")
+        st.caption(
+            "Pełny skan już trwa. Panel nie odświeża się automatycznie, aby nie obciążać pamięci. "
+            "Użyj przycisku poniżej, aby pobrać aktualny postęp."
+        )
+        st.button(
+            "Odśwież postęp skanu",
+            key="signals_progress_refresh",
+            help="Odświeża bieżący widok bez uruchamiania kolejnego skanu.",
+        )
     if st.button(
         "Przelicz cały ranking teraz",
         key="signals_refresh",
