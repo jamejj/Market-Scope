@@ -1980,6 +1980,89 @@ def verdict_integrity_result(probability: float, expected_return: float) -> dict
     }
 
 
+def multi_horizon_analysis_result() -> dict:
+    result = verdict_integrity_result(0.63, 0.03)
+    result["forecasts"] = {
+        5: {
+            "probability_up": 0.60,
+            "expected_return": -0.01,
+            "lower_return": -0.05,
+            "upper_return": 0.06,
+            "auc": 0.64,
+            "brier": 0.22,
+            "quality": "WYSOKA",
+            "importance": {"ret_5": 0.6},
+        },
+        20: {
+            "probability_up": 0.63,
+            "expected_return": 0.03,
+            "lower_return": -0.06,
+            "upper_return": 0.12,
+            "auc": 0.66,
+            "brier": 0.21,
+            "quality": "WYSOKA",
+            "importance": {"ret_20": 0.7},
+        },
+        60: {
+            "probability_up": 0.54,
+            "expected_return": 0.02,
+            "lower_return": -0.10,
+            "upper_return": 0.18,
+            "auc": 0.59,
+            "brier": 0.24,
+            "quality": "UMIARKOWANA",
+            "importance": {"ret_60": 0.5},
+        },
+    }
+    return result
+
+
+def test_analysis_report_manual_horizon_uses_same_shared_verdict_and_auto_is_unchanged():
+    result = multi_horizon_analysis_result()
+
+    automatic = build_analysis_report(result)
+    manual = build_analysis_report(result, selected_horizon=5)
+
+    assert automatic["selection_mode"] == "AUTO"
+    assert automatic["primary_horizon"] == 20
+    assert automatic["verdict"]["label"] == "LONG"
+    assert manual["selection_mode"] == "MANUAL"
+    assert manual["requested_horizon"] == 5
+    assert manual["primary_horizon"] == 5
+    assert manual["verdict"]["label"] == "OBSERWUJ"
+    assert manual["verdict"]["reason"] == "EXPECTED_RETURN_CONFLICT"
+    assert "wybrany ręcznie" in manual["cards"][2][2].lower()
+
+
+def test_analysis_report_manual_horizon_has_no_silent_fallback():
+    with pytest.raises(ValueError, match="Horyzont 1 nie jest dostępny"):
+        build_analysis_report(multi_horizon_analysis_result(), selected_horizon=1)
+
+
+def test_aggregate_model_view_uses_manually_selected_report_horizon():
+    result = multi_horizon_analysis_result()
+    report = build_analysis_report(result, selected_horizon=60)
+    view = load_aggregate_model_view()(result, report)
+
+    assert report["primary_horizon"] == 60
+    assert view["verdict"] == report["headline"].rstrip(".")
+    assert view["best_label"].startswith("60 sesji")
+    assert view["tone"] == "info"
+
+
+def test_watchlist_saves_exact_manual_horizon_forecast_and_verdict():
+    result = multi_horizon_analysis_result()
+    report = build_analysis_report(result, selected_horizon=5)
+
+    item = watch_item_from_analysis(result, report, {"radar_updated_at": "2026-08-07T22:00:00+02:00"})
+
+    assert item["horizon"] == 5
+    assert item["probability_up"] == 0.60
+    assert item["expected_return"] == -0.01
+    assert item["verdict_label"] == "OBSERWUJ"
+    assert item["verdict"] == "EXPECTED_RETURN_CONFLICT"
+
+
 @pytest.mark.parametrize("probability,expected_return", [(0.60, -0.01), (0.54, 0.02)])
 def test_aggregate_model_view_does_not_create_bullish_verdict_outside_shared_gate(probability, expected_return):
     result = verdict_integrity_result(probability, expected_return)

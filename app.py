@@ -1813,7 +1813,7 @@ def render_radar_saved_analysis(snapshot: dict | None = None) -> None:
         f"Raport dla {symbol} jest pokazany poza auto-odświeżanym radarem, więc przyciski i Watchlista nie znikają podczas skanu w tle."
     )
     source_context = saved.get("source_context") or snapshot_source_context(snapshot)
-    render_analysis(saved["result"], saved["profile"], source_context)
+    render_analysis(saved["result"], saved["profile"], source_context, view_key="radar_full_analysis")
 
 
 def render_start_guidance(guidance: dict, snapshot: dict, cockpit: dict | None) -> None:
@@ -1883,7 +1883,12 @@ def render_start_guidance(guidance: dict, snapshot: dict, cockpit: dict | None) 
     saved = st.session_state.get("start_guidance_analysis")
     if panel == "analysis" and saved and saved.get("years") == years:
         st.caption("Pełna analiza uruchomiona z Guidance — bez przepisywania tickera.")
-        render_analysis(saved["result"], saved["profile"], saved.get("source_context") or snapshot_source_context(snapshot))
+        render_analysis(
+            saved["result"],
+            saved["profile"],
+            saved.get("source_context") or snapshot_source_context(snapshot),
+            view_key="start_guidance_analysis",
+        )
     elif panel == "show_forward_details":
         st.subheader("Szczegóły Forward z guidance")
         open_rows = pd.DataFrame((cockpit or {}).get("open_positions") or [])
@@ -2112,8 +2117,13 @@ def render_profile(profile: dict) -> None:
         column.metric(label, value)
 
 
-def render_analysis_report(result: dict, profile: dict, source_context: dict | None = None) -> dict:
-    report = build_analysis_report(result, profile, source_context)
+def render_analysis_report(
+    result: dict,
+    profile: dict,
+    source_context: dict | None = None,
+    selected_horizon: int | None = None,
+) -> dict:
+    report = build_analysis_report(result, profile, source_context, selected_horizon=selected_horizon)
     cards = "".join(
         '<div class="analysis-card">'
         f"<small>{clean_text(label)}</small>"
@@ -2403,7 +2413,12 @@ def render_watchlist() -> None:
                 current_snapshot = watch_item_current_snapshot(saved["result"], selected)
                 comparison = compare_watch_item_to_current(selected, current_snapshot)
                 render_watchlist_comparison(selected, current_snapshot, comparison)
-                render_analysis(saved["result"], saved["profile"], {"radar_updated_at": selected.get("radar_as_of")})
+                render_analysis(
+                    saved["result"],
+                    saved["profile"],
+                    {"radar_updated_at": selected.get("radar_as_of")},
+                    view_key=f"watchlist_{selected.get('id')}",
+                )
             elif saved:
                 st.caption("Uruchom pełną analizę dla aktualnie wybranej obserwacji, żeby porównać ją z zapisanym snapshotem.")
             else:
@@ -2416,13 +2431,57 @@ def render_watchlist() -> None:
             st.dataframe(watchlist_dataframe(archived_items), use_container_width=True, hide_index=True)
 
 
-def render_analysis(result: dict, profile: dict, source_context: dict | None = None) -> None:
+def analysis_horizon_selector(result: dict, view_key: str) -> int | None:
+    symbol = str(result.get("symbol") or "")
+    available = sorted({
+        int(horizon) for horizon in result.get("forecasts", {})
+        if str(horizon).isdigit() and int(horizon) in {1, 5, 20, 60}
+    })
+    options: list[str | int] = ["AUTO", *available]
+    crypto = symbol.upper().endswith("-USD")
+
+    def label(value: str | int) -> str:
+        return "Auto" if value == "AUTO" else horizon_text(int(value), crypto)
+
+    safe_key = "".join(character if character.isalnum() else "_" for character in f"{view_key}_{symbol}")
+    widget_key = f"full_analysis_horizon_{safe_key}"
+    help_text = "Auto zachowuje wybór MarketScope. Wybór ręczny interpretuje istniejący forecast przez tę samą wspólną bramkę werdyktu."
+    if hasattr(st, "segmented_control"):
+        selected = st.segmented_control(
+            "Horyzont raportu",
+            options,
+            default="AUTO",
+            format_func=label,
+            key=widget_key,
+            help=help_text,
+        )
+    else:
+        selected = st.radio(
+            "Horyzont raportu",
+            options,
+            index=0,
+            format_func=label,
+            key=widget_key,
+            help=help_text,
+            horizontal=True,
+        )
+    return None if selected in {None, "AUTO"} else int(selected)
+
+
+def render_analysis(
+    result: dict,
+    profile: dict,
+    source_context: dict | None = None,
+    *,
+    view_key: str,
+) -> None:
     symbol = result["symbol"]
     st.divider()
     title_col, date_col = st.columns([3, 1])
     title_col.subheader(f"{profile_name(profile, symbol)} · {symbol}")
     date_col.caption(f"Dane do {result['last_date'].date()} · benchmark: {result['benchmark']}")
-    report = render_analysis_report(result, profile, source_context)
+    selected_horizon = analysis_horizon_selector(result, view_key)
+    report = render_analysis_report(result, profile, source_context, selected_horizon)
     render_watchlist_capture(result, report, source_context)
 
     technical = result["technical"]
@@ -2430,7 +2489,7 @@ def render_analysis(result: dict, profile: dict, source_context: dict | None = N
     summary_cols = st.columns(3)
     summary_cols[0].metric("Ostatnia cena", f"{result['last_price']:,.2f} {profile.get('currency', '')}".strip())
     summary_cols[1].metric("Trend techniczny", view["trend_label"], help="Opis bieżącego trendu, nie prognoza przyszłej ceny.")
-    summary_cols[2].metric("Najlepszy horyzont modelu", view["best_label"])
+    summary_cols[2].metric("Horyzont raportu", view["best_label"])
 
     message = f"**{view['verdict']}.** {view['detail']}"
     if view["tone"] == "success":
@@ -2528,8 +2587,14 @@ def render_analysis(result: dict, profile: dict, source_context: dict | None = N
     st.caption(f"*Estymacja historyczna z maksymalnie 3 lat; roczna skala: {calendar}; stopa wolna od ryzyka przyjęta jako 0.")
 
     render_profile(profile)
-    with st.expander("Co najmocniej wpływa na model tygodniowy?"):
-        st.bar_chart(result["forecasts"][5]["importance"])
+    report_horizon = int(report["primary_horizon"])
+    report_forecast = result["forecasts"].get(report_horizon) or result["forecasts"].get(str(report_horizon))
+    with st.expander(f"Co najmocniej wpływa na model: {horizon_text(report_horizon, symbol.endswith('-USD'))}?"):
+        importance = None if report_forecast is None else report_forecast.get("importance")
+        if importance is None or (hasattr(importance, "__len__") and len(importance) == 0):
+            st.info("Brak danych feature importance dla wybranego horyzontu.")
+        else:
+            st.bar_chart(importance)
 
 
 def analysis_action(symbol: str, state_key: str, button_key: str) -> None:
@@ -2543,7 +2608,7 @@ def analysis_action(symbol: str, state_key: str, button_key: str) -> None:
             st.error(str(exc))
     saved = st.session_state.get(state_key)
     if saved and saved["result"]["symbol"] == symbol and saved.get("years") == years:
-        render_analysis(saved["result"], saved["profile"])
+        render_analysis(saved["result"], saved["profile"], view_key=state_key)
 
 
 def search_picker(prefix: str) -> str:

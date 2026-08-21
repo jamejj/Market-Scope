@@ -109,6 +109,17 @@ def _primary_forecast(forecasts: dict[Any, dict]) -> tuple[int, dict]:
     )
 
 
+def _report_forecast(forecasts: dict[Any, dict], selected_horizon: int | None) -> tuple[int, dict]:
+    if selected_horizon is None:
+        return _primary_forecast(forecasts)
+    requested = int(selected_horizon)
+    for horizon, forecast in _forecast_items(forecasts):
+        if horizon == requested:
+            return horizon, forecast
+    available = ", ".join(str(horizon) for horizon, _ in _forecast_items(forecasts)) or "brak"
+    raise ValueError(f"Horyzont {requested} nie jest dostępny w tej analizie. Dostępne: {available}.")
+
+
 def _reason_label(reason: str) -> str:
     labels = {
         "LONG_CONFIRMED": "wzrost potwierdzony przez wspólną bramkę",
@@ -213,7 +224,12 @@ def _radar_freshness(source_context: dict) -> tuple[str, str | None]:
     return "snapshot niedostępny", "Raport uruchomiono poza zapisanym kompletnym snapshotem radaru albo snapshot nie ma timestampu."
 
 
-def build_analysis_report(result: dict, profile: dict | None = None, source_context: dict | None = None) -> dict:
+def build_analysis_report(
+    result: dict,
+    profile: dict | None = None,
+    source_context: dict | None = None,
+    selected_horizon: int | None = None,
+) -> dict:
     """Human-readable report layer for full instrument analysis.
 
     This function deliberately does not change models, thresholds or signal decisions.
@@ -224,7 +240,8 @@ def build_analysis_report(result: dict, profile: dict | None = None, source_cont
     symbol = str(result.get("symbol") or "—")
     crypto = symbol.upper().endswith("-USD")
     forecasts = result.get("forecasts") or {}
-    horizon, forecast = _primary_forecast(forecasts)
+    horizon, forecast = _report_forecast(forecasts, selected_horizon)
+    selection_mode = "AUTO" if selected_horizon is None else "MANUAL"
     quality = str(forecast.get("quality") or "—")
     probability = _finite_float(forecast.get("probability_up"))
     verdict = _forecast_verdict(forecast)
@@ -277,10 +294,15 @@ def build_analysis_report(result: dict, profile: dict | None = None, source_cont
     if not counterpoints:
         counterpoints.append("Brak dużego czerwonego alertu w danych raportu, ale to nadal analiza probabilistyczna, nie pewność ruchu.")
 
+    horizon_detail = (
+        "Ten horyzont ma teraz najwyższy priorytet raportu; pozostałe są poniżej."
+        if selection_mode == "AUTO"
+        else "Horyzont wybrany ręcznie; werdykt policzono dla istniejącej prognozy tego horyzontu."
+    )
     cards = [
         ("Co system widzi?", direction, direction_detail),
         ("Wsparcie w walidacji", quality, f"AUC {auc:.3f} · Brier {brier:.3f}" if auc is not None and brier is not None else "Brak pełnych metryk walidacji"),
-        ("Horyzont", horizon_text, f"Ten horyzont ma teraz najwyższy priorytet raportu; pozostałe są poniżej."),
+        ("Horyzont", horizon_text, horizon_detail),
         ("Oczekiwany ruch", expected, f"Zakres 90%: {lower} – {upper}"),
         ("Trend", trend, f"1d {_signed_pct(technical.get('return_1d'))} · 5d {_signed_pct(technical.get('return_5d'))} · 20d {_signed_pct(technical.get('return_20d'))}"),
         ("Max drawdown", _signed_pct(drawdown), "Historyczne obsunięcie; niżej w raporcie są pełne metryki ryzyka."),
@@ -315,6 +337,8 @@ def build_analysis_report(result: dict, profile: dict | None = None, source_cont
     return {
         "symbol": symbol,
         "primary_horizon": horizon,
+        "selection_mode": selection_mode,
+        "requested_horizon": None if selected_horizon is None else int(selected_horizon),
         "verdict": {
             "label": verdict.label,
             "reason": verdict.reason,
