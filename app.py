@@ -2071,74 +2071,27 @@ def horizon_text(horizon: int, crypto: bool) -> str:
     return names.get(horizon, f"{horizon} {unit}")
 
 
-def best_confirmed_forecast(forecasts: dict[int, dict]) -> tuple[int, dict] | tuple[None, None]:
-    confirmed = [
-        (horizon, forecast) for horizon, forecast in forecasts.items()
-        if not forecast["quality"].startswith("NISKA")
-    ]
-    if not confirmed:
-        return None, None
-    return max(
-        confirmed,
-        key=lambda item: (
-            item[1]["quality"] == "WYSOKA",
-            abs(item[1]["probability_up"] - 0.5),
-            item[0],
-        ),
-    )
-
-
-def aggregate_model_view(result: dict) -> dict:
+def aggregate_model_view(result: dict, report: dict) -> dict:
     forecasts = result["forecasts"]
-    best_horizon, best = best_confirmed_forecast(forecasts)
-    five_day = forecasts.get(5) or next(iter(forecasts.values()))
+    primary_horizon = int(report["primary_horizon"])
+    primary = forecasts.get(primary_horizon) or forecasts.get(str(primary_horizon)) or next(iter(forecasts.values()))
+    shared_verdict = report["verdict"]
     technical = result["technical"]
     trend_points = sum([
         technical["return_20d"] > 0, technical["rsi_14"] >= 50,
         technical["above_sma_50"], technical["above_sma_200"],
     ])
     trend_label = "POZYTYWNY" if trend_points >= 3 else ("NEGATYWNY" if trend_points <= 1 else "MIESZANY")
-    if best is None:
-        if trend_label == "POZYTYWNY":
-            verdict = "Trend pozytywny, model ostrożny"
-            tone = "info"
-            detail = (
-                f"Technicznie instrument wygląda pozytywnie, ale modele kierunkowe nie potwierdziły jeszcze "
-                f"stabilnej przewagi poza próbką. Model 5d: AUC {five_day['auc']:.3f}, Brier {five_day['brier']:.3f}."
-            )
-        elif trend_label == "NEGATYWNY":
-            verdict = "Słaby trend, brak przewagi modelu"
-            tone = "warning"
-            detail = (
-                f"Trend i walidacja modelu są słabe. Model 5d: AUC {five_day['auc']:.3f}, "
-                f"Brier {five_day['brier']:.3f}. To raczej kandydat do obserwacji niż do pochopnej decyzji."
-            )
-        else:
-            verdict = "Brak czytelnej przewagi"
-            tone = "warning"
-            detail = (
-                f"Rynek jest mieszany, a model 5d nie ma przewagi: AUC {five_day['auc']:.3f}, "
-                f"Brier {five_day['brier']:.3f}. Warto patrzeć na hot movers, trend i dłuższe horyzonty."
-            )
-        best_label = "Brak przewagi"
-    else:
-        direction = signal_label(best["probability_up"], best["quality"]).lower()
-        best_label = f"{horizon_text(best_horizon, result['symbol'].endswith('-USD'))} · {best['quality']}"
-        if best["probability_up"] >= 0.54:
-            verdict = f"Model wskazuje scenariusz wzrostowy na {horizon_text(best_horizon, result['symbol'].endswith('-USD'))}"
-            tone = "success"
-        elif best["probability_up"] <= 0.46:
-            verdict = f"Model wskazuje scenariusz spadkowy na {horizon_text(best_horizon, result['symbol'].endswith('-USD'))}"
-            tone = "error"
-        else:
-            verdict = f"Model nie wskazuje wyraźnego kierunku na {horizon_text(best_horizon, result['symbol'].endswith('-USD'))}"
-            tone = "info"
-        detail = (
-            f"Najlepszy potwierdzony horyzont: **{best_label}**. "
-            f"Sygnał: **{direction}**, P(wzrost) {pct(best['probability_up'])}, "
-            f"AUC {best['auc']:.3f}, Brier {best['brier']:.3f}. "
-            f"Model 5d może być neutralny/słaby, ale to nie przekreśla dłuższego horyzontu."
-        )
+    best_label = f"{horizon_text(primary_horizon, result['symbol'].endswith('-USD'))} · {primary['quality']}"
+    decision = int(shared_verdict["decision"])
+    tone = "success" if decision == 1 else ("error" if decision == -1 else "info")
+    verdict = str(report["headline"]).rstrip(".")
+    detail = (
+        f"Wspólny werdykt MarketScope: **{shared_verdict['label']}**. "
+        f"P(wzrost) {pct(primary['probability_up'])}, oczekiwany ruch {signed_pct(primary['expected_return'])}, "
+        f"AUC {primary['auc']:.3f}, Brier {primary['brier']:.3f}. "
+        "To diagnostyka tego samego werdyktu, a nie osobny sygnał."
+    )
     return {"trend_label": trend_label, "best_label": best_label, "verdict": verdict, "tone": tone, "detail": detail}
 
 
@@ -2473,7 +2426,7 @@ def render_analysis(result: dict, profile: dict, source_context: dict | None = N
     render_watchlist_capture(result, report, source_context)
 
     technical = result["technical"]
-    view = aggregate_model_view(result)
+    view = aggregate_model_view(result, report)
     summary_cols = st.columns(3)
     summary_cols[0].metric("Ostatnia cena", f"{result['last_price']:,.2f} {profile.get('currency', '')}".strip())
     summary_cols[1].metric("Trend techniczny", view["trend_label"], help="Opis bieżącego trendu, nie prognoza przyszłej ceny.")

@@ -1,3 +1,4 @@
+import ast
 import json
 from pathlib import Path
 
@@ -86,6 +87,24 @@ def synthetic_data(n=900):
         "Close": close,
         "Volume": rng.integers(100_000, 2_000_000, n),
     }, index=pd.bdate_range("2020-01-01", periods=n))
+
+
+def load_aggregate_model_view():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(source_path))
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "aggregate_model_view"
+    )
+    namespace = {
+        "horizon_text": lambda horizon, crypto: f"{horizon} {'dni' if crypto else 'sesji'}",
+        "pct": lambda value: f"{value:.1%}",
+        "signed_pct": lambda value: f"{value:+.1%}",
+    }
+    module = ast.Module(body=[function], type_ignores=[])
+    exec(compile(module, str(source_path), "exec"), namespace)
+    return namespace["aggregate_model_view"]
 
 
 def test_features_are_finite_and_past_only():
@@ -1931,6 +1950,59 @@ def test_forward_automation_launchd_status_uses_gui_domain_and_detects_privacy_b
     assert status["last_exit_code"] == "1"
     assert status["privacy_block_detected"] is True
     assert "Full Disk Access" in status["privacy_hint"]
+
+
+def verdict_integrity_result(probability: float, expected_return: float) -> dict:
+    return {
+        "symbol": "TEST",
+        "last_date": pd.Timestamp("2026-08-07"),
+        "benchmark": "^GSPC",
+        "technical": {
+            "return_1d": 0.01,
+            "return_5d": 0.03,
+            "return_20d": 0.10,
+            "rsi_14": 62.0,
+            "above_sma_50": True,
+            "above_sma_200": True,
+        },
+        "risk": {"max_drawdown": -0.18},
+        "forecasts": {
+            20: {
+                "probability_up": probability,
+                "expected_return": expected_return,
+                "lower_return": -0.06,
+                "upper_return": 0.08,
+                "auc": 0.66,
+                "brier": 0.21,
+                "quality": "WYSOKA",
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize("probability,expected_return", [(0.60, -0.01), (0.54, 0.02)])
+def test_aggregate_model_view_does_not_create_bullish_verdict_outside_shared_gate(probability, expected_return):
+    result = verdict_integrity_result(probability, expected_return)
+    report = build_analysis_report(result)
+    view = load_aggregate_model_view()(result, report)
+
+    assert report["verdict"]["decision"] == 0
+    assert report["verdict"]["label"] == "OBSERWUJ"
+    assert view["verdict"] == report["headline"].rstrip(".")
+    assert view["tone"] == "info"
+    assert "model wskazuje scenariusz wzrostowy" not in f"{view['verdict']} {view['detail']}".lower()
+
+
+def test_aggregate_model_view_matches_shared_confirmed_long():
+    result = verdict_integrity_result(0.60, 0.02)
+    report = build_analysis_report(result)
+    view = load_aggregate_model_view()(result, report)
+
+    assert report["verdict"]["decision"] == 1
+    assert report["verdict"]["label"] == "LONG"
+    assert view["verdict"] == report["headline"].rstrip(".")
+    assert view["tone"] == "success"
+    assert "scenariusz wzrostowy spełnia warunki MarketScope" in view["verdict"]
 
 
 def test_analysis_report_separates_radar_and_full_analysis_dates():
