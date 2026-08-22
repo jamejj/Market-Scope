@@ -20,6 +20,7 @@ from market_oracle.catalog import (
 )
 from market_oracle.data import download_history, download_profile
 from market_oracle.engine import analyze_asset, scan_market_multi, signal_label
+from market_oracle.evidence import EvidenceRegistryError, evidence_copy, resolve_evidence
 from market_oracle.forward import load_forward_cockpit
 from market_oracle.journal import (
     journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results,
@@ -2124,6 +2125,7 @@ def render_analysis_report(
     selected_horizon: int | None = None,
 ) -> dict:
     report = build_analysis_report(result, profile, source_context, selected_horizon=selected_horizon)
+    render_evidence_status(result, report)
     cards = "".join(
         '<div class="analysis-card">'
         f"<small>{clean_text(label)}</small>"
@@ -2172,6 +2174,54 @@ def render_analysis_report(
         unsafe_allow_html=True,
     )
     return report
+
+
+def render_evidence_status(result: dict, report: dict) -> None:
+    symbol = str(result.get("symbol") or report.get("symbol") or "—")
+    horizon = int(report["primary_horizon"])
+    horizon_label = horizon_text(horizon, symbol.upper().endswith("-USD"))
+    try:
+        assessment = resolve_evidence(symbol, horizon, (result.get("forecasts") or {}).keys())
+        copy = evidence_copy(assessment)
+    except EvidenceRegistryError:
+        st.warning(
+            f"**Status dowodów dla {horizon_label}**\n\n"
+            "Status dowodów jest chwilowo niedostępny — kontrola integralności evidence registry nie przeszła."
+        )
+        return
+    st.info(
+        f"**Status dowodów dla {horizon_label}**\n\n"
+        f"{copy.icon} **{copy.title}**  \n{copy.summary}"
+    )
+    historical_claim = assessment.provenance.get("historical_claim") or {}
+    forward_claim = assessment.provenance.get("forward_claim") or {}
+    with st.expander("Szczegóły dowodów"):
+        st.write(copy.detail)
+        details = [
+            f"- Status historyczny: `{assessment.historical_evidence.value}`",
+            f"- Zakres evidence: `{assessment.evidence_scope.value if assessment.evidence_scope else 'BRAK ZAREJESTROWANEGO CLAIMU'}`",
+            f"- Registry: `{assessment.provenance.get('registry_id') or '—'}`",
+        ]
+        if historical_claim:
+            details.extend([
+                f"- Claim historyczny: `{historical_claim.get('claim_id') or '—'}`",
+                f"- Protokół historyczny: `{historical_claim.get('protocol_id') or '—'}`",
+                f"- Evidence zaktualizowane: `{historical_claim.get('evidence_updated_at') or '—'}`",
+            ])
+            for artifact in historical_claim.get("artifact_refs") or []:
+                details.append(
+                    f"- Artefakt: `{artifact.get('path') or '—'}` · SHA-256 `{str(artifact.get('sha256') or '—')[:12]}…`"
+                )
+        details.append(f"- Forward: `{assessment.forward_evidence.value}`")
+        if forward_claim:
+            details.extend([
+                f"- Claim Forward: `{forward_claim.get('claim_id') or '—'}`",
+                f"- Protokół Forward: `{forward_claim.get('protocol_id') or '—'}`",
+                f"- Start protokołu: `{forward_claim.get('started_at') or '—'}`",
+                f"- Ledger: `{forward_claim.get('ledger_path') or '—'}`",
+                f"- Pierwszy event hash: `{str(forward_claim.get('first_event_hash') or '—')[:12]}…`",
+            ])
+        st.markdown("\n".join(details))
 
 
 def watch_age_days(item: dict) -> int | None:

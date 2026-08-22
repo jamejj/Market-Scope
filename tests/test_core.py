@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import json
 from pathlib import Path
 
@@ -10,6 +11,19 @@ from market_oracle.backtest import _supervised_execution_frame, walk_forward_bac
 from market_oracle.catalog import CATEGORIES, CRYPTO, CRYPTO_CATEGORIES, ETF_CATEGORIES
 from market_oracle.cutoff import available_label_end
 from market_oracle.engine import observation_label, risk_reward_metrics, scan_market_fast, setup_intelligence, signal_label
+from market_oracle.evidence import (
+    EvidenceRegistryError,
+    EvidenceScope,
+    ForecastAvailability,
+    ForwardEvidence,
+    HistoricalEvidence,
+    evidence_copy,
+    load_evidence_registry,
+    registry_hash,
+    resolve_evidence,
+    validate_evidence_registry,
+    verify_evidence_sources,
+)
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.candidate import build_candidate_snapshot, run_candidate_forward_cycle
 from market_oracle.forward import (
@@ -2061,6 +2075,219 @@ def test_watchlist_saves_exact_manual_horizon_forecast_and_verdict():
     assert item["expected_return"] == -0.01
     assert item["verdict_label"] == "OBSERWUJ"
     assert item["verdict"] == "EXPECTED_RETURN_CONFLICT"
+
+
+def test_evidence_registry_maps_only_exact_protocol_symbols():
+    registry = load_evidence_registry()
+    candidate_claim = next(
+        claim for claim in registry["historical_claims"]
+        if claim["claim_id"] == "candidate_v1_h20_research_candidate"
+    )
+    forward_claim = registry["forward_claims"][0]
+    frozen_universe = load_forward_universe()
+    unseen_universe = load_unseen_universe()
+    unseen_claim = next(
+        claim for claim in registry["historical_claims"]
+        if claim["claim_id"] == "unseen_usa_etf_v1_h20_not_run"
+    )
+    assert candidate_claim["exact_symbols"] == frozen_universe["symbols"]
+    assert candidate_claim["candidate_manifest_hash"] == load_candidate_manifest()["manifest_hash"]
+    assert forward_claim["exact_symbols"] == frozen_universe["symbols"]
+    assert forward_claim["forward_universe_hash"] == frozen_universe["universe_hash"]
+    assert unseen_claim["exact_symbols"] == unseen_universe["symbols"]
+    assert unseen_claim["universe_hash"] == unseen_universe["universe_hash"]
+
+    spy = resolve_evidence("spy", 20, [1, 5, 20, 60], registry)
+    assert spy.forecast_availability is ForecastAvailability.AVAILABLE
+    assert spy.historical_evidence is HistoricalEvidence.RESEARCH_CANDIDATE
+    assert spy.forward_evidence is ForwardEvidence.IN_PROGRESS
+    assert spy.evidence_scope is EvidenceScope.AGGREGATE_UNIVERSE
+
+    aapl_5d = resolve_evidence("AAPL", 5, [1, 5, 20, 60], registry)
+    assert aapl_5d.historical_evidence is HistoricalEvidence.NO_EDGE
+    assert aapl_5d.forward_evidence is ForwardEvidence.NOT_STARTED
+
+    btc_20d = resolve_evidence("BTC-USD", 20, [1, 5, 20, 60], registry)
+    assert btc_20d.historical_evidence is HistoricalEvidence.INSUFFICIENT_EVIDENCE
+    assert btc_20d.forward_evidence is ForwardEvidence.NOT_STARTED
+
+    btc_60d = resolve_evidence("BTC-USD", 60, [1, 5, 20, 60], registry)
+    assert btc_60d.forecast_availability is ForecastAvailability.AVAILABLE
+    assert btc_60d.historical_evidence is HistoricalEvidence.UNTESTED
+
+    amzn = resolve_evidence("AMZN", 20, [20], registry)
+    assert amzn.historical_evidence is HistoricalEvidence.UNTESTED
+    assert amzn.historical_protocol_id == "unseen_usa_etf_v1"
+
+    for symbol in ("XTB.WA", "AAPL.US"):
+        unknown = resolve_evidence(symbol, 20, [20], registry)
+        assert unknown.historical_evidence is HistoricalEvidence.UNTESTED
+        assert unknown.historical_protocol_id is None
+        assert unknown.forward_evidence is ForwardEvidence.NOT_STARTED
+
+
+def test_evidence_copy_preserves_aggregate_scope_without_symbol_overclaim():
+    registry = load_evidence_registry()
+
+    aapl_copy = evidence_copy(resolve_evidence("AAPL", 5, [5], registry))
+    assert aapl_copy.title == "Brak wykazanej przewagi w protokole zbiorczym"
+    assert aapl_copy.summary == "AAPL należało do badanego koszyka; status nie jest indywidualną oceną instrumentu."
+    assert "AAPL było częścią badanego koszyka" in aapl_copy.detail
+    assert "nie jest to osobna ocena skuteczności AAPL" in aapl_copy.detail
+
+    spy_copy = evidence_copy(resolve_evidence("SPY", 20, [20], registry))
+    assert spy_copy.title == "Kandydat badawczy · Forward trwa"
+    assert spy_copy.summary == "Wynik pochodzi z protokołu zbiorczego, nie z indywidualnej walidacji SPY."
+    assert "wynik protokołu zbiorczego" in spy_copy.detail
+    assert "nie jest to indywidualnie potwierdzony edge" in spy_copy.detail
+    assert "Forward tego koszyka trwa" in spy_copy.detail
+    assert "potwierdzonej przewagi" in spy_copy.detail
+    assert len(spy_copy.summary) < len(spy_copy.detail)
+
+
+def test_evidence_copy_distinguishes_insufficient_unrun_and_unregistered():
+    registry = load_evidence_registry()
+
+    btc_20d = evidence_copy(resolve_evidence("BTC-USD", 20, [20], registry))
+    assert btc_20d.title == "Za mało dowodów w badanym zakresie"
+    assert "zbyt mała do wiarygodnego wniosku" in btc_20d.detail
+
+    btc_60d = evidence_copy(resolve_evidence("BTC-USD", 60, [60], registry))
+    assert btc_60d.title == "Eksperymentalny forecast"
+    assert "Brak zarejestrowanej walidacji" in btc_60d.detail
+
+    amzn = evidence_copy(resolve_evidence("AMZN", 20, [20], registry))
+    assert amzn.title == "Eksperymentalny forecast · protokół jeszcze nieuruchomiony"
+    assert "prerejestrowanego koszyka" in amzn.detail
+
+    xtb = evidence_copy(resolve_evidence("XTB.WA", 20, [20], registry))
+    assert xtb.title == "Eksperymentalny forecast"
+    assert "Brak zarejestrowanej walidacji" in xtb.detail
+
+
+def test_evidence_registry_hash_is_canonical_and_detects_tampering():
+    registry = load_evidence_registry()
+    reordered = dict(reversed(list(registry.items())))
+    assert registry_hash(reordered) == registry["registry_hash"]
+
+    tampered = json.loads(json.dumps(registry))
+    tampered["historical_claims"][0]["status"] = "RESEARCH_CANDIDATE"
+    with pytest.raises(EvidenceRegistryError, match="hash mismatch"):
+        validate_evidence_registry(tampered)
+
+    changed_hash = json.loads(json.dumps(registry))
+    changed_hash["registry_hash"] = "0" * 64
+    with pytest.raises(EvidenceRegistryError, match="hash mismatch"):
+        validate_evidence_registry(changed_hash)
+
+
+def test_evidence_registry_rejects_overlapping_exact_symbol_claims():
+    registry = load_evidence_registry()
+    overlapping = json.loads(json.dumps(registry))
+    duplicate = json.loads(json.dumps(overlapping["historical_claims"][0]))
+    duplicate["claim_id"] = "overlapping_aapl_h1"
+    duplicate["exact_symbols"] = ["AAPL"]
+    overlapping["historical_claims"].append(duplicate)
+    overlapping["registry_hash"] = registry_hash(overlapping)
+
+    with pytest.raises(EvidenceRegistryError, match=r"Overlapping historical claims.*AAPL 1"):
+        validate_evidence_registry(overlapping)
+
+
+def test_evidence_registry_provenance_is_structurally_complete():
+    registry = load_evidence_registry()
+
+    for claim in registry["historical_claims"]:
+        assert claim["artifact_refs"]
+        for artifact in claim["artifact_refs"]:
+            assert artifact["path"]
+            assert len(artifact["sha256"]) == 64
+
+    forward_claim = registry["forward_claims"][0]
+    assert forward_claim["ledger_id"] == "forward_ledger_candidate_v1"
+    assert forward_claim["ledger_path"] == "data/forward_ledger_candidate_v1.jsonl"
+    assert len(forward_claim["first_event_hash"]) == 64
+    assert forward_claim["started_at"]
+
+    incomplete = json.loads(json.dumps(registry))
+    incomplete["historical_claims"][0]["artifact_refs"][0].pop("sha256")
+    incomplete["registry_hash"] = registry_hash(incomplete)
+    with pytest.raises(EvidenceRegistryError, match="artifact requires a canonical sha256"):
+        validate_evidence_registry(incomplete)
+
+
+def test_explicit_evidence_source_audit_uses_portable_fixtures(tmp_path):
+    artifact_path = tmp_path / "research" / "report.json"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text('{"result":"fixture"}', encoding="utf-8")
+    artifact_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+
+    first_event = {
+        "event_hash": "a" * 64,
+        "event_time_utc": "2026-01-02T20:00:00+00:00",
+        "candidate_manifest_hash": "b" * 64,
+    }
+    ledger_path = tmp_path / "proof" / "ledger.jsonl"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(json.dumps(first_event) + "\n", encoding="utf-8")
+
+    registry = {
+        "schema_version": 1,
+        "registry_id": "fixture_registry",
+        "evidence_updated_at": "2026-01-02T20:00:00+00:00",
+        "hash_method": "sha256(canonical_json(registry_without_top_level_registry_hash))",
+        "historical_claims": [{
+            "claim_id": "fixture_historical",
+            "protocol_id": "fixture_protocol",
+            "horizon": 5,
+            "exact_symbols": ["TEST"],
+            "market_scope": ["TEST"],
+            "evidence_scope": "SYMBOL_SPECIFIC",
+            "status": "NO_EDGE",
+            "artifact_refs": [{"path": "research/report.json", "sha256": artifact_sha}],
+            "evidence_updated_at": "2026-01-02T20:00:00+00:00",
+        }],
+        "forward_claims": [{
+            "claim_id": "fixture_forward",
+            "protocol_id": "fixture_forward_protocol",
+            "horizon": 20,
+            "exact_symbols": ["TEST"],
+            "market_scope": ["TEST"],
+            "evidence_scope": "SYMBOL_SPECIFIC",
+            "status": "IN_PROGRESS",
+            "candidate_manifest_hash": "b" * 64,
+            "forward_universe_hash": "c" * 64,
+            "ledger_id": "fixture_ledger",
+            "ledger_path": "proof/ledger.jsonl",
+            "first_event_hash": "a" * 64,
+            "started_at": "2026-01-02T20:00:00+00:00",
+            "evidence_updated_at": "2026-01-02T20:00:00+00:00",
+        }],
+    }
+    registry["registry_hash"] = registry_hash(registry)
+
+    assert verify_evidence_sources(registry, root=tmp_path) == {
+        "artifacts": 1,
+        "forward_checkpoints": 1,
+    }
+    artifact_path.write_text('{"result":"tampered"}', encoding="utf-8")
+    with pytest.raises(EvidenceRegistryError, match="artifact hash mismatch"):
+        verify_evidence_sources(registry, root=tmp_path)
+
+
+def test_selected_report_horizon_is_the_only_input_to_evidence_resolution():
+    result = multi_horizon_analysis_result()
+    result["symbol"] = "SPY"
+    automatic = build_analysis_report(result)
+    manual = build_analysis_report(result, selected_horizon=60)
+
+    auto_evidence = resolve_evidence("SPY", automatic["primary_horizon"], result["forecasts"].keys())
+    manual_evidence = resolve_evidence("SPY", manual["primary_horizon"], result["forecasts"].keys())
+
+    assert automatic["primary_horizon"] == 20
+    assert auto_evidence.historical_evidence is HistoricalEvidence.RESEARCH_CANDIDATE
+    assert manual["primary_horizon"] == 60
+    assert manual_evidence.historical_evidence is HistoricalEvidence.UNTESTED
 
 
 @pytest.mark.parametrize("probability,expected_return", [(0.60, -0.01), (0.54, 0.02)])

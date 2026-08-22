@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "registry_id": "marketscope_evidence_registry_v1",
+  "evidence_updated_at": "2026-08-22T00:00:00+02:00",
+  "hash_method": "sha256(canonical_json(registry_without_top_level_registry_hash))",
+  "registry_hash": "833dccff5dae63889e6cc74725f60eaffe6b75a4481802d3c0040ddadc1380f8",
+  "historical_claims": [
+    {
+      "claim_id": "aggregate_validation_v1_h1_no_edge",
+      "protocol_id": "aggregate_validation_36da4a9db7bd8ee2",
+      "horizon": 1,
+      "exact_symbols": [
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "SPY",
+        "QQQ",
+        "BTC-USD",
+        "ETH-USD"
+      ],
+      "market_scope": [
+        "USA",
+        "ETF",
+        "CRYPTO"
+      ],
+      "evidence_scope": "AGGREGATE_UNIVERSE",
+      "status": "NO_EDGE",
+      "validation_run_id": "36da4a9db7bd8ee2_20260718T163106027469+0000",
+      "artifact_refs": [
+        {
+          "path": "outputs/validation/report_36da4a9db7bd8ee2_20260718T163106027469+0000.json",
+          "sha256": "94a468b78c6f7b5ffd7b1b6969324b14d7eb76d754a7a278a74d84c898d2cd80"
+        }
+      ],
+      "evidence_updated_at": "2026-07-18T16:31:06.027469+00:00"
+    },
+    {
+      "claim_id": "aggregate_validation_v1_h5_no_edge",
+      "protocol_id": "aggregate_validation_36da4a9db7bd8ee2",
+      "horizon": 5,
+      "exact_symbols": [
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "SPY",
+        "QQQ",
+        "BTC-USD",
+        "ETH-USD"
+      ],
+      "market_scope": [
+        "USA",
+        "ETF",
+        "CRYPTO"
+      ],
+      "evidence_scope": "AGGREGATE_UNIVERSE",
+      "status": "NO_EDGE",
+      "validation_run_id": "36da4a9db7bd8ee2_20260718T163106027469+0000",
+      "reality_run_id": "h5_20260718T175352678048+0000",
+      "artifact_refs": [
+        {
+          "path": "outputs/validation/report_36da4a9db7bd8ee2_20260718T163106027469+0000.json",
+          "sha256": "94a468b78c6f7b5ffd7b1b6969324b14d7eb76d754a7a278a74d84c898d2cd80"
+        },
+        {
+          "path": "outputs/reality/reality_report_records_36da4a9db7bd8ee2_20260718T163106027469+0000_h5_20260718T175352678048+0000.json",
+          "sha256": "f73d6aed24c921d870656ed8827f93cd2a56cfa86b0b5dfdd14b2b5b2e0f0630"
+        }
+      ],
+      "evidence_updated_at": "2026-07-18T17:53:52.678048+00:00"
+    },
+    {
+      "claim_id": "candidate_v1_h20_research_candidate",
+      "protocol_id": "marketscope_20d_long_candidate_v1",
+      "horizon": 20,
+      "exact_symbols": [
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "SPY",
+        "QQQ"
+      ],
+      "market_scope": [
+        "USA",
+        "ETF"
+      ],
+      "evidence_scope": "AGGREGATE_UNIVERSE",
+      "status": "RESEARCH_CANDIDATE",
+      "validation_run_id": "36da4a9db7bd8ee2_20260718T163106027469+0000",
+      "reality_run_id": "h20_20260718T175325649915+0000",
+      "candidate_id": "marketscope_20d_long_candidate_v1",
+      "candidate_manifest_hash": "ad98e4b3576d3b6465e7f5c29dba7c735f4a2cf81e1dc2f5c0fbc47ade178aac",
+      "artifact_refs": [
+        {
+          "path": "outputs/validation/report_36da4a9db7bd8ee2_20260718T163106027469+0000.json",
+          "sha256": "94a468b78c6f7b5ffd7b1b6969324b14d7eb76d754a7a278a74d84c898d2cd80"
+        },
+        {
+          "path": "outputs/reality/reality_report_records_36da4a9db7bd8ee2_20260718T163106027469+0000_h20_20260718T175325649915+0000.json",
+          "sha256": "3e5beccd109da73705412d6c21bf2f9b9c3ca5385e1eac5d1137d4cb6af31a7a"
+        }
+      ],
+      "evidence_updated_at": "2026-07-18T17:53:25.649915+00:00"
+    },
+    {
+      "claim_id": "crypto_reality_v1_h20_insufficient",
+      "protocol_id": "aggregate_validation_36da4a9db7bd8ee2_crypto_reality",
+      "horizon": 20,
+      "exact_symbols": [
+        "BTC-USD",
+        "ETH-USD"
+      ],
+      "market_scope": [
+        "CRYPTO"
+      ],
+      "evidence_scope": "AGGREGATE_UNIVERSE",
+      "status": "INSUFFICIENT_EVIDENCE",
+      "validation_run_id": "36da4a9db7bd8ee2_20260718T163106027469+0000",
+      "reality_run_id": "h20_20260718T175336206761+0000",
+      "artifact_refs": [
+        {
+          "path": "outputs/validation/report_36da4a9db7bd8ee2_20260718T163106027469+0000.json",
+          "sha256": "94a468b78c6f7b5ffd7b1b6969324b14d7eb76d754a7a278a74d84c898d2cd80"
+        },
+        {
+          "path": "outputs/reality/reality_report_records_36da4a9db7bd8ee2_20260718T163106027469+0000_h20_20260718T175336206761+0000.json",
+          "sha256": "3967474a90674b3737537f5fdd375ee0b4144321f4f84b6326362bb72fb19684"
+        }
+      ],
+      "evidence_updated_at": "2026-07-18T17:53:36.206761+00:00"
+    },
+    {
+      "claim_id": "unseen_usa_etf_v1_h20_not_run",
+      "protocol_id": "unseen_usa_etf_v1",
+      "horizon": 20,
+      "exact_symbols": [
+        "AMZN",
+        "GOOGL",
+        "META",
+        "AVGO",
+        "AMD",
+        "CRM",
+        "ORCL",
+        "LLY",
+        "UNH",
+        "JPM",
+        "V",
+        "MA",
+        "COST",
+        "HD",
+        "XOM",
+        "CAT",
+        "GE",
+        "BA",
+        "PEP",
+        "KO",
+        "MCD",
+        "WMT",
+        "TLT",
+        "IWM",
+        "DIA",
+        "XLK",
+        "XLF",
+        "XLV",
+        "XLE",
+        "XLY"
+      ],
+      "market_scope": [
+        "USA",
+        "ETF"
+      ],
+      "evidence_scope": "AGGREGATE_UNIVERSE",
+      "status": "UNTESTED",
+      "protocol_state": "PREREGISTERED_NOT_RUN",
+      "universe_id": "unseen_usa_etf_v1",
+      "universe_hash": "abda390bf6a79eb35713fdd6eb5b0e7101189c798a3edce293806b92fe686c57",
+      "artifact_refs": [
+        {
+          "path": "configs/unseen_usa_etf_v1.json",
+          "sha256": "faf2f98cf5620fbb01bb758fe80c5adc56abd3fdc74ff42a5c224f77a1020b96"
+        },
+        {
+          "path": "outputs/unseen/unseen_usa_etf_v1/unseen_preflight_abda390bf6a7.json",
+          "sha256": "32567b5f6bb10bfece2ead8e9b70520a4e37b5ef3faa1a993f255de8602d8b05"
+        }
+      ],
+      "evidence_updated_at": "2026-07-18T19:46:31.285237+00:00"
+    }
+  ],
+  "forward_claims": [
+    {
+      "claim_id": "candidate_v1_h20_forward_in_progress",
+      "protocol_id": "candidate_v1_forward_protocol",
+      "horizon": 20,
+      "exact_symbols": [
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "SPY",
+        "QQQ"
+      ],
+      "market_scope": [
+        "USA",
+        "ETF"
+      ],
+      "evidence_scope": "AGGREGATE_UNIVERSE",
+      "status": "IN_PROGRESS",
+      "candidate_id": "marketscope_20d_long_candidate_v1",
+      "candidate_manifest_hash": "ad98e4b3576d3b6465e7f5c29dba7c735f4a2cf81e1dc2f5c0fbc47ade178aac",
+      "forward_universe_id": "forward_universe_v1",
+      "forward_universe_hash": "ac0332c1fdfd84fe4770b82af444da239c57ded890b57e084df26fbfbad32ba3",
+      "ledger_id": "forward_ledger_candidate_v1",
+      "ledger_path": "data/forward_ledger_candidate_v1.jsonl",
+      "first_event_hash": "6f449cef843a2c1969049716696e28a2df0388ea010cdc895699cbd917984b6f",
+      "started_at": "2026-07-20T21:16:11.567786+00:00",
+      "evidence_updated_at": "2026-08-22T00:00:00+02:00"
+    }
+  ]
+}
