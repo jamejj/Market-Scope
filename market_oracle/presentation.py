@@ -309,8 +309,11 @@ def build_analysis_report(
     ]
     horizon_cards = []
     for h, f in _forecast_items(forecasts):
+        horizon_verdict = _forecast_verdict(f)
         horizon_cards.append({
+            "horizon": h,
             "label": _horizon_label(h, crypto),
+            "verdict": horizon_verdict.label,
             "probability": _pct(f.get("probability_up")),
             "expected": _signed_pct(f.get("expected_return")),
             "quality": str(f.get("quality") or "—"),

@@ -121,6 +121,25 @@ def load_aggregate_model_view():
     return namespace["aggregate_model_view"]
 
 
+def load_full_analysis_horizon_card_views():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(source_path))
+    function = next(
+        (
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_full_analysis_horizon_card_views"
+        ),
+        None,
+    )
+    assert function is not None, "Full Analysis horizon cards require a testable view-model."
+    namespace = {"pct": lambda value: f"{value:.1%}"}
+    module = ast.Module(body=[function], type_ignores=[])
+    exec(compile(module, str(source_path), "exec"), namespace)
+    return namespace["_full_analysis_horizon_card_views"]
+
+
 def test_features_are_finite_and_past_only():
     data = synthetic_data()
     original = build_features(data).iloc[400].copy()
@@ -2051,6 +2070,70 @@ def test_analysis_report_manual_horizon_uses_same_shared_verdict_and_auto_is_unc
 def test_analysis_report_manual_horizon_has_no_silent_fallback():
     with pytest.raises(ValueError, match="Horyzont 1 nie jest dostępny"):
         build_analysis_report(multi_horizon_analysis_result(), selected_horizon=1)
+
+
+@pytest.mark.parametrize(
+    "probability,expected_return,expected_verdict",
+    [
+        (0.54, 0.02, "OBSERWUJ"),
+        (0.60, -0.01, "OBSERWUJ"),
+        (0.60, 0.02, "LONG"),
+        (0.40, -0.02, "SHORT"),
+    ],
+)
+def test_full_analysis_horizon_card_uses_shared_verdict(
+    probability, expected_return, expected_verdict,
+):
+    result = verdict_integrity_result(probability, expected_return)
+    report = build_analysis_report(result)
+    cards = load_full_analysis_horizon_card_views()(result, report)
+
+    assert report["verdict"]["label"] == expected_verdict
+    assert cards == [{
+        "horizon": 20,
+        "title": f"Około miesiąca · {expected_verdict}",
+        "value": f"P(wzrost): {probability:.1%}",
+        "delta": f"oczekiwany ruch {expected_return:.1%}",
+        "caption": "Zakres 90%: -6.0% – 8.0%  ·  AUC 0.660  ·  Brier 0.210  ·  WYSOKA",
+    }]
+
+
+def test_full_analysis_horizon_card_view_fails_fast_when_report_horizon_is_missing():
+    result = multi_horizon_analysis_result()
+    report = build_analysis_report(result)
+    report["horizon_cards"] = [
+        card for card in report["horizon_cards"] if card["horizon"] != 5
+    ]
+
+    with pytest.raises(KeyError):
+        load_full_analysis_horizon_card_views()(result, report)
+
+
+def test_full_analysis_horizon_card_view_preserves_unknown_horizon_name_fallback():
+    result = verdict_integrity_result(0.60, 0.02)
+    result["forecasts"] = {10: result["forecasts"].pop(20)}
+    report = build_analysis_report(result)
+
+    cards = load_full_analysis_horizon_card_views()(result, report)
+
+    assert cards[0]["title"] == "10 · LONG"
+
+
+def test_render_analysis_wires_horizon_cards_to_shared_view_model_only():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    render_analysis = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_analysis"
+    )
+    direct_calls = {
+        node.func.id
+        for node in ast.walk(render_analysis)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+    assert "_full_analysis_horizon_card_views" in direct_calls
+    assert "signal_label" not in direct_calls
 
 
 def test_aggregate_model_view_uses_manually_selected_report_horizon():

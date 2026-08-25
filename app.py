@@ -19,7 +19,7 @@ from market_oracle.catalog import (
     crypto_category_options, crypto_options, etf_options,
 )
 from market_oracle.data import download_history, download_profile
-from market_oracle.engine import analyze_asset, scan_market_multi, signal_label
+from market_oracle.engine import analyze_asset, scan_market_multi
 from market_oracle.evidence import EvidenceRegistryError, evidence_copy, resolve_evidence
 from market_oracle.forward import load_forward_cockpit
 from market_oracle.journal import (
@@ -2518,6 +2518,36 @@ def analysis_horizon_selector(result: dict, view_key: str) -> int | None:
     return None if selected in {None, "AUTO"} else int(selected)
 
 
+def _full_analysis_horizon_card_views(result: dict, report: dict) -> list[dict]:
+    symbol = str(result["symbol"])
+    unit = "dzień" if symbol.endswith("-USD") else "sesja"
+    horizon_names = {
+        1: f"Następny {unit}",
+        5: "Najbliższy tydzień",
+        20: "Około miesiąca",
+        60: "Około kwartału",
+    }
+    report_cards = {
+        int(card["horizon"]): card
+        for card in report["horizon_cards"]
+    }
+    views = []
+    for raw_horizon, forecast in result["forecasts"].items():
+        horizon = int(raw_horizon)
+        report_card = report_cards[horizon]
+        views.append({
+            "horizon": horizon,
+            "title": f"{horizon_names.get(horizon, str(horizon))} · {report_card['verdict']}",
+            "value": f"P(wzrost): {pct(forecast['probability_up'])}",
+            "delta": f"oczekiwany ruch {pct(forecast['expected_return'])}",
+            "caption": (
+                f"Zakres 90%: {pct(forecast['lower_return'])} – {pct(forecast['upper_return'])}  ·  "
+                f"AUC {forecast['auc']:.3f}  ·  Brier {forecast['brier']:.3f}  ·  {forecast['quality']}"
+            ),
+        })
+    return views
+
+
 def render_analysis(
     result: dict,
     profile: dict,
@@ -2551,20 +2581,16 @@ def render_analysis(
     else:
         st.info(message)
 
-    unit = "dzień" if symbol.endswith("-USD") else "sesja"
-    horizon_names = {1: f"Następny {unit}", 5: "Najbliższy tydzień", 20: "Około miesiąca", 60: "Około kwartału"}
-    columns = st.columns(len(result["forecasts"]))
-    for column, (horizon, forecast) in zip(columns, result["forecasts"].items()):
+    horizon_card_views = _full_analysis_horizon_card_views(result, report)
+    columns = st.columns(len(horizon_card_views))
+    for column, card in zip(columns, horizon_card_views):
         with column:
             st.metric(
-                f"{horizon_names.get(horizon, str(horizon))} · {signal_label(forecast['probability_up'], forecast['quality'])}",
-                f"P(wzrost): {pct(forecast['probability_up'])}",
-                f"oczekiwany ruch {pct(forecast['expected_return'])}",
+                card["title"],
+                card["value"],
+                card["delta"],
             )
-            st.caption(
-                f"Zakres 90%: {pct(forecast['lower_return'])} – {pct(forecast['upper_return'])}  ·  "
-                f"AUC {forecast['auc']:.3f}  ·  Brier {forecast['brier']:.3f}  ·  {forecast['quality']}"
-            )
+            st.caption(card["caption"])
 
     with st.expander("Diagnostyka prognozy — czy model naprawdę ma przewagę?"):
         diagnostic_rows = []
