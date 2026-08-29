@@ -53,6 +53,21 @@ def validate_canonical_candidate_universe(
         raise SnapshotIntegrityError(errors)
 
 
+def validate_canonical_candidate_manifest(
+    manifest: dict[str, Any],
+    canonical_manifest: dict[str, Any],
+) -> None:
+    """Bind a supplied Candidate manifest to the versioned Candidate v1 contract."""
+
+    errors: list[str] = []
+    if manifest.get("manifest_hash") != canonical_manifest.get("manifest_hash"):
+        errors.append("manifest_hash does not match the canonical frozen manifest")
+    if manifest.get("candidate_id") != canonical_manifest.get("candidate_id"):
+        errors.append("candidate_id does not match the canonical frozen manifest")
+    if errors:
+        raise SnapshotIntegrityError(errors)
+
+
 def _symbol(row: dict[str, Any], index: int) -> str:
     value = row.get("Symbol")
     if value is None or not str(value).strip():

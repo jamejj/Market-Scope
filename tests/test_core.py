@@ -1136,6 +1136,58 @@ def _write_alternative_forward_universe(tmp_path, case: str) -> tuple[Path, dict
     return path, universe
 
 
+def _write_alternative_candidate_manifest(tmp_path) -> Path:
+    manifest = json.loads(json.dumps(load_candidate_manifest()))
+    manifest["decision_contract"]["threshold"] = 0.50
+    manifest["manifest_hash"] = forward_module.frozen_hash(manifest)
+    path = tmp_path / "alternate_candidate_manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
+def test_candidate_rejects_self_hashed_noncanonical_manifest_before_scan(tmp_path):
+    manifest_path = _write_alternative_candidate_manifest(tmp_path)
+    scan_called = False
+
+    def forbidden_scan(symbols, horizon, years):
+        nonlocal scan_called
+        scan_called = True
+        pytest.fail("noncanonical manifest must fail before the first scan")
+
+    with pytest.raises(SnapshotIntegrityError, match="canonical frozen manifest"):
+        build_candidate_snapshot(manifest_path=manifest_path, scan_fn=forbidden_scan)
+    assert scan_called is False
+
+
+def test_forward_writer_rejects_self_hashed_noncanonical_manifest_before_proof_write(tmp_path, monkeypatch):
+    manifest_path = _write_alternative_candidate_manifest(tmp_path)
+
+    def fake_scan(symbols, horizon, years):
+        row = _candidate_integrity_row(symbols[0])
+        row.pop("DecisionReason")
+        return pd.DataFrame([row]), {}
+
+    snapshot = build_candidate_snapshot(
+        scan_fn=fake_scan,
+        updated_at="2026-08-28T22:35:00+02:00",
+    )
+    ledger = tmp_path / "canonical_proof.jsonl"
+    monkeypatch.setattr(forward_module, "FORWARD_LEDGER_PATH", ledger)
+    append_forward_event({"event_type": "TEST_SEED", "status": "UNCHANGED"}, ledger)
+    before = ledger.read_bytes()
+
+    with pytest.raises(SnapshotIntegrityError, match="canonical frozen manifest"):
+        record_snapshot_forward_signals(
+            snapshot,
+            path=ledger,
+            manifest_path=manifest_path,
+            enforce_pipeline=False,
+            require_clean_tree=False,
+            require_closed_bar=False,
+        )
+    assert ledger.read_bytes() == before
+
+
 @pytest.mark.parametrize("case", ["symbols", "order", "candidate_id", "universe_id"])
 def test_candidate_rejects_self_hashed_noncanonical_universe_before_scan(tmp_path, case):
     path, _ = _write_alternative_forward_universe(tmp_path, case)

@@ -18,6 +18,7 @@ from .data import download_history
 from .integrity import (
     SnapshotIntegrityError,
     validate_candidate_snapshot_integrity,
+    validate_canonical_candidate_manifest,
     validate_canonical_candidate_universe,
 )
 
@@ -138,6 +139,17 @@ def git_dirty_paths(paths: tuple[str, ...] = CONTRACT_FILES) -> list[str]:
 
 def load_candidate_manifest(path: Path = CANDIDATE_MANIFEST_PATH) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_canonical_candidate_manifest(path: Path = CANDIDATE_MANIFEST_PATH) -> dict[str, Any]:
+    manifest = load_candidate_manifest(path)
+    canonical_manifest = load_candidate_manifest(CANDIDATE_MANIFEST_PATH)
+    if not verify_frozen_hash(canonical_manifest, "manifest_hash"):
+        raise SnapshotIntegrityError("canonical frozen manifest hash mismatch")
+    if not verify_frozen_hash(manifest, "manifest_hash"):
+        raise SnapshotIntegrityError(f"Candidate manifest hash mismatch: {path}")
+    validate_canonical_candidate_manifest(manifest, canonical_manifest)
+    return manifest
 
 
 def load_unseen_universe(path: Path = UNSEEN_UNIVERSE_PATH) -> dict[str, Any]:
@@ -525,7 +537,7 @@ def record_snapshot_forward_signals(
     universe = load_forward_universe(universe_path) if enforce_frozen_universe else None
     manifest = None
     if enforce_frozen_universe:
-        manifest = load_candidate_manifest(manifest_path)
+        manifest = load_canonical_candidate_manifest(manifest_path)
         canonical_universe = load_forward_universe(FORWARD_UNIVERSE_PATH)
         if not verify_frozen_hash(canonical_universe, "universe_hash"):
             raise SnapshotIntegrityError("canonical frozen universe hash mismatch")

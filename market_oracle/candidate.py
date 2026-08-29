@@ -15,7 +15,7 @@ from .forward import (
     FORWARD_UNIVERSE_PATH,
     assert_forward_contract_ready,
     frozen_hash,
-    load_candidate_manifest,
+    load_canonical_candidate_manifest,
     load_forward_events,
     load_forward_universe,
     pipeline_fingerprint,
@@ -88,7 +88,7 @@ def build_candidate_snapshot(
     scan_fn: Callable[[list[str], int, int], tuple[pd.DataFrame, dict[str, str]]] | None = None,
     updated_at: str | None = None,
 ) -> dict:
-    manifest = load_candidate_manifest(manifest_path)
+    manifest = load_canonical_candidate_manifest(manifest_path)
     universe = load_forward_universe(universe_path)
     canonical_universe = load_forward_universe(FORWARD_UNIVERSE_PATH)
     if not verify_frozen_hash(canonical_universe, "universe_hash"):
@@ -171,7 +171,7 @@ def run_candidate_forward_cycle(
     refresh_histories: dict[str, pd.DataFrame] | None = None,
     updated_at: str | None = None,
 ) -> tuple[dict, dict]:
-    manifest = load_candidate_manifest(manifest_path)
+    manifest = load_canonical_candidate_manifest(manifest_path)
     assert_forward_contract_ready(manifest, require_clean_tree=require_clean_tree, enforce_pipeline=enforce_pipeline)
     snapshot = build_candidate_snapshot(
         manifest_path=manifest_path,
