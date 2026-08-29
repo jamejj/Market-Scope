@@ -532,6 +532,9 @@ def execute_automation(
         "runner_payload": parsed["payload"],
         "runner_summary_text": parsed["summary_text"],
     }
+    runner_payload = parsed["payload"] if isinstance(parsed["payload"], dict) else {}
+    if run.returncode != 0 and runner_payload.get("failure_kind"):
+        payload["failure_kind"] = str(runner_payload["failure_kind"])
     payload["last_successful_run"] = _success_summary(payload) if run.returncode == 0 else _last_successful_run(stored)
     _write_json(config.status_path, payload)
     return payload

@@ -26,6 +26,7 @@ from market_oracle.evidence import (
 )
 from market_oracle.features import build_features, supervised_frame
 from market_oracle.candidate import build_candidate_snapshot, run_candidate_forward_cycle
+import market_oracle.candidate as candidate_module
 from market_oracle.forward import (
     assert_forward_contract_ready,
     append_forward_event,
@@ -45,6 +46,11 @@ from market_oracle.forward import (
     verify_pipeline_contract,
 )
 import market_oracle.forward as forward_module
+from market_oracle.integrity import (
+    INTEGRITY_EXIT_CODE,
+    SnapshotIntegrityError,
+    validate_candidate_snapshot_integrity,
+)
 from market_oracle.auto_forward import (
     AutomationConfig,
     automation_lock,
@@ -56,6 +62,7 @@ from market_oracle.auto_forward import (
     nyse_full_holidays,
 )
 import market_oracle.auto_forward as auto_forward_module
+import run_candidate_forward as candidate_runner_module
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast, fit_forecast_state
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
@@ -1087,6 +1094,261 @@ def test_candidate_manifest_is_frozen_and_hash_verified():
     assert len(unseen["symbols"]) == 30
 
 
+def _candidate_integrity_row(
+    symbol: str = "AAPL",
+    *,
+    probability: object = 0.61,
+    expected_return: object = 0.03,
+) -> dict:
+    return {
+        "Symbol": symbol,
+        "Klasa": "USA / ETF",
+        "Horyzont": 20,
+        "Data": "2026-07-20",
+        "Cena": 100.0,
+        "Ocena": "KANDYDAT WZROSTOWY",
+        "P(wzrost)": probability,
+        "Oczekiwany ruch": expected_return,
+        "AUC walidacji": 0.62,
+        "Brier": 0.22,
+        "Jakość modelu": "WYSOKA",
+        "Tryb analizy": "ML",
+        "DecisionReason": "LONG_CONFIRMED",
+    }
+
+
+def _write_alternative_forward_universe(tmp_path, case: str) -> tuple[Path, dict]:
+    universe = json.loads(json.dumps(load_forward_universe()))
+    if case == "symbols":
+        universe["symbols"] = ["AMZN", "META", "GOOGL", "IWM", "DIA"]
+        universe["markets"] = {symbol: "USA" for symbol in universe["symbols"]}
+    elif case == "order":
+        universe["symbols"] = list(reversed(universe["symbols"]))
+    elif case == "candidate_id":
+        universe["candidate_id"] = "different_candidate"
+    elif case == "universe_id":
+        universe["universe_id"] = "different_universe"
+    else:
+        raise AssertionError(f"Unknown test case: {case}")
+    universe["universe_hash"] = forward_module.frozen_hash(universe)
+    path = tmp_path / f"forward_universe_{case}.json"
+    path.write_text(json.dumps(universe), encoding="utf-8")
+    return path, universe
+
+
+@pytest.mark.parametrize("case", ["symbols", "order", "candidate_id", "universe_id"])
+def test_candidate_rejects_self_hashed_noncanonical_universe_before_scan(tmp_path, case):
+    path, _ = _write_alternative_forward_universe(tmp_path, case)
+    scan_called = False
+
+    def forbidden_scan(symbols, horizon, years):
+        nonlocal scan_called
+        scan_called = True
+        pytest.fail("noncanonical universe must fail before the first scan")
+
+    with pytest.raises(SnapshotIntegrityError, match="canonical frozen universe"):
+        build_candidate_snapshot(universe_path=path, scan_fn=forbidden_scan)
+    assert scan_called is False
+
+
+def test_forward_writer_rejects_self_hashed_noncanonical_universe_before_proof_write(tmp_path):
+    universe_path, universe = _write_alternative_forward_universe(tmp_path, "symbols")
+    snapshot = {
+        "status": "complete",
+        "schema_version": 1,
+        "scan_mode": "candidate_v1_full_ml",
+        "updated_at": "2026-07-20T22:30:00+02:00",
+        "records": [_candidate_integrity_row(symbol) for symbol in universe["symbols"]],
+        "forward_universe": {
+            "universe_id": universe["universe_id"],
+            "universe_hash": universe["universe_hash"],
+            "requested_symbols": universe["symbols"],
+            "completed_symbols": universe["symbols"],
+            "failed_symbols": [],
+            "full_coverage": True,
+        },
+    }
+    ledger = tmp_path / "foreign_universe.jsonl"
+    append_forward_event({"event_type": "TEST_SEED", "status": "UNCHANGED"}, ledger)
+    before = ledger.read_bytes()
+
+    with pytest.raises(SnapshotIntegrityError, match="frozen universe"):
+        record_snapshot_forward_signals(
+            snapshot,
+            path=ledger,
+            universe_path=universe_path,
+            enforce_pipeline=False,
+            require_clean_tree=False,
+            require_closed_bar=False,
+        )
+    assert ledger.read_bytes() == before
+
+
+def test_canonical_proof_ledger_cannot_disable_frozen_universe_guard(tmp_path, monkeypatch):
+    ledger = tmp_path / "canonical_proof.jsonl"
+    monkeypatch.setattr(forward_module, "FORWARD_LEDGER_PATH", ledger)
+    snapshot = {
+        "status": "complete",
+        "schema_version": 1,
+        "updated_at": "2026-07-20T22:30:00+02:00",
+        "records": [_candidate_integrity_row("AMZN")],
+    }
+
+    with pytest.raises(SnapshotIntegrityError, match="frozen universe"):
+        record_snapshot_forward_signals(
+            snapshot,
+            path=ledger,
+            enforce_pipeline=False,
+            require_clean_tree=False,
+            require_closed_bar=False,
+            require_full_universe=False,
+        )
+    assert not ledger.exists()
+
+
+def test_candidate_positive_path_matches_pre_interlock_snapshot_hash():
+    def fake_scan(symbols, horizon, years):
+        row = _candidate_integrity_row(symbols[0])
+        row.pop("DecisionReason")
+        return pd.DataFrame([row]), {}
+
+    snapshot = build_candidate_snapshot(
+        scan_fn=fake_scan,
+        updated_at="2026-07-20T22:30:00+02:00",
+    )
+    snapshot["candidate_pipeline"].pop("git_commit", None)
+    actual_bytes = json.dumps(
+        snapshot,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert hashlib.sha256(actual_bytes).hexdigest() == (
+        "87912205a99bae6bb397f5369a5a666387e6faa574c1d0e61cc800674cad74d0"
+    )
+
+
+@pytest.mark.parametrize("value", [None, np.nan, np.inf, -np.inf])
+def test_candidate_integrity_rejects_missing_or_nonfinite_expected_return(value):
+    snapshot = {"status": "complete", "records": [_candidate_integrity_row(expected_return=value)]}
+    with pytest.raises(SnapshotIntegrityError, match="expected_return"):
+        validate_candidate_snapshot_integrity(snapshot, require_full_universe=False)
+
+
+@pytest.mark.parametrize(
+    ("missing_key", "field_name"),
+    [("P(wzrost)", "probability_up"), ("Oczekiwany ruch", "expected_return")],
+)
+def test_candidate_integrity_rejects_absent_required_numeric_field(missing_key, field_name):
+    row = _candidate_integrity_row()
+    row.pop(missing_key)
+    with pytest.raises(SnapshotIntegrityError, match=field_name):
+        validate_candidate_snapshot_integrity(
+            {"status": "complete", "records": [row]},
+            require_full_universe=False,
+        )
+
+
+@pytest.mark.parametrize("value", [None, np.nan, np.inf, -np.inf, -0.001, 1.001])
+def test_candidate_integrity_rejects_invalid_probability(value):
+    snapshot = {"status": "complete", "records": [_candidate_integrity_row(probability=value)]}
+    with pytest.raises(SnapshotIntegrityError, match="probability_up"):
+        validate_candidate_snapshot_integrity(snapshot, require_full_universe=False)
+
+
+@pytest.mark.parametrize(
+    ("probability", "expected_return"),
+    [(0.0, 0.0), (1.0, 0.03), (0.5, -0.03)],
+)
+def test_candidate_integrity_accepts_probability_boundaries_and_any_finite_return(probability, expected_return):
+    snapshot = {
+        "status": "complete",
+        "records": [_candidate_integrity_row(probability=probability, expected_return=expected_return)],
+    }
+    validate_candidate_snapshot_integrity(snapshot, require_full_universe=False)
+
+
+def test_candidate_integrity_requires_exact_unique_frozen_universe():
+    universe = load_forward_universe()
+    symbols = universe["symbols"]
+    rows = [_candidate_integrity_row(symbol) for symbol in symbols[:-1]]
+    rows.append(_candidate_integrity_row(symbols[0]))
+    snapshot = {
+        "status": "complete",
+        "scan_mode": "candidate_v1_full_ml",
+        "records": rows,
+        "forward_universe": {
+            "universe_hash": universe["universe_hash"],
+            "requested_symbols": symbols,
+            "completed_symbols": symbols,
+            "failed_symbols": [],
+            "full_coverage": True,
+        },
+    }
+    with pytest.raises(SnapshotIntegrityError, match="duplicate|exact frozen universe"):
+        validate_candidate_snapshot_integrity(snapshot, expected_symbols=symbols)
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        _candidate_integrity_row("MSFT", probability=np.nan),
+        _candidate_integrity_row("MSFT", expected_return=np.inf),
+    ],
+)
+def test_forward_writer_integrity_guard_is_atomic_before_first_event(tmp_path, bad_row):
+    ledger = tmp_path / "atomic.jsonl"
+    append_forward_event({"event_type": "TEST_SEED", "status": "UNCHANGED"}, ledger)
+    before = ledger.read_bytes()
+    invalid = {
+        "status": "complete",
+        "schema_version": 6,
+        "updated_at": "2026-07-20T22:30:00+02:00",
+        "records": [
+            _candidate_integrity_row("AAPL"),
+            bad_row,
+        ],
+    }
+    with pytest.raises(SnapshotIntegrityError, match="MSFT.*(probability_up|expected_return)"):
+        record_snapshot_forward_signals(
+            invalid,
+            path=ledger,
+            enforce_pipeline=False,
+            require_clean_tree=False,
+            require_full_universe=False,
+        )
+    assert ledger.read_bytes() == before
+
+
+def test_forward_writer_rejects_partial_snapshot_without_proof_writes(tmp_path):
+    universe = load_forward_universe()
+    completed = universe["symbols"][:-1]
+    snapshot = {
+        "status": "partial",
+        "schema_version": 1,
+        "scan_mode": "candidate_v1_full_ml",
+        "updated_at": "2026-07-20T22:30:00+02:00",
+        "records": [_candidate_integrity_row(symbol) for symbol in completed],
+        "forward_universe": {
+            "universe_hash": universe["universe_hash"],
+            "requested_symbols": universe["symbols"],
+            "completed_symbols": completed,
+            "failed_symbols": [universe["symbols"][-1]],
+            "full_coverage": False,
+        },
+    }
+    ledger = tmp_path / "partial.jsonl"
+    with pytest.raises(SnapshotIntegrityError, match="partial|full frozen universe"):
+        record_snapshot_forward_signals(
+            snapshot,
+            path=ledger,
+            enforce_pipeline=False,
+            require_clean_tree=False,
+        )
+    assert not ledger.exists()
+
+
 def test_forward_ledger_records_only_candidate_rows_and_is_append_only(tmp_path):
     snapshot = {
         "status": "complete",
@@ -1333,7 +1595,14 @@ def test_forward_ledger_requires_full_universe_and_explicit_reason(tmp_path):
             "failed_symbols": [],
             "full_coverage": True,
         },
-        "records": [{key: value for key, value in row.items() if key != "DecisionReason"}],
+        "records": [
+            {
+                **row,
+                "Symbol": symbol,
+                **({} if symbol != universe["symbols"][0] else {"DecisionReason": None}),
+            }
+            for symbol in universe["symbols"]
+        ],
     }
     with pytest.raises(ValueError, match="missing explicit DecisionReason"):
         record_snapshot_forward_signals(
@@ -1666,6 +1935,70 @@ def test_candidate_snapshot_scans_full_frozen_universe_without_fast_shortlist():
     assert {row["Tryb analizy"] for row in snapshot["records"]} == {"ML"}
 
 
+@pytest.mark.parametrize("failure_mode", ["partial", "bad_probability", "bad_return"])
+def test_candidate_cycle_validates_full_snapshot_before_refresh_or_snapshot_write(
+    tmp_path,
+    monkeypatch,
+    failure_mode,
+):
+    universe = load_forward_universe()
+    refresh_called = False
+
+    def fake_scan(symbols, horizon, years):
+        symbol = symbols[0]
+        if symbol == universe["symbols"][-1] and failure_mode == "partial":
+            return pd.DataFrame(), {symbol: "DNS_TIMEOUT"}
+        row = _candidate_integrity_row(symbol)
+        if symbol == universe["symbols"][-1] and failure_mode == "bad_probability":
+            row["P(wzrost)"] = np.nan
+        if symbol == universe["symbols"][-1] and failure_mode == "bad_return":
+            row["Oczekiwany ruch"] = np.inf
+        return pd.DataFrame([row]), {}
+
+    def forbidden_refresh(**kwargs):
+        nonlocal refresh_called
+        refresh_called = True
+        pytest.fail("proof refresh must not run before the whole snapshot passes integrity")
+
+    monkeypatch.setattr(candidate_module, "refresh_forward_ledger", forbidden_refresh)
+    snapshot_path = tmp_path / "candidate_snapshot.json"
+    snapshot_path.write_text('{"sentinel":"unchanged"}', encoding="utf-8")
+    before_snapshot = snapshot_path.read_bytes()
+
+    with pytest.raises(SnapshotIntegrityError, match="partial|probability_up|expected_return|full frozen universe"):
+        run_candidate_forward_cycle(
+            ledger_path=tmp_path / "ledger.jsonl",
+            snapshot_path=snapshot_path,
+            scan_fn=fake_scan,
+            enforce_pipeline=False,
+            require_clean_tree=False,
+            require_closed_bar=False,
+            updated_at="2026-07-20T22:30:00+02:00",
+        )
+
+    assert refresh_called is False
+    assert snapshot_path.read_bytes() == before_snapshot
+    assert not (tmp_path / "ledger.jsonl").exists()
+
+    def valid_scan(symbols, horizon, years):
+        return pd.DataFrame([_candidate_integrity_row(symbols[0])]), {}
+
+    recovered, result = run_candidate_forward_cycle(
+        ledger_path=tmp_path / "ledger.jsonl",
+        snapshot_path=snapshot_path,
+        scan_fn=valid_scan,
+        refresh_first=False,
+        record=False,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+        updated_at="2026-07-20T22:35:00+02:00",
+    )
+    assert recovered["status"] == "complete"
+    assert result["added_signals"] == 0
+    assert json.loads(snapshot_path.read_text())["status"] == "complete"
+
+
 def test_candidate_cycle_refreshes_before_record_and_blocks_same_day_reentry(tmp_path):
     manifest = load_candidate_manifest()
     ledger = tmp_path / "cycle.jsonl"
@@ -1938,6 +2271,64 @@ def test_forward_automation_failed_run_writes_logs_and_status(tmp_path, monkeypa
     assert stored["runner_payload"]["status"] == "error"
     assert stored["runner_summary_text"] == "Human summary"
     assert stored["last_successful_run"]["target_session_date"] == "2026-07-23"
+
+
+def test_candidate_runner_maps_snapshot_integrity_failure_to_exit_65(monkeypatch, capsys):
+    def fail_integrity(**kwargs):
+        raise SnapshotIntegrityError(["QQQ: probability_up is non-finite"])
+
+    monkeypatch.setattr(candidate_runner_module, "run_candidate_forward_cycle", fail_integrity)
+    monkeypatch.setattr(candidate_runner_module.argparse.ArgumentParser, "parse_args", lambda self: type("Args", (), {
+        "candidate": "candidate.json",
+        "universe": "universe.json",
+        "snapshot": "snapshot.json",
+        "ledger": "ledger.jsonl",
+        "years": 8,
+        "no_record": False,
+        "no_refresh_first": False,
+        "allow_before_close": False,
+    })())
+
+    assert candidate_runner_module.main() == INTEGRITY_EXIT_CODE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "error"
+    assert payload["failure_kind"] == "INTEGRITY_FAILED"
+    assert payload["exit_code"] == 65
+    assert payload["integrity_errors"] == ["QQQ: probability_up is non-finite"]
+
+
+def test_forward_automation_preserves_integrity_failure_kind_and_exit_65(tmp_path, monkeypatch):
+    config = AutomationConfig(
+        status_path=tmp_path / "status.json",
+        lock_path=tmp_path / "run.lock",
+        log_dir=tmp_path / "logs",
+        candidate_command=("python", "run_candidate_forward.py"),
+    )
+    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", lambda: {"latest_audit_date": "2026-07-23"})
+
+    def integrity_runner(command):
+        return auto_forward_module.subprocess.CompletedProcess(
+            command,
+            INTEGRITY_EXIT_CODE,
+            json.dumps({
+                "status": "error",
+                "failure_kind": "INTEGRITY_FAILED",
+                "exit_code": INTEGRITY_EXIT_CODE,
+                "integrity_errors": ["QQQ: expected_return is missing"],
+            }),
+            "",
+        )
+
+    payload = execute_automation(
+        config=config,
+        now="2026-07-24T22:50:00+02:00",
+        runner=integrity_runner,
+    )
+    stored = json.loads(config.status_path.read_text())
+    assert payload["automation_status"] == "FAILED"
+    assert payload["failure_kind"] == "INTEGRITY_FAILED"
+    assert payload["exit_code"] == 65
+    assert stored["failure_kind"] == "INTEGRITY_FAILED"
 
 
 def test_forward_automation_launchd_plist_has_weekday_schedule(tmp_path):

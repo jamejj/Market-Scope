@@ -12,9 +12,10 @@ from market_oracle.forward import (
     FORWARD_UNIVERSE_PATH,
     format_forward_cli_summary,
 )
+from market_oracle.integrity import INTEGRITY_EXIT_CODE, SnapshotIntegrityError
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="Run the full Candidate v1 forward scanner: refresh → full ML scan → ledger record.")
     parser.add_argument("--candidate", default=str(CANDIDATE_MANIFEST_PATH))
     parser.add_argument("--universe", default=str(FORWARD_UNIVERSE_PATH))
@@ -26,16 +27,25 @@ def main() -> None:
     parser.add_argument("--allow-before-close", action="store_true", help="Do not block same-day rows before the US close buffer.")
     args = parser.parse_args()
 
-    snapshot, result = run_candidate_forward_cycle(
-        manifest_path=Path(args.candidate),
-        universe_path=Path(args.universe),
-        snapshot_path=Path(args.snapshot),
-        ledger_path=Path(args.ledger),
-        years=args.years,
-        record=not args.no_record,
-        refresh_first=not args.no_refresh_first,
-        require_closed_bar=not args.allow_before_close,
-    )
+    try:
+        snapshot, result = run_candidate_forward_cycle(
+            manifest_path=Path(args.candidate),
+            universe_path=Path(args.universe),
+            snapshot_path=Path(args.snapshot),
+            ledger_path=Path(args.ledger),
+            years=args.years,
+            record=not args.no_record,
+            refresh_first=not args.no_refresh_first,
+            require_closed_bar=not args.allow_before_close,
+        )
+    except SnapshotIntegrityError as exc:
+        print(json.dumps({
+            "status": "error",
+            "failure_kind": exc.failure_kind,
+            "exit_code": exc.exit_code,
+            "integrity_errors": exc.errors,
+        }, ensure_ascii=False))
+        return INTEGRITY_EXIT_CODE
     payload = {
         "snapshot": args.snapshot,
         "ledger": args.ledger,
@@ -52,7 +62,8 @@ def main() -> None:
         path=Path(args.ledger),
         manifest_path=Path(args.candidate),
     ))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

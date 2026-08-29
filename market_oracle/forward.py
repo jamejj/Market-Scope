@@ -15,6 +15,11 @@ import numpy as np
 import pandas as pd
 
 from .data import download_history
+from .integrity import (
+    SnapshotIntegrityError,
+    validate_candidate_snapshot_integrity,
+    validate_canonical_candidate_universe,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -515,16 +520,40 @@ def record_snapshot_forward_signals(
     symbol, signal date, horizon and direction so a repeated dashboard refresh
     does not create a second pending trade.
     """
+    canonical_proof_ledger = path.resolve() == FORWARD_LEDGER_PATH.resolve()
+    enforce_frozen_universe = require_full_universe or canonical_proof_ledger
+    universe = load_forward_universe(universe_path) if enforce_frozen_universe else None
+    manifest = None
+    if enforce_frozen_universe:
+        manifest = load_candidate_manifest(manifest_path)
+        canonical_universe = load_forward_universe(FORWARD_UNIVERSE_PATH)
+        if not verify_frozen_hash(canonical_universe, "universe_hash"):
+            raise SnapshotIntegrityError("canonical frozen universe hash mismatch")
+        if universe is None or not verify_frozen_hash(universe, "universe_hash"):
+            raise SnapshotIntegrityError(f"Forward universe hash mismatch: {universe_path}")
+        validate_canonical_candidate_universe(
+            universe,
+            canonical_universe,
+            expected_candidate_id=str(manifest.get("candidate_id") or ""),
+        )
+    has_universe_metadata = bool(snapshot.get("forward_universe"))
+    if require_full_universe and not has_universe_metadata:
+        validate_forward_universe_snapshot(snapshot, universe or {})
+    validate_candidate_snapshot_integrity(
+        snapshot,
+        expected_symbols=None if universe is None else universe.get("symbols") or [],
+        require_full_universe=enforce_frozen_universe,
+    )
+    if enforce_frozen_universe:
+        validate_forward_universe_snapshot(snapshot, universe or {})
     if snapshot.get("status") != "complete":
         return 0
-    manifest = load_candidate_manifest(manifest_path)
+    manifest = manifest or load_candidate_manifest(manifest_path)
     assert_forward_contract_ready(
         manifest,
         require_clean_tree=require_clean_tree,
         enforce_pipeline=enforce_pipeline,
     )
-    if require_full_universe:
-        validate_forward_universe_snapshot(snapshot, load_forward_universe(universe_path))
     if not allow_historical and not snapshot_after_freeze(snapshot, manifest):
         raise ValueError("Snapshot is older than Candidate v1 frozen_at; refusing historical backfill.")
     current_pipeline = pipeline_fingerprint()

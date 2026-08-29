@@ -24,6 +24,11 @@ from .forward import (
     summarize_forward_run_events,
     verify_frozen_hash,
 )
+from .integrity import (
+    SnapshotIntegrityError,
+    validate_candidate_snapshot_integrity,
+    validate_canonical_candidate_universe,
+)
 from .signals import SignalInputs, signal_verdict
 
 
@@ -53,10 +58,6 @@ def load_candidate_snapshot(path: Path = CANDIDATE_SNAPSHOT_PATH) -> dict | None
         return json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
-
-
-def _records(frame: pd.DataFrame) -> list[dict]:
-    return [_json_safe(row) for row in frame.to_dict("records")]
 
 
 def add_explicit_decision_reason(row: dict, manifest: dict) -> dict:
@@ -89,10 +90,18 @@ def build_candidate_snapshot(
 ) -> dict:
     manifest = load_candidate_manifest(manifest_path)
     universe = load_forward_universe(universe_path)
+    canonical_universe = load_forward_universe(FORWARD_UNIVERSE_PATH)
+    if not verify_frozen_hash(canonical_universe, "universe_hash"):
+        raise SnapshotIntegrityError("canonical frozen universe hash mismatch")
     if not verify_frozen_hash(universe, "universe_hash"):
-        raise ValueError(f"Forward universe hash mismatch: {universe_path}")
+        raise SnapshotIntegrityError(f"Forward universe hash mismatch: {universe_path}")
+    validate_canonical_candidate_universe(
+        universe,
+        canonical_universe,
+        expected_candidate_id=str(manifest.get("candidate_id") or ""),
+    )
     symbols = [str(symbol).upper() for symbol in universe.get("symbols") or []]
-    records: list[dict] = []
+    raw_records: list[dict] = []
     errors: dict[str, str] = {}
     completed: list[str] = []
     scan = scan_fn or (lambda symbols_arg, horizon_arg, years_arg: scan_market(symbols_arg, horizon=horizon_arg, years=years_arg))
@@ -106,14 +115,13 @@ def build_candidate_snapshot(
         if frame.empty or symbol not in set(frame.get("Symbol", pd.Series(dtype=object)).astype(str).str.upper()):
             errors[symbol] = "NO_CANDIDATE_ROW"
             continue
-        for row in _records(frame):
-            records.append(add_explicit_decision_reason(row, manifest))
+        raw_records.extend(frame.to_dict("records"))
         completed.append(symbol)
 
     failed = sorted(set(symbols) - set(completed))
     full_coverage = len(failed) == 0
     timestamp = updated_at or datetime.now(timezone.utc).isoformat()
-    return {
+    snapshot = {
         "status": "complete" if full_coverage else "partial",
         "started_at": timestamp,
         "updated_at": timestamp,
@@ -136,9 +144,15 @@ def build_candidate_snapshot(
         "years": int(years),
         "completed": len(completed),
         "total": len(symbols),
-        "records": records,
+        "records": raw_records,
         "errors": errors,
     }
+    validate_candidate_snapshot_integrity(snapshot, expected_symbols=symbols)
+    snapshot["records"] = [
+        add_explicit_decision_reason(_json_safe(row), manifest)
+        for row in raw_records
+    ]
+    return snapshot
 
 
 def run_candidate_forward_cycle(
@@ -159,6 +173,13 @@ def run_candidate_forward_cycle(
 ) -> tuple[dict, dict]:
     manifest = load_candidate_manifest(manifest_path)
     assert_forward_contract_ready(manifest, require_clean_tree=require_clean_tree, enforce_pipeline=enforce_pipeline)
+    snapshot = build_candidate_snapshot(
+        manifest_path=manifest_path,
+        universe_path=universe_path,
+        years=years,
+        scan_fn=scan_fn,
+        updated_at=updated_at,
+    )
     refresh_errors: dict[str, str] = {}
     try:
         before_events = load_forward_events(ledger_path)
@@ -176,13 +197,6 @@ def run_candidate_forward_cycle(
             require_clean_tree=require_clean_tree,
         )
     refresh_events = events_after_refresh[before_count:]
-    snapshot = build_candidate_snapshot(
-        manifest_path=manifest_path,
-        universe_path=universe_path,
-        years=years,
-        scan_fn=scan_fn,
-        updated_at=updated_at,
-    )
     snapshot["pre_scan_refresh_errors"] = refresh_errors
     save_candidate_snapshot(snapshot, snapshot_path)
     added = 0
