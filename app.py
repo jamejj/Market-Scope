@@ -2532,17 +2532,20 @@ def _full_analysis_horizon_card_views(result: dict, report: dict) -> list[dict]:
         for card in report["horizon_cards"]
     }
     views = []
-    for raw_horizon, forecast in result["forecasts"].items():
+    for raw_horizon in result["forecasts"]:
         horizon = int(raw_horizon)
         report_card = report_cards[horizon]
+        expected = report_card["expected"].removeprefix("+")
+        lower = report_card["lower"].removeprefix("+")
+        upper = report_card["upper"].removeprefix("+")
         views.append({
             "horizon": horizon,
             "title": f"{horizon_names.get(horizon, str(horizon))} · {report_card['verdict']}",
-            "value": f"P(wzrost): {pct(forecast['probability_up'])}",
-            "delta": f"oczekiwany ruch {pct(forecast['expected_return'])}",
+            "value": f"P(wzrost): {report_card['probability']}",
+            "delta": f"oczekiwany ruch {expected}",
             "caption": (
-                f"Zakres 90%: {pct(forecast['lower_return'])} – {pct(forecast['upper_return'])}  ·  "
-                f"AUC {forecast['auc']:.3f}  ·  Brier {forecast['brier']:.3f}  ·  {forecast['quality']}"
+                f"Zakres 90%: {lower} – {upper}  ·  "
+                f"AUC {report_card['auc']}  ·  Brier {report_card['brier']}  ·  {report_card['quality']}"
             ),
         })
     return views

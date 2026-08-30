@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .product_verdict import has_complete_expected_return, product_forecast_verdict
 from .signals import DEFAULT_SIGNAL_THRESHOLD, SignalInputs, SignalVerdict, signal_verdict
 
 
@@ -50,21 +51,8 @@ def _forecast_items(forecasts: dict[Any, dict]) -> list[tuple[int, dict]]:
     return sorted(items, key=lambda item: item[0])
 
 
-def _forecast_inputs(forecast: dict) -> SignalInputs:
-    probability = _finite_float(forecast.get("probability_up"))
-    expected_return = _finite_float(forecast.get("expected_return"))
-    return SignalInputs(
-        probability=0.5 if probability is None else probability,
-        expected_return=0.0 if expected_return is None else expected_return,
-        quality=str(forecast.get("quality") or "NISKA — BRAK PRZEWAGI"),
-        auc=_finite_float(forecast.get("auc")),
-        brier=_finite_float(forecast.get("brier")),
-        source="FULL_ANALYSIS",
-    )
-
-
 def _forecast_verdict(forecast: dict) -> SignalVerdict:
-    return signal_verdict(_forecast_inputs(forecast), threshold=DEFAULT_SIGNAL_THRESHOLD)
+    return product_forecast_verdict(forecast, source="FULL_ANALYSIS")
 
 
 def _quality_rank(quality: str) -> int:
@@ -100,6 +88,7 @@ def _primary_forecast(forecasts: dict[Any, dict]) -> tuple[int, dict]:
     return max(
         items,
         key=lambda item: (
+            int(has_complete_expected_return(item[1])),
             _verdict_rank(_forecast_verdict(item[1])),
             _quality_rank(str(item[1].get("quality") or "")),
             probability_distance(item[1]),
@@ -128,6 +117,7 @@ def _reason_label(reason: str) -> str:
         "EXPECTED_RETURN_CONFLICT": "konflikt P(wzrost) z oczekiwanym ruchem",
         "EXPECTED_RETURN_TOO_SMALL": "oczekiwany ruch za mały",
         "PROBABILITY_INSIDE_BAND": "prawdopodobieństwo wewnątrz pasma obserwacji",
+        "INCOMPLETE_FORECAST": "brak wiarygodnej wartości oczekiwanego ruchu",
     }
     return labels.get(reason, reason.replace("_", " ").lower())
 
@@ -148,6 +138,8 @@ def _direction(verdict: SignalVerdict) -> tuple[str, str]:
         return "Scenariusz spadkowy spełnia warunki MarketScope", f"Werdykt techniczny: SHORT — {reason}."
     if verdict.reason == "LOW_QUALITY":
         return "Brak potwierdzonej przewagi", "Model został celowo ściągnięty w stronę 50%, bo walidacja nie pokazała stabilnej przewagi."
+    if verdict.reason == "INCOMPLETE_FORECAST":
+        return "Obserwuj", "Brak wiarygodnej wartości oczekiwanego ruchu."
     return "Obserwuj", f"Reguły MarketScope nie potwierdzają kierunku: {reason}."
 
 
@@ -262,6 +254,8 @@ def build_analysis_report(
         headline = f"{symbol}: scenariusz spadkowy spełnia warunki MarketScope na horyzoncie {horizon_text}."
     elif verdict.reason == "LOW_QUALITY":
         headline = f"{symbol}: brak potwierdzonej przewagi modelu — obserwuj, nie zakładaj edge."
+    elif verdict.reason == "INCOMPLETE_FORECAST":
+        headline = f"{symbol}: obserwuj — brak wiarygodnej wartości oczekiwanego ruchu na horyzoncie {horizon_text}."
     else:
         headline = f"{symbol}: obserwuj — reguły MarketScope nie potwierdzają kierunku na horyzoncie {horizon_text}."
 
@@ -316,6 +310,8 @@ def build_analysis_report(
             "verdict": horizon_verdict.label,
             "probability": _pct(f.get("probability_up")),
             "expected": _signed_pct(f.get("expected_return")),
+            "lower": _signed_pct(f.get("lower_return")),
+            "upper": _signed_pct(f.get("upper_return")),
             "quality": str(f.get("quality") or "—"),
             "auc": _decimal(f.get("auc")),
             "brier": _decimal(f.get("brier")),

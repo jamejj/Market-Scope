@@ -864,6 +864,32 @@ def test_watchlist_current_snapshot_uses_saved_horizon_and_shared_gate():
     assert conflict["verdict_decision"] == 0
 
 
+@pytest.mark.parametrize("expected_return", [None, np.nan, np.inf, -np.inf])
+def test_watchlist_current_snapshot_fails_closed_for_incomplete_expected_return(expected_return):
+    item = {"id": "watch-xtb", "symbol": "XTB.WA", "horizon": 20}
+    result = {
+        "symbol": "XTB.WA",
+        "last_date": pd.Timestamp("2026-08-11"),
+        "forecasts": {
+            20: {
+                "probability_up": 0.60,
+                "expected_return": expected_return,
+                "quality": "WYSOKA",
+                "auc": 0.70,
+                "brier": 0.20,
+            },
+        },
+    }
+
+    current = watch_item_current_snapshot(result, item)
+
+    assert current["available"] is True
+    assert current["verdict"] == "INCOMPLETE_FORECAST"
+    assert current["verdict_label"] == "OBSERWUJ"
+    assert current["verdict_decision"] == 0
+    assert current["expected_return"] is None
+
+
 def test_watchlist_current_snapshot_rejects_wrong_symbol_or_missing_horizon():
     item = {"symbol": "XTB.WA", "horizon": 20}
 
@@ -2515,6 +2541,70 @@ def test_analysis_report_manual_horizon_has_no_silent_fallback():
         build_analysis_report(multi_horizon_analysis_result(), selected_horizon=1)
 
 
+@pytest.mark.parametrize("expected_return", [None, np.nan, np.inf, -np.inf])
+def test_analysis_report_fails_closed_for_incomplete_expected_return(expected_return):
+    result = verdict_integrity_result(0.60, expected_return)
+
+    report = build_analysis_report(result, selected_horizon=20)
+
+    assert report["primary_horizon"] == 20
+    assert report["verdict"] == {
+        "label": "OBSERWUJ",
+        "reason": "INCOMPLETE_FORECAST",
+        "decision": 0,
+    }
+    assert report["cards"][0][1:] == (
+        "Obserwuj",
+        "Brak wiarygodnej wartości oczekiwanego ruchu.",
+    )
+    assert report["cards"][3][1] == "—"
+    assert report["horizon_cards"][0]["expected"] == "—"
+
+
+def test_analysis_report_preserves_finite_zero_expected_return_semantics():
+    report = build_analysis_report(verdict_integrity_result(0.60, 0.0), selected_horizon=20)
+
+    assert report["verdict"] == {
+        "label": "LONG",
+        "reason": "LONG_CONFIRMED",
+        "decision": 1,
+    }
+    assert report["horizon_cards"][0]["expected"] == "+0.0%"
+
+
+def test_analysis_report_auto_prefers_any_complete_horizon_over_incomplete_forecast():
+    result = multi_horizon_analysis_result()
+    result["forecasts"] = {
+        5: result["forecasts"][20],
+        20: {
+            **result["forecasts"][20],
+            "probability_up": 0.90,
+            "expected_return": np.nan,
+        },
+    }
+
+    report = build_analysis_report(result)
+    horizon_cards = {card["horizon"]: card for card in report["horizon_cards"]}
+
+    assert report["primary_horizon"] == 5
+    assert report["verdict"]["reason"] == "LONG_CONFIRMED"
+    assert horizon_cards[5]["verdict"] == "LONG"
+    assert horizon_cards[20]["verdict"] == "OBSERWUJ"
+    assert horizon_cards[20]["expected"] == "—"
+
+
+def test_analysis_report_auto_still_selects_an_incomplete_horizon_when_all_are_incomplete():
+    result = multi_horizon_analysis_result()
+    for forecast in result["forecasts"].values():
+        forecast["expected_return"] = None
+
+    report = build_analysis_report(result)
+
+    assert report["primary_horizon"] in {5, 20, 60}
+    assert report["verdict"]["reason"] == "INCOMPLETE_FORECAST"
+    assert report["verdict"]["label"] == "OBSERWUJ"
+
+
 @pytest.mark.parametrize(
     "probability,expected_return,expected_verdict",
     [
@@ -2539,6 +2629,22 @@ def test_full_analysis_horizon_card_uses_shared_verdict(
         "delta": f"oczekiwany ruch {expected_return:.1%}",
         "caption": "Zakres 90%: -6.0% – 8.0%  ·  AUC 0.660  ·  Brier 0.210  ·  WYSOKA",
     }]
+
+
+def test_full_analysis_horizon_card_uses_safe_report_values_for_incomplete_expected_return():
+    result = verdict_integrity_result(0.60, np.nan)
+    report = build_analysis_report(result, selected_horizon=20)
+
+    cards = load_full_analysis_horizon_card_views()(result, report)
+
+    assert cards == [{
+        "horizon": 20,
+        "title": "Około miesiąca · OBSERWUJ",
+        "value": "P(wzrost): 60.0%",
+        "delta": "oczekiwany ruch —",
+        "caption": "Zakres 90%: -6.0% – 8.0%  ·  AUC 0.660  ·  Brier 0.210  ·  WYSOKA",
+    }]
+    assert "nan" not in str(cards).lower()
 
 
 def test_full_analysis_horizon_card_view_fails_fast_when_report_horizon_is_missing():

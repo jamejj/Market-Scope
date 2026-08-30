@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from market_oracle.signals import DEFAULT_SIGNAL_THRESHOLD, SignalInputs, signal_verdict
+from market_oracle.product_verdict import product_forecast_verdict
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -428,17 +428,7 @@ def watch_item_current_snapshot(result: dict, item: dict) -> dict:
     auc = _safe_float(forecast.get("auc"))
     brier = _safe_float(forecast.get("brier"))
     quality = str(forecast.get("quality") or "NISKA — BRAK PRZEWAGI")
-    verdict = signal_verdict(
-        SignalInputs(
-            probability=0.5 if probability is None else probability,
-            expected_return=0.0 if expected_return is None else expected_return,
-            quality=quality,
-            auc=auc,
-            brier=brier,
-            source="ML",
-        ),
-        threshold=DEFAULT_SIGNAL_THRESHOLD,
-    )
+    verdict = product_forecast_verdict(forecast, source="ML")
     return {
         "available": True,
         "symbol": result_symbol or symbol,
