@@ -276,15 +276,23 @@ def build_analysis_report(
         counterpoints.append(f"Reguły MarketScope zwracają OBSERWUJ ({_reason_label(verdict.reason)}), więc raport nie wskazuje potwierdzonego kierunku mimo pojedynczych mocnych metryk.")
     if quality.startswith("NISKA"):
         counterpoints.append("Model sam oznacza jakość jako niską — brak przewagi jest ważniejszy niż pojedynczy ładny ruch ceny.")
-    if _finite_float(forecast.get("lower_return")) is not None and float(forecast.get("lower_return")) < 0:
-        counterpoints.append(f"Dolny zakres 90% nadal zakłada możliwy spadek ({lower}), więc ryzyko scenariusza przeciwnego jest realne.")
-    if _finite_float(forecast.get("expected_return")) is not None and float(forecast.get("expected_return")) <= 0:
-        counterpoints.append("Oczekiwany ruch nie jest dodatni — kierunek modelu nie wystarcza bez potencjału zwrotu.")
-    if technical.get("above_sma_50") is False or technical.get("above_sma_200") is False:
-        counterpoints.append("Cena nie jest jednocześnie nad kluczowymi średnimi 50/200, więc trend nie jest w pełni potwierdzony.")
     drawdown = _finite_float(risk.get("max_drawdown"))
-    if drawdown is not None:
-        counterpoints.append(f"Historyczny max drawdown wynosi {_signed_pct(drawdown)} — to przypomina, jak głębokie obsunięcia występowały wcześniej.")
+    if verdict.decision == -1:
+        if _finite_float(forecast.get("upper_return")) is not None and float(forecast.get("upper_return")) > 0:
+            counterpoints.append(f"Górny zakres 90% nadal zakłada możliwy wzrost ({upper}), więc ryzyko scenariusza przeciwnego jest realne.")
+        if _finite_float(forecast.get("expected_return")) is not None and float(forecast.get("expected_return")) >= 0:
+            counterpoints.append("Oczekiwany ruch nie jest ujemny — kierunek modelu nie wystarcza bez potencjału spadku.")
+        if technical.get("above_sma_50") is True or technical.get("above_sma_200") is True:
+            counterpoints.append("Cena pozostaje nad co najmniej jedną z kluczowych średnich 50/200, więc trend wzrostowy może osłabiać tezę spadkową.")
+    else:
+        if _finite_float(forecast.get("lower_return")) is not None and float(forecast.get("lower_return")) < 0:
+            counterpoints.append(f"Dolny zakres 90% nadal zakłada możliwy spadek ({lower}), więc ryzyko scenariusza przeciwnego jest realne.")
+        if _finite_float(forecast.get("expected_return")) is not None and float(forecast.get("expected_return")) <= 0:
+            counterpoints.append("Oczekiwany ruch nie jest dodatni — kierunek modelu nie wystarcza bez potencjału zwrotu.")
+        if technical.get("above_sma_50") is False or technical.get("above_sma_200") is False:
+            counterpoints.append("Cena nie jest jednocześnie nad kluczowymi średnimi 50/200, więc trend nie jest w pełni potwierdzony.")
+        if drawdown is not None:
+            counterpoints.append(f"Historyczny max drawdown wynosi {_signed_pct(drawdown)} — to przypomina, jak głębokie obsunięcia występowały wcześniej.")
     if not counterpoints:
         counterpoints.append("Brak dużego czerwonego alertu w danych raportu, ale to nadal analiza probabilistyczna, nie pewność ruchu.")
 

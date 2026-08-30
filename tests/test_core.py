@@ -2947,6 +2947,57 @@ def test_aggregate_model_view_matches_shared_confirmed_long():
     assert "scenariusz wzrostowy spełnia warunki MarketScope" in view["verdict"]
 
 
+def test_analysis_report_short_counterarguments_do_not_treat_bearish_evidence_as_risk():
+    result = verdict_integrity_result(0.40, -0.03)
+    result["technical"].update({
+        "return_20d": -0.10,
+        "rsi_14": 38.0,
+        "above_sma_50": False,
+        "above_sma_200": False,
+    })
+    result["forecasts"][20].update({"lower_return": -0.12, "upper_return": 0.04})
+
+    report = build_analysis_report(result, selected_horizon=20)
+    counterpoints = " ".join(report["counterpoints"])
+
+    assert report["verdict"] == {
+        "label": "SHORT",
+        "reason": "SHORT_CONFIRMED",
+        "decision": -1,
+    }
+    assert "Górny zakres 90% nadal zakłada możliwy wzrost (+4.0%)" in counterpoints
+    assert "Dolny zakres 90% nadal zakłada możliwy spadek" not in counterpoints
+    assert "Oczekiwany ruch nie jest dodatni" not in counterpoints
+    assert "Cena nie jest jednocześnie nad kluczowymi średnimi" not in counterpoints
+    assert "Historyczny max drawdown" not in counterpoints
+
+
+def test_analysis_report_short_counterarguments_surface_bullish_opposition():
+    result = verdict_integrity_result(0.40, 0.0)
+    result["technical"].update({"above_sma_50": True, "above_sma_200": False})
+
+    report = build_analysis_report(result, selected_horizon=20)
+    counterpoints = " ".join(report["counterpoints"])
+
+    assert report["verdict"]["label"] == "SHORT"
+    assert "Oczekiwany ruch nie jest ujemny" in counterpoints
+    assert "trend wzrostowy może osłabiać tezę spadkową" in counterpoints
+
+
+def test_analysis_report_long_counterarguments_keep_bearish_risk_semantics():
+    result = verdict_integrity_result(0.60, 0.03)
+    result["technical"].update({"above_sma_50": False, "above_sma_200": False})
+
+    report = build_analysis_report(result, selected_horizon=20)
+    counterpoints = " ".join(report["counterpoints"])
+
+    assert report["verdict"]["label"] == "LONG"
+    assert "Dolny zakres 90% nadal zakłada możliwy spadek (-6.0%)" in counterpoints
+    assert "Cena nie jest jednocześnie nad kluczowymi średnimi 50/200" in counterpoints
+    assert "Historyczny max drawdown" in counterpoints
+    assert "Górny zakres 90% nadal zakłada możliwy wzrost" not in counterpoints
+
+
 def test_analysis_report_separates_radar_and_full_analysis_dates():
     result = {
         "symbol": "LPP.WA",
