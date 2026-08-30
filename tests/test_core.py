@@ -3153,6 +3153,40 @@ def test_start_guidance_deduplicates_forward_and_ml_symbol():
     assert spy_cards[0]["action"] == "full_analysis"
 
 
+@pytest.mark.parametrize("expected_return", [None, np.nan, np.inf, -np.inf])
+def test_start_guidance_does_not_confirm_ml_candidate_with_incomplete_expected_return(expected_return):
+    guidance = build_start_guidance(
+        snapshot={
+            "status": "complete",
+            "updated_at": "2026-08-08T07:13:00+02:00",
+            "records": [guidance_row("XTB.WA", probability=0.60, expected_return=expected_return, quality="WYSOKA")],
+        },
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+    )
+
+    assert all(card["id"] != "ml_candidate" for card in guidance["cards"])
+    assert all("ML ma potwierdzony setup" not in card["title"] for card in guidance["cards"])
+
+
+def test_start_guidance_preserves_finite_zero_expected_return_semantics():
+    guidance = build_start_guidance(
+        snapshot={
+            "status": "complete",
+            "updated_at": "2026-08-08T07:13:00+02:00",
+            "records": [guidance_row("XTB.WA", probability=0.60, expected_return=0.0, quality="WYSOKA")],
+        },
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+    )
+
+    card = next(card for card in guidance["cards"] if card["id"] == "ml_candidate")
+    assert "Reguły MarketScope: LONG" in card["body"]
+    assert "oczekiwany ruch +0.0%" in card["body"]
+
+
 def test_start_guidance_fast_only_is_not_ml_confirmation():
     guidance = build_start_guidance(
         snapshot={

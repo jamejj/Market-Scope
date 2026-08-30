@@ -4,7 +4,7 @@ import math
 from typing import Any
 
 from .product_verdict import has_complete_expected_return, product_forecast_verdict
-from .signals import DEFAULT_SIGNAL_THRESHOLD, SignalInputs, SignalVerdict, signal_verdict
+from .signals import SignalVerdict
 
 
 def _finite_float(value: Any) -> float | None:
@@ -386,18 +386,15 @@ def _horizon_short(row: dict) -> str:
 
 
 def _row_signal_verdict(row: dict) -> SignalVerdict:
-    probability = _row_number(row, "P(wzrost)")
-    expected = _row_number(row, "Oczekiwany ruch")
-    return signal_verdict(
-        SignalInputs(
-            probability=0.5 if probability is None else probability,
-            expected_return=0.0 if expected is None else expected,
-            quality=_row_text(row, "Jakość modelu", "NISKA — BRAK PRZEWAGI"),
-            auc=_row_number(row, "AUC walidacji"),
-            brier=_row_number(row, "Brier"),
-            source="START_GUIDANCE",
-        ),
-        threshold=DEFAULT_SIGNAL_THRESHOLD,
+    return product_forecast_verdict(
+        {
+            "probability_up": row.get("P(wzrost)"),
+            "expected_return": row.get("Oczekiwany ruch"),
+            "quality": _row_text(row, "Jakość modelu", "NISKA — BRAK PRZEWAGI"),
+            "auc": row.get("AUC walidacji"),
+            "brier": row.get("Brier"),
+        },
+        source="START_GUIDANCE",
     )
 
 
