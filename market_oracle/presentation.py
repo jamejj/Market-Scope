@@ -3,7 +3,12 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from .product_verdict import has_complete_expected_return, product_forecast_verdict
+from .product_verdict import (
+    finite_probability,
+    forecast_integrity_issue,
+    has_complete_product_forecast,
+    product_forecast_verdict,
+)
 from .signals import SignalVerdict
 
 
@@ -82,13 +87,13 @@ def _primary_forecast(forecasts: dict[Any, dict]) -> tuple[int, dict]:
     preferred = {20: 4, 5: 3, 60: 2, 1: 1}
 
     def probability_distance(forecast: dict) -> float:
-        probability = _finite_float(forecast.get("probability_up"))
+        probability = finite_probability(forecast.get("probability_up"))
         return abs((0.5 if probability is None else probability) - 0.5)
 
     return max(
         items,
         key=lambda item: (
-            int(has_complete_expected_return(item[1])),
+            int(has_complete_product_forecast(item[1])),
             _verdict_rank(_forecast_verdict(item[1])),
             _quality_rank(str(item[1].get("quality") or "")),
             probability_distance(item[1]),
@@ -117,7 +122,7 @@ def _reason_label(reason: str) -> str:
         "EXPECTED_RETURN_CONFLICT": "konflikt P(wzrost) z oczekiwanym ruchem",
         "EXPECTED_RETURN_TOO_SMALL": "oczekiwany ruch za mały",
         "PROBABILITY_INSIDE_BAND": "prawdopodobieństwo wewnątrz pasma obserwacji",
-        "INCOMPLETE_FORECAST": "brak wiarygodnej wartości oczekiwanego ruchu",
+        "INCOMPLETE_FORECAST": "niekompletne dane prognozy",
     }
     return labels.get(reason, reason.replace("_", " ").lower())
 
@@ -130,7 +135,15 @@ def _display_radar_action(value: Any) -> str:
     return labels.get(text, text)
 
 
-def _direction(verdict: SignalVerdict) -> tuple[str, str]:
+def _incomplete_forecast_detail(integrity_issue: str | None) -> str:
+    if integrity_issue == "EXPECTED_RETURN":
+        return "Brak wiarygodnej wartości oczekiwanego ruchu."
+    if integrity_issue == "PROBABILITY":
+        return "Brak wiarygodnej wartości P(wzrost)."
+    return "Brak wiarygodnych danych prognozy."
+
+
+def _direction(verdict: SignalVerdict, integrity_issue: str | None = None) -> tuple[str, str]:
     reason = _reason_label(verdict.reason)
     if verdict.decision == 1:
         return "Scenariusz wzrostowy spełnia warunki MarketScope", f"Werdykt techniczny: LONG — {reason}."
@@ -139,7 +152,7 @@ def _direction(verdict: SignalVerdict) -> tuple[str, str]:
     if verdict.reason == "LOW_QUALITY":
         return "Brak potwierdzonej przewagi", "Model został celowo ściągnięty w stronę 50%, bo walidacja nie pokazała stabilnej przewagi."
     if verdict.reason == "INCOMPLETE_FORECAST":
-        return "Obserwuj", "Brak wiarygodnej wartości oczekiwanego ruchu."
+        return "Obserwuj", _incomplete_forecast_detail(integrity_issue)
     return "Obserwuj", f"Reguły MarketScope nie potwierdzają kierunku: {reason}."
 
 
@@ -235,9 +248,10 @@ def build_analysis_report(
     horizon, forecast = _report_forecast(forecasts, selected_horizon)
     selection_mode = "AUTO" if selected_horizon is None else "MANUAL"
     quality = str(forecast.get("quality") or "—")
-    probability = _finite_float(forecast.get("probability_up"))
+    probability = finite_probability(forecast.get("probability_up"))
     verdict = _forecast_verdict(forecast)
-    direction, direction_detail = _direction(verdict)
+    integrity_issue = forecast_integrity_issue(forecast)
+    direction, direction_detail = _direction(verdict, integrity_issue)
     technical = result.get("technical") or {}
     risk = result.get("risk") or {}
     trend = _trend_label(technical)
@@ -255,7 +269,9 @@ def build_analysis_report(
     elif verdict.reason == "LOW_QUALITY":
         headline = f"{symbol}: brak potwierdzonej przewagi modelu — obserwuj, nie zakładaj edge."
     elif verdict.reason == "INCOMPLETE_FORECAST":
-        headline = f"{symbol}: obserwuj — brak wiarygodnej wartości oczekiwanego ruchu na horyzoncie {horizon_text}."
+        incomplete_detail = _incomplete_forecast_detail(integrity_issue).rstrip(".")
+        incomplete_detail = incomplete_detail[:1].lower() + incomplete_detail[1:]
+        headline = f"{symbol}: obserwuj — {incomplete_detail} na horyzoncie {horizon_text}."
     else:
         headline = f"{symbol}: obserwuj — reguły MarketScope nie potwierdzają kierunku na horyzoncie {horizon_text}."
 
@@ -316,7 +332,7 @@ def build_analysis_report(
             "horizon": h,
             "label": _horizon_label(h, crypto),
             "verdict": horizon_verdict.label,
-            "probability": _pct(f.get("probability_up")),
+            "probability": _pct(finite_probability(f.get("probability_up"))),
             "expected": _signed_pct(f.get("expected_return")),
             "lower": _signed_pct(f.get("lower_return")),
             "upper": _signed_pct(f.get("upper_return")),

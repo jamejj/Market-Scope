@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from market_oracle.product_verdict import product_forecast_verdict
+from market_oracle.product_verdict import finite_probability, product_forecast_verdict
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -423,7 +423,7 @@ def watch_item_current_snapshot(result: dict, item: dict) -> dict:
     if not forecast:
         return {"available": False, "reason": "HORIZON_NOT_AVAILABLE", "symbol": result_symbol or symbol, "horizon": horizon}
 
-    probability = _safe_float(forecast.get("probability_up"))
+    probability = finite_probability(forecast.get("probability_up"))
     expected_return = _safe_float(forecast.get("expected_return"))
     auc = _safe_float(forecast.get("auc"))
     brier = _safe_float(forecast.get("brier"))
@@ -567,7 +567,7 @@ def watch_item_from_analysis(
         "verdict": verdict.get("reason") or "UNKNOWN",
         "verdict_label": verdict.get("label") or "—",
         "verdict_decision": verdict.get("decision"),
-        "probability_up": _safe_float(forecast.get("probability_up")),
+        "probability_up": finite_probability(forecast.get("probability_up")),
         "expected_return": _safe_float(forecast.get("expected_return")),
         "quality": str(forecast.get("quality") or "—"),
         "reason": str(evidence[0] if evidence else report.get("headline") or "—"),

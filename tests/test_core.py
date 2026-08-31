@@ -67,6 +67,7 @@ from market_oracle.journal import journal_summary, load_journal, paper_portfolio
 from market_oracle.model import fit_forecast, fit_forecast_state
 from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
 from market_oracle.presentation import build_analysis_report, build_start_guidance
+from market_oracle.product_verdict import product_forecast_verdict
 from market_oracle.risk import periods_per_year, risk_metrics
 from market_oracle.reality import RealityConfig, reality_check_report, select_non_overlapping_trades
 from market_oracle.signals import (
@@ -888,6 +889,33 @@ def test_watchlist_current_snapshot_fails_closed_for_incomplete_expected_return(
     assert current["verdict_label"] == "OBSERWUJ"
     assert current["verdict_decision"] == 0
     assert current["expected_return"] is None
+
+
+@pytest.mark.parametrize("probability", [None, np.nan, np.inf, -np.inf, -0.1, 1.1])
+def test_watchlist_current_snapshot_fails_closed_for_invalid_probability(probability):
+    item = {"id": "watch-xtb", "symbol": "XTB.WA", "horizon": 20}
+    result = {
+        "symbol": "XTB.WA",
+        "last_date": pd.Timestamp("2026-08-11"),
+        "forecasts": {
+            20: {
+                "probability_up": probability,
+                "expected_return": 0.03,
+                "quality": "WYSOKA",
+                "auc": 0.70,
+                "brier": 0.20,
+            },
+        },
+    }
+
+    current = watch_item_current_snapshot(result, item)
+
+    assert current["available"] is True
+    assert current["verdict"] == "INCOMPLETE_FORECAST"
+    assert current["verdict_label"] == "OBSERWUJ"
+    assert current["verdict_decision"] == 0
+    assert current["probability_up"] is None
+    assert current["expected_return"] == pytest.approx(0.03)
 
 
 def test_watchlist_current_snapshot_rejects_wrong_symbol_or_missing_horizon():
@@ -2572,6 +2600,85 @@ def test_analysis_report_preserves_finite_zero_expected_return_semantics():
     assert report["horizon_cards"][0]["expected"] == "+0.0%"
 
 
+@pytest.mark.parametrize("probability", [None, np.nan, np.inf, -np.inf, -0.1, 1.1])
+def test_product_probability_integrity_fails_closed_without_masking_expected_return(probability):
+    forecast = {
+        "probability_up": probability,
+        "expected_return": 0.03,
+        "quality": "WYSOKA",
+        "auc": 0.70,
+        "brier": 0.20,
+    }
+
+    verdict = product_forecast_verdict(forecast, source="FULL_ANALYSIS")
+    report = build_analysis_report(verdict_integrity_result(probability, 0.03), selected_horizon=20)
+
+    assert (verdict.decision, verdict.reason, verdict.label) == (
+        0,
+        "INCOMPLETE_FORECAST",
+        "OBSERWUJ",
+    )
+    assert report["verdict"] == {
+        "label": "OBSERWUJ",
+        "reason": "INCOMPLETE_FORECAST",
+        "decision": 0,
+    }
+    assert report["cards"][0][1:] == (
+        "Obserwuj",
+        "Brak wiarygodnej wartości P(wzrost).",
+    )
+    assert "brak wiarygodnej wartości P(wzrost)" in report["headline"]
+    assert report["cards"][3][1] == "+3.0%"
+    assert report["horizon_cards"][0]["probability"] == "—"
+    assert report["horizon_cards"][0]["expected"] == "+3.0%"
+
+
+def test_missing_probability_fails_closed_across_product_surfaces():
+    forecast = {
+        "expected_return": 0.03,
+        "quality": "WYSOKA",
+        "auc": 0.70,
+        "brier": 0.20,
+    }
+    result = verdict_integrity_result(0.60, 0.03)
+    result["forecasts"][20].pop("probability_up")
+    row = guidance_row("XTB.WA", probability=0.60, expected_return=0.03, quality="WYSOKA")
+    row.pop("P(wzrost)")
+
+    verdict = product_forecast_verdict(forecast, source="FULL_ANALYSIS")
+    report = build_analysis_report(result, selected_horizon=20)
+    current = watch_item_current_snapshot(result, {"symbol": "TEST", "horizon": 20})
+    guidance = build_start_guidance(
+        snapshot={"status": "complete", "records": [row]},
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+    )
+
+    assert verdict.reason == "INCOMPLETE_FORECAST"
+    assert report["verdict"]["reason"] == "INCOMPLETE_FORECAST"
+    assert report["horizon_cards"][0]["probability"] == "—"
+    assert current["verdict"] == "INCOMPLETE_FORECAST"
+    assert current["probability_up"] is None
+    assert all(card["id"] != "ml_candidate" for card in guidance["cards"])
+
+
+@pytest.mark.parametrize(
+    "probability,expected_return,expected_label",
+    [(0.0, -0.03, "SHORT"), (1.0, 0.03, "LONG")],
+)
+def test_product_probability_integrity_preserves_legal_boundaries(
+    probability, expected_return, expected_label,
+):
+    report = build_analysis_report(
+        verdict_integrity_result(probability, expected_return),
+        selected_horizon=20,
+    )
+
+    assert report["verdict"]["label"] == expected_label
+    assert report["horizon_cards"][0]["probability"] == f"{probability:.1%}"
+
+
 def test_analysis_report_auto_prefers_any_complete_horizon_over_incomplete_forecast():
     result = multi_horizon_analysis_result()
     result["forecasts"] = {
@@ -2591,6 +2698,31 @@ def test_analysis_report_auto_prefers_any_complete_horizon_over_incomplete_forec
     assert horizon_cards[5]["verdict"] == "LONG"
     assert horizon_cards[20]["verdict"] == "OBSERWUJ"
     assert horizon_cards[20]["expected"] == "—"
+
+
+def test_analysis_report_auto_prefers_valid_probability_over_out_of_range_probability():
+    result = multi_horizon_analysis_result()
+    result["forecasts"] = {
+        5: {
+            **result["forecasts"][5],
+            "probability_up": 0.60,
+            "expected_return": 0.02,
+        },
+        20: {
+            **result["forecasts"][20],
+            "probability_up": 1.10,
+            "expected_return": 0.04,
+        },
+    }
+
+    report = build_analysis_report(result)
+    horizon_cards = {card["horizon"]: card for card in report["horizon_cards"]}
+
+    assert report["primary_horizon"] == 5
+    assert report["verdict"]["reason"] == "LONG_CONFIRMED"
+    assert horizon_cards[5]["verdict"] == "LONG"
+    assert horizon_cards[20]["verdict"] == "OBSERWUJ"
+    assert horizon_cards[20]["probability"] == "—"
 
 
 def test_analysis_report_auto_still_selects_an_incomplete_horizon_when_all_are_incomplete():
@@ -2707,6 +2839,29 @@ def test_watchlist_saves_exact_manual_horizon_forecast_and_verdict():
     assert item["expected_return"] == -0.01
     assert item["verdict_label"] == "OBSERWUJ"
     assert item["verdict"] == "EXPECTED_RETURN_CONFLICT"
+
+
+@pytest.mark.parametrize("probability", [1.1, -0.1, np.nan])
+def test_watchlist_capture_does_not_persist_invalid_probability(probability):
+    result = verdict_integrity_result(probability, 0.03)
+    report = build_analysis_report(result, selected_horizon=20)
+
+    item = watch_item_from_analysis(result, report)
+
+    assert item["verdict"] == "INCOMPLETE_FORECAST"
+    assert item["verdict_label"] == "OBSERWUJ"
+    assert item["probability_up"] is None
+
+
+@pytest.mark.parametrize("probability", [0.0, 1.0])
+def test_watchlist_capture_preserves_legal_probability_boundaries(probability):
+    expected_return = -0.03 if probability == 0.0 else 0.03
+    result = verdict_integrity_result(probability, expected_return)
+    report = build_analysis_report(result, selected_horizon=20)
+
+    item = watch_item_from_analysis(result, report)
+
+    assert item["probability_up"] == probability
 
 
 def test_evidence_registry_maps_only_exact_protocol_symbols():
@@ -2933,6 +3088,21 @@ def test_aggregate_model_view_does_not_create_bullish_verdict_outside_shared_gat
     assert view["verdict"] == report["headline"].rstrip(".")
     assert view["tone"] == "info"
     assert "model wskazuje scenariusz wzrostowy" not in f"{view['verdict']} {view['detail']}".lower()
+
+
+@pytest.mark.parametrize("probability", [1.1, -0.1, np.nan])
+def test_aggregate_model_view_uses_sanitized_report_probability(probability):
+    result = verdict_integrity_result(probability, 0.03)
+    report = build_analysis_report(result, selected_horizon=20)
+
+    view = load_aggregate_model_view()(result, report)
+
+    assert report["verdict"]["reason"] == "INCOMPLETE_FORECAST"
+    assert report["horizon_cards"][0]["probability"] == "—"
+    assert "P(wzrost) —" in view["detail"]
+    assert "110.0%" not in view["detail"]
+    assert "-10.0%" not in view["detail"]
+    assert "nan%" not in view["detail"].lower()
 
 
 def test_aggregate_model_view_matches_shared_confirmed_long():
@@ -3211,6 +3381,23 @@ def test_start_guidance_does_not_confirm_ml_candidate_with_incomplete_expected_r
             "status": "complete",
             "updated_at": "2026-08-08T07:13:00+02:00",
             "records": [guidance_row("XTB.WA", probability=0.60, expected_return=expected_return, quality="WYSOKA")],
+        },
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+    )
+
+    assert all(card["id"] != "ml_candidate" for card in guidance["cards"])
+    assert all("ML ma potwierdzony setup" not in card["title"] for card in guidance["cards"])
+
+
+@pytest.mark.parametrize("probability", [None, np.nan, np.inf, -np.inf, -0.1, 1.1])
+def test_start_guidance_does_not_confirm_ml_candidate_with_invalid_probability(probability):
+    guidance = build_start_guidance(
+        snapshot={
+            "status": "complete",
+            "updated_at": "2026-08-08T07:13:00+02:00",
+            "records": [guidance_row("XTB.WA", probability=probability, expected_return=0.03, quality="WYSOKA")],
         },
         cockpit={},
         automation={},

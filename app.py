@@ -2081,6 +2081,8 @@ def aggregate_model_view(result: dict, report: dict) -> dict:
     forecasts = result["forecasts"]
     primary_horizon = int(report["primary_horizon"])
     primary = forecasts.get(primary_horizon) or forecasts.get(str(primary_horizon)) or next(iter(forecasts.values()))
+    report_cards = {int(card["horizon"]): card for card in report["horizon_cards"]}
+    primary_card = report_cards[primary_horizon]
     shared_verdict = report["verdict"]
     technical = result["technical"]
     trend_points = sum([
@@ -2094,8 +2096,8 @@ def aggregate_model_view(result: dict, report: dict) -> dict:
     verdict = str(report["headline"]).rstrip(".")
     detail = (
         f"Wspólny werdykt MarketScope: **{shared_verdict['label']}**. "
-        f"P(wzrost) {pct(primary['probability_up'])}, oczekiwany ruch {signed_pct(primary['expected_return'])}, "
-        f"AUC {primary['auc']:.3f}, Brier {primary['brier']:.3f}. "
+        f"P(wzrost) {primary_card['probability']}, oczekiwany ruch {primary_card['expected']}, "
+        f"AUC {primary_card['auc']}, Brier {primary_card['brier']}. "
         "To diagnostyka tego samego werdyktu, a nie osobny sygnał."
     )
     return {"trend_label": trend_label, "best_label": best_label, "verdict": verdict, "tone": tone, "detail": detail}

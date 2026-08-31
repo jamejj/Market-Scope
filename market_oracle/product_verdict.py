@@ -19,20 +19,42 @@ def has_complete_expected_return(forecast: dict) -> bool:
     return finite_float(forecast.get("expected_return")) is not None
 
 
-def product_forecast_verdict(forecast: dict, *, source: str) -> SignalVerdict:
-    """Apply the shared gate, failing closed when expected return is incomplete.
+def finite_probability(value: Any) -> float | None:
+    """Return a valid probability without changing generic numeric semantics."""
+    probability = finite_float(value)
+    if probability is None or not 0.0 <= probability <= 1.0:
+        return None
+    return probability
 
-    A real finite zero remains a valid input. Missing and non-finite values never
-    impersonate zero and therefore cannot produce a directional product verdict.
+
+def forecast_integrity_issue(forecast: dict) -> str | None:
+    """Identify the product input that prevents a directional verdict."""
+    if not has_complete_expected_return(forecast):
+        return "EXPECTED_RETURN"
+    if finite_probability(forecast.get("probability_up")) is None:
+        return "PROBABILITY"
+    return None
+
+
+def has_complete_product_forecast(forecast: dict) -> bool:
+    return forecast_integrity_issue(forecast) is None
+
+
+def product_forecast_verdict(forecast: dict, *, source: str) -> SignalVerdict:
+    """Apply the shared gate, failing closed when product inputs are incomplete.
+
+    Real finite boundary values remain valid inputs. Missing, non-finite and
+    out-of-range values never impersonate neutral values and therefore cannot
+    produce a directional product verdict.
     """
     expected_return = finite_float(forecast.get("expected_return"))
-    if expected_return is None:
+    probability = finite_probability(forecast.get("probability_up"))
+    if expected_return is None or probability is None:
         return SignalVerdict(0, "INCOMPLETE_FORECAST", "OBSERWUJ")
 
-    probability = finite_float(forecast.get("probability_up"))
     return signal_verdict(
         SignalInputs(
-            probability=0.5 if probability is None else probability,
+            probability=probability,
             expected_return=expected_return,
             quality=str(forecast.get("quality") or "NISKA — BRAK PRZEWAGI"),
             auc=finite_float(forecast.get("auc")),
