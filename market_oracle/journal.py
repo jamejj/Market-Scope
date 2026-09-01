@@ -11,8 +11,13 @@ from .data import download_history
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 JOURNAL_PATH = DATA_DIR / "signal_journal.json"
-BULLISH_LABELS = {"SILNY KANDYDAT WZROSTOWY", "KANDYDAT WZROSTOWY"}
-BEARISH_LABELS = {"SILNE RYZYKO SPADKU", "RYZYKO SPADKU"}
+NON_DIRECTIONAL_REASONS = {
+    "EXPECTED_RETURN_CONFLICT",
+    "EXPECTED_RETURN_TOO_SMALL",
+    "INCOMPLETE_FORECAST",
+    "LOW_QUALITY",
+    "PROBABILITY_INSIDE_BAND",
+}
 
 
 def load_journal(path: Path = JOURNAL_PATH) -> list[dict]:
@@ -30,11 +35,24 @@ def save_journal(entries: list[dict], path: Path = JOURNAL_PATH) -> None:
     temporary.replace(path)
 
 
+def valid_machine_decision_contract(row: dict) -> bool:
+    decision = row.get("Decision")
+    reason = row.get("DecisionReason")
+    if type(decision) is not int or decision not in {-1, 0, 1} or not isinstance(reason, str):
+        return False
+    if decision == 1:
+        return reason == "LONG_CONFIRMED"
+    if decision == -1:
+        return reason == "SHORT_CONFIRMED"
+    return reason in NON_DIRECTIONAL_REASONS
+
+
 def signal_direction(row: dict) -> str | None:
-    label = row.get("Ocena")
-    if label in BULLISH_LABELS:
+    if not valid_machine_decision_contract(row):
+        return None
+    if row["Decision"] == 1:
         return "LONG"
-    if label in BEARISH_LABELS:
+    if row["Decision"] == -1:
         return "SHORT"
     return None
 
@@ -59,7 +77,7 @@ def record_snapshot_signals(snapshot: dict, path: Path = JOURNAL_PATH) -> int:
     added = 0
 
     for row in snapshot.get("records", []):
-        if row.get("Tryb analizy") not in {None, "ML"}:
+        if row.get("Tryb analizy") != "ML":
             continue
         direction = signal_direction(row)
         if direction is None:
@@ -86,6 +104,8 @@ def record_snapshot_signals(snapshot: dict, path: Path = JOURNAL_PATH) -> int:
             "entry_price": None,
             "setup": row.get("Setup", "—"),
             "label": row.get("Ocena", "—"),
+            "decision": row["Decision"],
+            "decision_reason": row["DecisionReason"],
             "probability_up": row.get("P(wzrost)"),
             "expected_return": row.get("Oczekiwany ruch"),
             "auc": row.get("AUC walidacji"),

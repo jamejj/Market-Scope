@@ -65,7 +65,16 @@ import market_oracle.auto_forward as auto_forward_module
 import run_candidate_forward as candidate_runner_module
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast, fit_forecast_state
-from market_oracle.monitor import default_universe, load_snapshot, run_signal_scan, select_deep_shortlist, snapshot_is_stale
+from market_oracle.monitor import (
+    EXPECTED_RECORD_FIELDS,
+    SCAN_SCHEMA_VERSION,
+    _records,
+    default_universe,
+    load_snapshot,
+    run_signal_scan,
+    select_deep_shortlist,
+    snapshot_is_stale,
+)
 from market_oracle.presentation import build_analysis_report, build_start_guidance
 from market_oracle.product_verdict import product_forecast_verdict
 from market_oracle.risk import periods_per_year, risk_metrics
@@ -679,6 +688,220 @@ def test_old_signal_snapshot_is_considered_stale():
     assert snapshot_is_stale(old_snapshot)
 
 
+def _product_scan_row(
+    *,
+    mode="ML",
+    probability=0.61,
+    expected_return=0.03,
+    quality="WYSOKA",
+    copy="DOWOLNE COPY",
+):
+    return {
+        "Symbol": "TEST",
+        "Klasa": "USA",
+        "Horyzont": 5,
+        "Data": "2026-01-10",
+        "Cena": 100.0,
+        "Setup": "Breakout / momentum",
+        "Ocena": copy,
+        "P(wzrost)": probability,
+        "Oczekiwany ruch": expected_return,
+        "AUC walidacji": 0.62,
+        "Brier": 0.22,
+        "Jakość modelu": quality,
+        "Score": 4.2,
+        "Tryb analizy": mode,
+    }
+
+
+@pytest.mark.parametrize(
+    ("probability", "expected_return", "decision", "reason"),
+    [
+        (0.61, 0.03, 1, "LONG_CONFIRMED"),
+        (0.39, -0.03, -1, "SHORT_CONFIRMED"),
+        (None, 0.03, 0, "INCOMPLETE_FORECAST"),
+        (-0.1, 0.03, 0, "INCOMPLETE_FORECAST"),
+        (1.1, 0.03, 0, "INCOMPLETE_FORECAST"),
+        (np.nan, 0.03, 0, "INCOMPLETE_FORECAST"),
+        (np.inf, 0.03, 0, "INCOMPLETE_FORECAST"),
+        (-np.inf, 0.03, 0, "INCOMPLETE_FORECAST"),
+        (0.61, None, 0, "INCOMPLETE_FORECAST"),
+        (0.61, np.inf, 0, "INCOMPLETE_FORECAST"),
+        (0.61, -np.inf, 0, "INCOMPLETE_FORECAST"),
+    ],
+)
+def test_product_snapshot_serialization_emits_ml_machine_contract(
+    probability, expected_return, decision, reason,
+):
+    [record] = _records(pd.DataFrame([
+        _product_scan_row(probability=probability, expected_return=expected_return)
+    ]))
+
+    assert record["Decision"] == decision
+    assert record["DecisionReason"] == reason
+
+
+def test_product_snapshot_serialization_does_not_add_machine_contract_to_fast():
+    [record] = _records(pd.DataFrame([_product_scan_row(mode="FAST")]))
+
+    assert "Decision" not in record
+    assert "DecisionReason" not in record
+
+
+def _journal_snapshot(*rows):
+    return {
+        "status": "complete",
+        "schema_version": 7,
+        "updated_at": "2026-01-10T12:00:00+00:00",
+        "records": list(rows),
+    }
+
+
+@pytest.mark.parametrize(
+    ("decision", "reason", "expected_direction"),
+    [
+        (1, "LONG_CONFIRMED", "LONG"),
+        (-1, "SHORT_CONFIRMED", "SHORT"),
+    ],
+)
+def test_signal_journal_uses_machine_contract_not_copy(tmp_path, decision, reason, expected_direction):
+    row = _product_scan_row(copy="COPY O PRZECIWNYM KIERUNKU")
+    row.update({"Decision": decision, "DecisionReason": reason})
+    path = tmp_path / "journal.json"
+
+    assert record_snapshot_signals(_journal_snapshot(row), path=path) == 1
+    assert record_snapshot_signals(_journal_snapshot(row), path=path) == 0
+    [entry] = load_journal(path)
+    assert entry["direction"] == expected_direction
+    assert entry["decision"] == decision
+    assert entry["decision_reason"] == reason
+
+
+@pytest.mark.parametrize(
+    ("decision", "reason"),
+    [
+        (None, None),
+        (True, "LONG_CONFIRMED"),
+        ("1", "LONG_CONFIRMED"),
+        (2, "LONG_CONFIRMED"),
+        (0, "PROBABILITY_INSIDE_BAND"),
+        (0, "LONG_CONFIRMED"),
+        (0, "SHORT_CONFIRMED"),
+        (1, "SHORT_CONFIRMED"),
+        (-1, "LONG_CONFIRMED"),
+        (1, "UNKNOWN_REASON"),
+    ],
+)
+def test_signal_journal_fails_closed_on_invalid_machine_contract(tmp_path, decision, reason):
+    row = _product_scan_row(copy="KANDYDAT WZROSTOWY")
+    if decision is not None:
+        row["Decision"] = decision
+    if reason is not None:
+        row["DecisionReason"] = reason
+
+    assert record_snapshot_signals(_journal_snapshot(row), path=tmp_path / "journal.json") == 0
+
+
+def test_signal_journal_requires_explicit_ml_mode(tmp_path):
+    row = _product_scan_row()
+    row.pop("Tryb analizy")
+    row.update({"Decision": 1, "DecisionReason": "LONG_CONFIRMED"})
+
+    assert record_snapshot_signals(_journal_snapshot(row), path=tmp_path / "journal.json") == 0
+
+
+def _schema_record(*, mode="ML", decision=1, reason="LONG_CONFIRMED"):
+    record = {field: 0 for field in EXPECTED_RECORD_FIELDS}
+    record.update(_product_scan_row(mode=mode))
+    if mode == "ML":
+        record.update({"Decision": decision, "DecisionReason": reason})
+    return record
+
+
+def _fresh_schema_snapshot(records, *, schema_version=7):
+    return {
+        "status": "complete",
+        "schema_version": schema_version,
+        "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        "horizons": [1, 5, 20],
+        "completed": 10_000,
+        "total": 10_000,
+        "records": records,
+        "errors": {},
+    }
+
+
+def test_schema_7_accepts_mixed_fast_ml_records_with_valid_ml_contract():
+    assert SCAN_SCHEMA_VERSION == 7
+    snapshot = _fresh_schema_snapshot([
+        _schema_record(mode="FAST"),
+        _schema_record(mode="ML", decision=1, reason="LONG_CONFIRMED"),
+        _schema_record(mode="ML", decision=0, reason="INCOMPLETE_FORECAST"),
+    ])
+
+    assert snapshot_is_stale(snapshot) is False
+
+
+def test_schema_7_checks_machine_contract_on_every_ml_record():
+    snapshot = _fresh_schema_snapshot([
+        _schema_record(mode="FAST"),
+        _schema_record(mode="ML", decision=1, reason="LONG_CONFIRMED"),
+        _schema_record(mode="ML", decision=1, reason="SHORT_CONFIRMED"),
+    ])
+
+    assert snapshot_is_stale(snapshot) is True
+
+
+def test_schema_7_checks_common_fields_on_every_record():
+    later_record = _schema_record(mode="ML", decision=1, reason="LONG_CONFIRMED")
+    later_record.pop("Tryb analizy")
+    snapshot = _fresh_schema_snapshot([
+        _schema_record(mode="FAST"),
+        later_record,
+    ])
+
+    assert snapshot_is_stale(snapshot) is True
+
+
+def test_schema_6_snapshot_is_stale_after_machine_contract_upgrade():
+    snapshot = _fresh_schema_snapshot([
+        _schema_record(mode="FAST"),
+        _schema_record(mode="ML", decision=1, reason="LONG_CONFIRMED"),
+    ], schema_version=6)
+
+    assert snapshot_is_stale(snapshot) is True
+
+
+def test_legacy_journal_entries_load_and_refresh_without_machine_provenance(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    legacy = {
+        "id": "2026-01-10|TEST|5|LONG",
+        "signal_date": "2026-01-10",
+        "symbol": "TEST",
+        "horizon": 5,
+        "direction": "LONG",
+        "execution": "NEXT_OPEN",
+        "signal_price": 100.0,
+        "entry_date": None,
+        "entry_price": None,
+        "status": "open",
+        "bars_elapsed": 0,
+        "bars_remaining": 5,
+    }
+    path.write_text(json.dumps([legacy]), encoding="utf-8")
+    dates = pd.bdate_range("2026-01-09", periods=12)
+    prices = np.linspace(99, 111, len(dates))
+    history = pd.DataFrame({"Open": prices, "Close": prices}, index=dates)
+    monkeypatch.setattr("market_oracle.journal.download_history", lambda symbol, years=3: history)
+
+    assert load_journal(path) == [legacy]
+    refreshed, errors = refresh_journal_results(path=path)
+    assert errors == {}
+    assert refreshed[0]["direction"] == "LONG"
+    assert "decision" not in refreshed[0]
+    assert journal_summary(refreshed)["total"] == 1
+
+
 def test_signal_journal_records_and_evaluates(tmp_path, monkeypatch):
     snapshot = {
         "status": "complete", "updated_at": "2026-01-10T12:00:00+00:00",
@@ -689,7 +912,7 @@ def test_signal_journal_records_and_evaluates(tmp_path, monkeypatch):
                 "Ocena": "KANDYDAT WZROSTOWY", "P(wzrost)": 0.61,
                 "Oczekiwany ruch": 0.03, "AUC walidacji": 0.62,
                 "Brier": 0.22, "Jakość modelu": "WYSOKA", "Score": 4.2,
-                "Tryb analizy": "ML", "DecisionReason": "LONG_CONFIRMED",
+                "Tryb analizy": "ML", "Decision": 1, "DecisionReason": "LONG_CONFIRMED",
             },
             {
                 "Symbol": "FAST", "Klasa": "USA", "Horyzont": 5, "Data": "2026-01-10",

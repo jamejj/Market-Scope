@@ -10,12 +10,13 @@ import pandas as pd
 
 from .catalog import CATEGORIES, CRYPTO, ETF_CATEGORIES
 from .engine import scan_market, scan_market_fast, scan_market_multi
+from .product_verdict import product_forecast_verdict
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SNAPSHOT_PATH = DATA_DIR / "signals.json"
 LOCK_PATH = DATA_DIR / "signals.lock"
-SCAN_SCHEMA_VERSION = 6
+SCAN_SCHEMA_VERSION = 7
 DEEP_SCAN_LIMIT = 36
 EXPECTED_HORIZONS = {1, 5, 20}
 EXPECTED_RECORD_FIELDS = {
@@ -58,7 +59,24 @@ def _json_value(value):
 
 
 def _records(frame: pd.DataFrame) -> list[dict]:
-    return [{key: _json_value(value) for key, value in row.items()} for row in frame.to_dict("records")]
+    records = []
+    for row in frame.to_dict("records"):
+        record = dict(row)
+        if record.get("Tryb analizy") == "ML":
+            verdict = product_forecast_verdict(
+                {
+                    "probability_up": record.get("P(wzrost)"),
+                    "expected_return": record.get("Oczekiwany ruch"),
+                    "quality": record.get("Jakość modelu"),
+                    "auc": record.get("AUC walidacji"),
+                    "brier": record.get("Brier"),
+                },
+                source="RADAR",
+            )
+            record["Decision"] = verdict.decision
+            record["DecisionReason"] = verdict.reason
+        records.append({key: _json_value(value) for key, value in record.items()})
+    return records
 
 
 def select_deep_shortlist(frame: pd.DataFrame, limit: int = DEEP_SCAN_LIMIT) -> list[str]:
@@ -222,7 +240,18 @@ def snapshot_is_stale(snapshot: dict | None, max_age_hours: float = 6) -> bool:
     if not EXPECTED_HORIZONS.issubset(horizons):
         return True
     records = snapshot.get("records") or []
-    if records and not EXPECTED_RECORD_FIELDS.issubset(records[0]):
+    if any(
+        not isinstance(record, dict) or not EXPECTED_RECORD_FIELDS.issubset(record)
+        for record in records
+    ):
+        return True
+    from .journal import valid_machine_decision_contract
+
+    if any(
+        record.get("Tryb analizy") == "ML" and not valid_machine_decision_contract(record)
+        for record in records
+        if isinstance(record, dict)
+    ):
         return True
     if snapshot.get("total", 0) < min(100, len(default_universe())):
         return True
