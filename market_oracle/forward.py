@@ -17,7 +17,9 @@ import pandas as pd
 from .data import download_history
 from .integrity import (
     SnapshotIntegrityError,
+    normalize_target_session_date,
     validate_candidate_snapshot_integrity,
+    validate_candidate_snapshot_session,
     validate_canonical_candidate_manifest,
     validate_canonical_candidate_universe,
 )
@@ -525,6 +527,7 @@ def record_snapshot_forward_signals(
     require_clean_tree: bool = True,
     require_closed_bar: bool = True,
     require_full_universe: bool = True,
+    target_session_date: str | None = None,
 ) -> int:
     """Append new Candidate v1 signals from a completed monitor snapshot.
 
@@ -533,6 +536,11 @@ def record_snapshot_forward_signals(
     does not create a second pending trade.
     """
     canonical_proof_ledger = path.resolve() == FORWARD_LEDGER_PATH.resolve()
+    normalized_target = validate_candidate_snapshot_session(
+        snapshot,
+        target_session_date=target_session_date,
+        require_target=canonical_proof_ledger,
+    )
     enforce_frozen_universe = require_full_universe or canonical_proof_ledger
     universe = load_forward_universe(universe_path) if enforce_frozen_universe else None
     manifest = None
@@ -609,7 +617,7 @@ def record_snapshot_forward_signals(
 
         if not audit_exists:
             universe_meta = snapshot.get("forward_universe") or {}
-            _append_forward_event_unlocked({
+            audit_event = {
                 "event_type": SNAPSHOT_AUDIT_EVENT,
                 "candidate_id": manifest["candidate_id"],
                 "candidate_manifest_hash": manifest.get("manifest_hash") or frozen_hash(manifest),
@@ -628,7 +636,10 @@ def record_snapshot_forward_signals(
                 "records_total": len(raw_rows),
                 "candidate_rows": len(candidate_rows),
                 "errors": snapshot.get("errors") or {},
-            }, path, events)
+            }
+            if normalized_target is not None:
+                audit_event["target_session_date"] = normalized_target
+            _append_forward_event_unlocked(audit_event, path, events)
 
         for row in sort_candidate_rows(candidate_rows, snapshot):
             event = _observed_signal_event(row, snapshot, manifest)
@@ -850,9 +861,21 @@ def refresh_forward_ledger(
     histories: dict[str, pd.DataFrame] | None = None,
     enforce_pipeline: bool = True,
     require_clean_tree: bool = True,
+    target_session_date: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, str]]:
     """Append entry/close events when next-open execution data is available."""
-    manifest = load_candidate_manifest(manifest_path)
+    canonical_ledger = path.resolve() == FORWARD_LEDGER_PATH.resolve()
+    if canonical_ledger:
+        normalize_target_session_date(
+            target_session_date,
+            required=True,
+            context="target_session_date for canonical Forward refresh",
+        )
+    manifest = (
+        load_canonical_candidate_manifest(manifest_path)
+        if canonical_ledger
+        else load_candidate_manifest(manifest_path)
+    )
     assert_forward_contract_ready(
         manifest,
         require_clean_tree=require_clean_tree,
@@ -1175,7 +1198,13 @@ def build_forward_cockpit(
     audit_dates = sorted({
         date for event in events
         if event.get("event_type") == SNAPSHOT_AUDIT_EVENT
-        and (date := _date_text(event.get("snapshot_updated_at") or event.get("event_time_utc")))
+        and (
+            date := (
+                _date_text(event.get("target_session_date"))
+                if "target_session_date" in event
+                else _date_text(event.get("snapshot_updated_at") or event.get("event_time_utc"))
+            )
+        )
     })
     signal_dates = sorted({
         date for event in events

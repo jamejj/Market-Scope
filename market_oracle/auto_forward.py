@@ -420,6 +420,26 @@ def _parse_runner_stdout(stdout: str) -> dict[str, Any]:
         return {"payload": None, "summary_text": text.strip()}
 
 
+def _command_for_target_session(command: tuple[str, ...], target_session: str) -> tuple[str, ...]:
+    """Bind the executed runner command to the post-lock automation target."""
+
+    cleaned: list[str] = []
+    index = 0
+    while index < len(command):
+        token = command[index]
+        if token == "--target-session-date":
+            index += 1
+            if index < len(command) and not command[index].startswith("--"):
+                index += 1
+            continue
+        if token.startswith("--target-session-date="):
+            index += 1
+            continue
+        cleaned.append(token)
+        index += 1
+    return (*cleaned, "--target-session-date", target_session)
+
+
 def execute_automation(
     *,
     config: AutomationConfig | None = None,
@@ -489,10 +509,12 @@ def execute_automation(
                 }
                 _write_json(config.status_path, payload)
                 return payload
+            locked_target = str(locked_plan["target_session_date"])
+            executed_command = _command_for_target_session(config.candidate_command, locked_target)
             try:
-                run = (runner or _default_runner)(config.candidate_command)
+                run = (runner or _default_runner)(executed_command)
             except Exception as exc:
-                run = subprocess.CompletedProcess(config.candidate_command, 1, "", str(exc))
+                run = subprocess.CompletedProcess(executed_command, 1, "", str(exc))
     except AutomationLocked as exc:
         ended_at = datetime.now(timezone.utc)
         payload = {
@@ -518,12 +540,13 @@ def execute_automation(
     fresh_plan = build_automation_plan(cockpit=fresh_cockpit, now=now, config=config, stored_status=stored)
     payload = {
         **base,
+        "candidate_command": list(executed_command),
         "plan_after_run": fresh_plan,
         "automation_status": "OK" if run.returncode == 0 else "FAILED",
         "started_at": started_at.isoformat(),
         "ended_at": ended_at.isoformat(),
         "duration_seconds": (ended_at - started_at).total_seconds(),
-        "target_session_date": plan.get("target_session_date"),
+        "target_session_date": locked_target,
         "exit_code": int(run.returncode),
         "stdout_log": str(stdout_path),
         "stderr_log": str(stderr_path),

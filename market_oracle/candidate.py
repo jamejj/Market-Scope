@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 from typing import Callable
@@ -25,8 +25,11 @@ from .forward import (
     verify_frozen_hash,
 )
 from .integrity import (
+    CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
     SnapshotIntegrityError,
+    normalize_target_session_date,
     validate_candidate_snapshot_integrity,
+    validate_candidate_snapshot_session,
     validate_canonical_candidate_universe,
 )
 from .signals import SignalInputs, signal_verdict
@@ -47,6 +50,12 @@ def _json_safe(value):
 
 
 def save_candidate_snapshot(snapshot: dict, path: Path = CANDIDATE_SNAPSHOT_PATH) -> None:
+    if path.resolve() == CANDIDATE_SNAPSHOT_PATH.resolve():
+        validate_candidate_snapshot_session(
+            snapshot,
+            target_session_date=snapshot.get("target_session_date"),
+            require_target=True,
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(_json_safe(snapshot), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -87,7 +96,12 @@ def build_candidate_snapshot(
     years: int = 8,
     scan_fn: Callable[[list[str], int, int], tuple[pd.DataFrame, dict[str, str]]] | None = None,
     updated_at: str | None = None,
+    target_session_date: date | str | None = None,
 ) -> dict:
+    normalized_target = normalize_target_session_date(
+        target_session_date,
+        required=False,
+    )
     manifest = load_canonical_candidate_manifest(manifest_path)
     universe = load_forward_universe(universe_path)
     canonical_universe = load_forward_universe(FORWARD_UNIVERSE_PATH)
@@ -125,7 +139,7 @@ def build_candidate_snapshot(
         "status": "complete" if full_coverage else "partial",
         "started_at": timestamp,
         "updated_at": timestamp,
-        "schema_version": 1,
+        "schema_version": CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
         "scan_mode": "candidate_v1_full_ml",
         "scan_phase": "complete" if full_coverage else "partial",
         "candidate_id": manifest["candidate_id"],
@@ -147,7 +161,14 @@ def build_candidate_snapshot(
         "records": raw_records,
         "errors": errors,
     }
+    if normalized_target is not None:
+        snapshot["target_session_date"] = normalized_target
     validate_candidate_snapshot_integrity(snapshot, expected_symbols=symbols)
+    validate_candidate_snapshot_session(
+        snapshot,
+        target_session_date=normalized_target,
+        require_target=False,
+    )
     snapshot["records"] = [
         add_explicit_decision_reason(_json_safe(row), manifest)
         for row in raw_records
@@ -170,7 +191,18 @@ def run_candidate_forward_cycle(
     scan_fn: Callable[[list[str], int, int], tuple[pd.DataFrame, dict[str, str]]] | None = None,
     refresh_histories: dict[str, pd.DataFrame] | None = None,
     updated_at: str | None = None,
+    target_session_date: date | str | None = None,
 ) -> tuple[dict, dict]:
+    canonical_snapshot_write = snapshot_path.resolve() == CANDIDATE_SNAPSHOT_PATH.resolve()
+    canonical_ledger_write = (
+        ledger_path.resolve() == FORWARD_LEDGER_PATH.resolve()
+        and (refresh_first or record)
+    )
+    require_target = canonical_snapshot_write or canonical_ledger_write
+    normalized_target = normalize_target_session_date(
+        target_session_date,
+        required=require_target,
+    )
     manifest = load_canonical_candidate_manifest(manifest_path)
     assert_forward_contract_ready(manifest, require_clean_tree=require_clean_tree, enforce_pipeline=enforce_pipeline)
     snapshot = build_candidate_snapshot(
@@ -179,6 +211,12 @@ def run_candidate_forward_cycle(
         years=years,
         scan_fn=scan_fn,
         updated_at=updated_at,
+        target_session_date=normalized_target,
+    )
+    validate_candidate_snapshot_session(
+        snapshot,
+        target_session_date=normalized_target,
+        require_target=require_target,
     )
     refresh_errors: dict[str, str] = {}
     try:
@@ -195,6 +233,7 @@ def run_candidate_forward_cycle(
             histories=refresh_histories,
             enforce_pipeline=enforce_pipeline,
             require_clean_tree=require_clean_tree,
+            target_session_date=normalized_target,
         )
     refresh_events = events_after_refresh[before_count:]
     snapshot["pre_scan_refresh_errors"] = refresh_errors
@@ -211,6 +250,7 @@ def run_candidate_forward_cycle(
             require_closed_bar=require_closed_bar,
             enforce_pipeline=enforce_pipeline,
             require_clean_tree=require_clean_tree,
+            target_session_date=normalized_target,
         )
         after_record_events = load_forward_events(ledger_path)
     record_events = after_record_events[before_record_count:]

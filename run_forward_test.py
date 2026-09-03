@@ -18,15 +18,21 @@ from market_oracle.forward import (
     verify_frozen_hash,
 )
 from market_oracle.candidate import load_candidate_snapshot
+from market_oracle.integrity import (
+    INTEGRITY_EXIT_CODE,
+    SnapshotIntegrityError,
+    validate_candidate_snapshot_session,
+)
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="Append-only forward test ledger for MarketScope Candidate v1.")
     parser.add_argument("--snapshot", default=str(CANDIDATE_SNAPSHOT_PATH), help="Completed Candidate v1 snapshot.")
     parser.add_argument("--ledger", default=str(FORWARD_LEDGER_PATH), help="Append-only JSONL ledger path.")
     parser.add_argument("--candidate", default=str(CANDIDATE_MANIFEST_PATH), help="Frozen candidate manifest.")
     parser.add_argument("--universe", default=str(FORWARD_UNIVERSE_PATH), help="Frozen forward universe manifest.")
     parser.add_argument("--years", type=int, default=3, help="History years used only to fill entry/exit prices.")
+    parser.add_argument("--target-session-date", help="Closed market session bound to canonical proof writes (YYYY-MM-DD).")
     parser.add_argument("--record-snapshot", action="store_true", help="Append new SIGNAL_OBSERVED rows from snapshot.")
     parser.add_argument("--refresh", action="store_true", help="Append ENTRY_FILLED/POSITION_CLOSED events when prices exist.")
     args = parser.parse_args()
@@ -42,30 +48,49 @@ def main() -> None:
     if not verify_frozen_hash(manifest, "manifest_hash"):
         raise SystemExit(f"Manifest hash mismatch: {candidate_path}")
 
-    errors = {}
-    if args.refresh:
-        events, state, errors = refresh_forward_ledger(
-            path=ledger_path,
-            manifest_path=candidate_path,
-            years=args.years,
-        )
-    else:
-        events = load_forward_events(ledger_path)
-        state = {}
+    try:
+        snapshot = None
+        if args.record_snapshot:
+            snapshot = load_candidate_snapshot(Path(args.snapshot))
+            if snapshot is None:
+                raise SystemExit(f"Nie znalazłem poprawnego snapshotu: {args.snapshot}")
+            validate_candidate_snapshot_session(
+                snapshot,
+                target_session_date=args.target_session_date,
+                require_target=ledger_path.resolve() == FORWARD_LEDGER_PATH.resolve(),
+            )
 
-    added_signals = 0
-    if args.record_snapshot:
-        snapshot = load_candidate_snapshot(Path(args.snapshot))
-        if snapshot is None:
-            raise SystemExit(f"Nie znalazłem poprawnego snapshotu: {args.snapshot}")
-        added_signals = record_snapshot_forward_signals(
-            snapshot,
-            path=ledger_path,
-            manifest_path=candidate_path,
-            universe_path=universe_path,
-        )
-        events = load_forward_events(ledger_path)
-        state = reconstruct_forward_state(events)
+        errors = {}
+        if args.refresh:
+            events, state, errors = refresh_forward_ledger(
+                path=ledger_path,
+                manifest_path=candidate_path,
+                years=args.years,
+                target_session_date=args.target_session_date,
+            )
+        else:
+            events = load_forward_events(ledger_path)
+            state = {}
+
+        added_signals = 0
+        if args.record_snapshot:
+            added_signals = record_snapshot_forward_signals(
+                snapshot,
+                path=ledger_path,
+                manifest_path=candidate_path,
+                universe_path=universe_path,
+                target_session_date=args.target_session_date,
+            )
+            events = load_forward_events(ledger_path)
+            state = reconstruct_forward_state(events)
+    except SnapshotIntegrityError as exc:
+        print(json.dumps({
+            "status": "error",
+            "failure_kind": exc.failure_kind,
+            "exit_code": exc.exit_code,
+            "integrity_errors": exc.errors,
+        }, ensure_ascii=False))
+        return INTEGRITY_EXIT_CODE
 
     print(json.dumps({
         "candidate_id": manifest["candidate_id"],
@@ -75,7 +100,8 @@ def main() -> None:
         "state_items": len(state),
         "errors": errors,
     }, ensure_ascii=False, indent=2, default=str))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

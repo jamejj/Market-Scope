@@ -25,7 +25,11 @@ from market_oracle.evidence import (
     verify_evidence_sources,
 )
 from market_oracle.features import build_features, supervised_frame
-from market_oracle.candidate import build_candidate_snapshot, run_candidate_forward_cycle
+from market_oracle.candidate import (
+    build_candidate_snapshot,
+    run_candidate_forward_cycle,
+    save_candidate_snapshot,
+)
 import market_oracle.candidate as candidate_module
 from market_oracle.forward import (
     assert_forward_contract_ready,
@@ -47,9 +51,11 @@ from market_oracle.forward import (
 )
 import market_oracle.forward as forward_module
 from market_oracle.integrity import (
+    CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
     INTEGRITY_EXIT_CODE,
     SnapshotIntegrityError,
     validate_candidate_snapshot_integrity,
+    validate_candidate_snapshot_session,
 )
 from market_oracle.auto_forward import (
     AutomationConfig,
@@ -63,6 +69,7 @@ from market_oracle.auto_forward import (
 )
 import market_oracle.auto_forward as auto_forward_module
 import run_candidate_forward as candidate_runner_module
+import run_forward_test as forward_test_runner_module
 from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
 from market_oracle.model import fit_forecast, fit_forecast_state
 from market_oracle.monitor import (
@@ -1457,6 +1464,15 @@ def _write_alternative_candidate_manifest(tmp_path) -> Path:
     return path
 
 
+def _write_alternative_execution_manifest(tmp_path) -> Path:
+    manifest = json.loads(json.dumps(load_candidate_manifest()))
+    manifest["execution_contract"]["round_trip_cost"] = 0.25
+    manifest["manifest_hash"] = forward_module.frozen_hash(manifest)
+    path = tmp_path / "alternate_execution_manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
 def test_candidate_rejects_self_hashed_noncanonical_manifest_before_scan(tmp_path):
     manifest_path = _write_alternative_candidate_manifest(tmp_path)
     scan_called = False
@@ -1482,6 +1498,7 @@ def test_forward_writer_rejects_self_hashed_noncanonical_manifest_before_proof_w
     snapshot = build_candidate_snapshot(
         scan_fn=fake_scan,
         updated_at="2026-08-28T22:35:00+02:00",
+        target_session_date="2026-07-20",
     )
     ledger = tmp_path / "canonical_proof.jsonl"
     monkeypatch.setattr(forward_module, "FORWARD_LEDGER_PATH", ledger)
@@ -1496,6 +1513,7 @@ def test_forward_writer_rejects_self_hashed_noncanonical_manifest_before_proof_w
             enforce_pipeline=False,
             require_clean_tree=False,
             require_closed_bar=False,
+            target_session_date="2026-07-20",
         )
     assert ledger.read_bytes() == before
 
@@ -1553,7 +1571,8 @@ def test_canonical_proof_ledger_cannot_disable_frozen_universe_guard(tmp_path, m
     monkeypatch.setattr(forward_module, "FORWARD_LEDGER_PATH", ledger)
     snapshot = {
         "status": "complete",
-        "schema_version": 1,
+        "schema_version": CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+        "target_session_date": "2026-07-20",
         "updated_at": "2026-07-20T22:30:00+02:00",
         "records": [_candidate_integrity_row("AMZN")],
     }
@@ -1566,11 +1585,12 @@ def test_canonical_proof_ledger_cannot_disable_frozen_universe_guard(tmp_path, m
             require_clean_tree=False,
             require_closed_bar=False,
             require_full_universe=False,
+            target_session_date="2026-07-20",
         )
     assert not ledger.exists()
 
 
-def test_candidate_positive_path_matches_pre_interlock_snapshot_hash():
+def test_candidate_positive_path_matches_schema_v2_snapshot_hash():
     def fake_scan(symbols, horizon, years):
         row = _candidate_integrity_row(symbols[0])
         row.pop("DecisionReason")
@@ -1589,7 +1609,7 @@ def test_candidate_positive_path_matches_pre_interlock_snapshot_hash():
         separators=(",", ":"),
     ).encode("utf-8")
     assert hashlib.sha256(actual_bytes).hexdigest() == (
-        "87912205a99bae6bb397f5369a5a666387e6faa574c1d0e61cc800674cad74d0"
+        "1f4dfbd30e7313da41b0d693a2c5852ed07951877e815c4af148e30fb4ed60d7"
     )
 
 
@@ -1631,6 +1651,73 @@ def test_candidate_integrity_accepts_probability_boundaries_and_any_finite_retur
         "records": [_candidate_integrity_row(probability=probability, expected_return=expected_return)],
     }
     validate_candidate_snapshot_integrity(snapshot, require_full_universe=False)
+
+
+@pytest.mark.parametrize(
+    ("row_dates", "target", "message"),
+    [
+        (["2026-07-19"] * 5, "2026-07-20", "target session"),
+        (["2026-07-20"] * 4 + ["2026-07-19"], "2026-07-20", "target session"),
+        (["2026-07-20"] * 4 + [None], "2026-07-20", "Data.*missing"),
+        (["2026-07-20"] * 4 + ["not-a-date"], "2026-07-20", "Data.*malformed"),
+    ],
+)
+def test_candidate_session_integrity_rejects_stale_missing_and_malformed_rows(row_dates, target, message):
+    universe = load_forward_universe()
+    records = []
+    for symbol, row_date in zip(universe["symbols"], row_dates):
+        row = _candidate_integrity_row(symbol)
+        row["Data"] = row_date
+        records.append(row)
+    snapshot = {
+        "schema_version": CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+        "target_session_date": target,
+        "records": records,
+    }
+
+    with pytest.raises(SnapshotIntegrityError, match=message):
+        validate_candidate_snapshot_session(
+            snapshot,
+            target_session_date=target,
+            require_target=True,
+        )
+
+
+def test_candidate_session_integrity_accepts_exact_target_and_rejects_mismatched_snapshot_target():
+    universe = load_forward_universe()
+    snapshot = {
+        "schema_version": CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+        "target_session_date": "2026-07-20",
+        "records": [_candidate_integrity_row(symbol) for symbol in universe["symbols"]],
+    }
+    validate_candidate_snapshot_session(
+        snapshot,
+        target_session_date="2026-07-20",
+        require_target=True,
+    )
+
+    with pytest.raises(SnapshotIntegrityError, match="snapshot target"):
+        validate_candidate_snapshot_session(
+            snapshot,
+            target_session_date="2026-07-21",
+            require_target=True,
+        )
+
+
+def test_candidate_session_integrity_keeps_legacy_v1_readable_but_rejects_it_as_canonical_proof_input():
+    snapshot = {
+        "schema_version": 1,
+        "target_session_date": "2026-07-20",
+        "records": [_candidate_integrity_row()],
+    }
+    validate_candidate_snapshot_session(snapshot, require_target=False)
+
+    with pytest.raises(SnapshotIntegrityError, match="schema_version"):
+        validate_candidate_snapshot_session(
+            snapshot,
+            target_session_date="2026-07-20",
+            require_target=True,
+        )
 
 
 def test_candidate_integrity_requires_exact_unique_frozen_universe():
@@ -2363,6 +2450,370 @@ def test_candidate_cycle_validates_full_snapshot_before_refresh_or_snapshot_writ
     assert json.loads(snapshot_path.read_text())["status"] == "complete"
 
 
+def test_canonical_candidate_cycle_requires_target_before_scan_refresh_or_snapshot_write(tmp_path, monkeypatch):
+    snapshot_path = tmp_path / "canonical_snapshot.json"
+    ledger_path = tmp_path / "canonical_ledger.jsonl"
+    snapshot_path.write_bytes(b'{"sentinel":"unchanged"}')
+    ledger_path.write_bytes(b'{"sentinel":"unchanged"}\n')
+    before_snapshot = snapshot_path.read_bytes()
+    before_ledger = ledger_path.read_bytes()
+    monkeypatch.setattr(candidate_module, "CANDIDATE_SNAPSHOT_PATH", snapshot_path)
+    monkeypatch.setattr(candidate_module, "FORWARD_LEDGER_PATH", ledger_path)
+
+    def forbidden_scan(symbols, horizon, years):
+        pytest.fail("canonical target guard must run before the first scan")
+
+    def forbidden_refresh(**kwargs):
+        pytest.fail("canonical target guard must run before refresh")
+
+    monkeypatch.setattr(candidate_module, "refresh_forward_ledger", forbidden_refresh)
+    with pytest.raises(SnapshotIntegrityError, match="target_session_date"):
+        run_candidate_forward_cycle(
+            snapshot_path=snapshot_path,
+            ledger_path=ledger_path,
+            scan_fn=forbidden_scan,
+            record=False,
+            refresh_first=False,
+            enforce_pipeline=False,
+            require_clean_tree=False,
+        )
+
+    assert snapshot_path.read_bytes() == before_snapshot
+    assert ledger_path.read_bytes() == before_ledger
+
+
+def test_candidate_cycle_rejects_one_stale_row_atomically_before_refresh_or_save(tmp_path, monkeypatch):
+    universe = load_forward_universe()
+    snapshot_path = tmp_path / "canonical_snapshot.json"
+    ledger_path = tmp_path / "canonical_ledger.jsonl"
+    snapshot_path.write_bytes(b'{"sentinel":"unchanged"}')
+    ledger_path.write_bytes(b'{"sentinel":"unchanged"}\n')
+    before_snapshot = snapshot_path.read_bytes()
+    before_ledger = ledger_path.read_bytes()
+    monkeypatch.setattr(candidate_module, "CANDIDATE_SNAPSHOT_PATH", snapshot_path)
+    monkeypatch.setattr(candidate_module, "FORWARD_LEDGER_PATH", ledger_path)
+
+    def fake_scan(symbols, horizon, years):
+        row = _candidate_integrity_row(symbols[0])
+        if symbols[0] == universe["symbols"][-1]:
+            row["Data"] = "2026-07-19"
+        return pd.DataFrame([row]), {}
+
+    def forbidden_refresh(**kwargs):
+        pytest.fail("session binding must pass before refresh")
+
+    monkeypatch.setattr(candidate_module, "refresh_forward_ledger", forbidden_refresh)
+    with pytest.raises(SnapshotIntegrityError, match="target session"):
+        run_candidate_forward_cycle(
+            snapshot_path=snapshot_path,
+            ledger_path=ledger_path,
+            scan_fn=fake_scan,
+            target_session_date="2026-07-20",
+            enforce_pipeline=False,
+            require_clean_tree=False,
+            require_closed_bar=False,
+            updated_at="2026-07-21T08:15:00+02:00",
+        )
+
+    assert snapshot_path.read_bytes() == before_snapshot
+    assert ledger_path.read_bytes() == before_ledger
+
+
+def test_candidate_cycle_binds_target_and_preserves_real_execution_timestamp_on_noncanonical_path(tmp_path):
+    def fake_scan(symbols, horizon, years):
+        return pd.DataFrame([_candidate_integrity_row(symbols[0])]), {}
+
+    snapshot_path = tmp_path / "research_snapshot.json"
+    snapshot, result = run_candidate_forward_cycle(
+        snapshot_path=snapshot_path,
+        ledger_path=tmp_path / "research_ledger.jsonl",
+        scan_fn=fake_scan,
+        target_session_date="2026-07-20",
+        refresh_first=False,
+        record=False,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+        updated_at="2026-07-21T08:15:00+02:00",
+    )
+
+    assert snapshot["schema_version"] == CANDIDATE_SNAPSHOT_SCHEMA_VERSION == 2
+    assert snapshot["target_session_date"] == "2026-07-20"
+    assert snapshot["updated_at"] == "2026-07-21T08:15:00+02:00"
+    assert result["added_signals"] == 0
+    stored = json.loads(snapshot_path.read_text())
+    assert stored["target_session_date"] == "2026-07-20"
+    assert stored["updated_at"] == "2026-07-21T08:15:00+02:00"
+
+
+def test_canonical_candidate_cycle_saves_schema_v2_only_when_all_rows_match_target(tmp_path, monkeypatch):
+    snapshot_path = tmp_path / "canonical_snapshot.json"
+    ledger_path = tmp_path / "canonical_ledger.jsonl"
+    monkeypatch.setattr(candidate_module, "CANDIDATE_SNAPSHOT_PATH", snapshot_path)
+    monkeypatch.setattr(candidate_module, "FORWARD_LEDGER_PATH", ledger_path)
+
+    def fake_scan(symbols, horizon, years):
+        return pd.DataFrame([_candidate_integrity_row(symbols[0])]), {}
+
+    snapshot, result = run_candidate_forward_cycle(
+        snapshot_path=snapshot_path,
+        ledger_path=ledger_path,
+        scan_fn=fake_scan,
+        target_session_date="2026-07-20",
+        refresh_first=False,
+        record=False,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+        updated_at="2026-07-21T08:15:00+02:00",
+    )
+
+    stored = json.loads(snapshot_path.read_text())
+    assert snapshot["schema_version"] == stored["schema_version"] == 2
+    assert snapshot["target_session_date"] == stored["target_session_date"] == "2026-07-20"
+    assert {row["Data"] for row in stored["records"]} == {"2026-07-20"}
+    assert result["added_signals"] == 0
+    assert not ledger_path.exists()
+
+
+def test_noncanonical_candidate_cycle_remains_available_without_target(tmp_path):
+    def fake_scan(symbols, horizon, years):
+        return pd.DataFrame([_candidate_integrity_row(symbols[0])]), {}
+
+    snapshot, _ = run_candidate_forward_cycle(
+        snapshot_path=tmp_path / "research_snapshot.json",
+        ledger_path=tmp_path / "research_ledger.jsonl",
+        scan_fn=fake_scan,
+        refresh_first=False,
+        record=False,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+        updated_at="2026-07-20T22:35:00+02:00",
+    )
+    assert snapshot["schema_version"] == CANDIDATE_SNAPSHOT_SCHEMA_VERSION
+    assert "target_session_date" not in snapshot
+
+
+def test_direct_canonical_snapshot_save_rejects_legacy_or_unbound_snapshot_before_overwrite(tmp_path, monkeypatch):
+    snapshot_path = tmp_path / "canonical_snapshot.json"
+    snapshot_path.write_bytes(b'{"sentinel":"unchanged"}')
+    before = snapshot_path.read_bytes()
+    monkeypatch.setattr(candidate_module, "CANDIDATE_SNAPSHOT_PATH", snapshot_path)
+
+    with pytest.raises(SnapshotIntegrityError, match="schema_version|target_session_date"):
+        save_candidate_snapshot(
+            {
+                "schema_version": 1,
+                "records": [_candidate_integrity_row()],
+            },
+            snapshot_path,
+        )
+    assert snapshot_path.read_bytes() == before
+
+
+def test_direct_canonical_refresh_requires_target_before_ledger_write(tmp_path, monkeypatch):
+    ledger_path = tmp_path / "canonical_ledger.jsonl"
+    ledger_path.write_bytes(b'{"sentinel":"unchanged"}\n')
+    before = ledger_path.read_bytes()
+    monkeypatch.setattr(forward_module, "FORWARD_LEDGER_PATH", ledger_path)
+
+    with pytest.raises(SnapshotIntegrityError, match="target_session_date"):
+        refresh_forward_ledger(
+            path=ledger_path,
+            histories={},
+            enforce_pipeline=False,
+            require_clean_tree=False,
+        )
+    assert ledger_path.read_bytes() == before
+
+
+def test_direct_canonical_refresh_rejects_self_hashed_execution_manifest_before_proof_write(
+    tmp_path,
+    monkeypatch,
+):
+    manifest_path = _write_alternative_execution_manifest(tmp_path)
+    ledger_path = tmp_path / "canonical_ledger.jsonl"
+    monkeypatch.setattr(forward_module, "FORWARD_LEDGER_PATH", ledger_path)
+    append_forward_event({"event_type": "TEST_SEED", "status": "UNCHANGED"}, ledger_path)
+    before = ledger_path.read_bytes()
+    monkeypatch.setattr(
+        forward_module,
+        "_history_for",
+        lambda *args, **kwargs: pytest.fail("manifest binding must run before history loading"),
+    )
+    monkeypatch.setattr(
+        forward_module,
+        "ledger_lock",
+        lambda path: pytest.fail("manifest binding must run before ledger_lock"),
+    )
+
+    with pytest.raises(SnapshotIntegrityError, match="canonical frozen manifest"):
+        refresh_forward_ledger(
+            path=ledger_path,
+            manifest_path=manifest_path,
+            target_session_date="2026-07-20",
+            histories={},
+            enforce_pipeline=False,
+            require_clean_tree=False,
+        )
+
+    assert ledger_path.read_bytes() == before
+
+
+def test_noncanonical_refresh_preserves_research_manifest_support(tmp_path):
+    manifest_path = _write_alternative_execution_manifest(tmp_path)
+    ledger_path = tmp_path / "research_ledger.jsonl"
+
+    events, state, errors = refresh_forward_ledger(
+        path=ledger_path,
+        manifest_path=manifest_path,
+        histories={},
+        enforce_pipeline=False,
+        require_clean_tree=False,
+    )
+
+    assert events == []
+    assert state == {}
+    assert errors == {}
+
+
+def test_direct_canonical_writer_rejects_target_mismatch_and_legacy_v1_before_append(tmp_path, monkeypatch):
+    universe = load_forward_universe()
+    ledger_path = tmp_path / "canonical_ledger.jsonl"
+    ledger_path.write_bytes(b'{"sentinel":"unchanged"}\n')
+    before = ledger_path.read_bytes()
+    monkeypatch.setattr(forward_module, "FORWARD_LEDGER_PATH", ledger_path)
+    snapshot = {
+        "status": "complete",
+        "schema_version": CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+        "scan_mode": "candidate_v1_full_ml",
+        "target_session_date": "2026-07-20",
+        "updated_at": "2026-07-21T08:15:00+02:00",
+        "candidate_pipeline": forward_module.pipeline_fingerprint(),
+        "records": [_candidate_integrity_row(symbol) for symbol in universe["symbols"]],
+        "forward_universe": {
+            "universe_id": universe["universe_id"],
+            "universe_hash": universe["universe_hash"],
+            "requested_symbols": universe["symbols"],
+            "completed_symbols": universe["symbols"],
+            "failed_symbols": [],
+            "full_coverage": True,
+        },
+    }
+
+    with pytest.raises(SnapshotIntegrityError, match="snapshot target"):
+        record_snapshot_forward_signals(
+            snapshot,
+            path=ledger_path,
+            target_session_date="2026-07-21",
+            enforce_pipeline=False,
+            require_clean_tree=False,
+            require_closed_bar=False,
+        )
+    assert ledger_path.read_bytes() == before
+
+    snapshot["schema_version"] = 1
+    with pytest.raises(SnapshotIntegrityError, match="schema_version"):
+        record_snapshot_forward_signals(
+            snapshot,
+            path=ledger_path,
+            target_session_date="2026-07-20",
+            enforce_pipeline=False,
+            require_clean_tree=False,
+            require_closed_bar=False,
+        )
+    assert ledger_path.read_bytes() == before
+
+
+def test_snapshot_audit_records_explicit_target_and_cockpit_prefers_it_over_execution_date(tmp_path):
+    target = "2026-07-20"
+    row = _candidate_integrity_row("GOOD")
+    snapshot = {
+        "status": "complete",
+        "schema_version": CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+        "target_session_date": target,
+        "updated_at": "2026-07-21T08:15:00+02:00",
+        "records": [row],
+    }
+    ledger_path = tmp_path / "research.jsonl"
+    assert record_snapshot_forward_signals(
+        snapshot,
+        path=ledger_path,
+        target_session_date=target,
+        allow_historical=True,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+        require_full_universe=False,
+    ) == 1
+    audit = load_forward_events(ledger_path)[0]
+    assert audit["event_type"] == "SNAPSHOT_AUDIT"
+    assert audit["target_session_date"] == target
+
+    cockpit = build_forward_cockpit(
+        [audit],
+        snapshot={},
+        manifest=load_candidate_manifest(),
+        universe_contract=load_forward_universe(),
+    )
+    assert cockpit["latest_audit_date"] == target
+
+
+def test_canonical_writer_accepts_exact_schema_v2_target_and_records_bound_audit(tmp_path, monkeypatch):
+    target = "2026-07-20"
+    universe = load_forward_universe()
+    ledger_path = tmp_path / "canonical_ledger.jsonl"
+    monkeypatch.setattr(forward_module, "FORWARD_LEDGER_PATH", ledger_path)
+    snapshot = {
+        "status": "complete",
+        "schema_version": CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+        "scan_mode": "candidate_v1_full_ml",
+        "target_session_date": target,
+        "updated_at": "2026-07-21T08:15:00+02:00",
+        "candidate_pipeline": forward_module.pipeline_fingerprint(),
+        "records": [_candidate_integrity_row(symbol) for symbol in universe["symbols"]],
+        "forward_universe": {
+            "universe_id": universe["universe_id"],
+            "universe_hash": universe["universe_hash"],
+            "requested_symbols": universe["symbols"],
+            "completed_symbols": universe["symbols"],
+            "failed_symbols": [],
+            "full_coverage": True,
+        },
+    }
+
+    added = record_snapshot_forward_signals(
+        snapshot,
+        path=ledger_path,
+        target_session_date=target,
+        allow_historical=True,
+        enforce_pipeline=False,
+        require_clean_tree=False,
+        require_closed_bar=False,
+    )
+
+    events = load_forward_events(ledger_path)
+    audit = next(event for event in events if event["event_type"] == "SNAPSHOT_AUDIT")
+    assert audit["target_session_date"] == target
+    assert audit["snapshot_schema_version"] == CANDIDATE_SNAPSHOT_SCHEMA_VERSION
+    assert added == sum(event["event_type"] == "SIGNAL_OBSERVED" for event in events)
+
+
+def test_cockpit_legacy_audit_falls_back_to_snapshot_updated_at():
+    event = {
+        "event_type": "SNAPSHOT_AUDIT",
+        "snapshot_updated_at": "2026-07-23T22:35:00+02:00",
+    }
+    cockpit = build_forward_cockpit(
+        [event],
+        snapshot={},
+        manifest=load_candidate_manifest(),
+        universe_contract=load_forward_universe(),
+    )
+    assert cockpit["latest_audit_date"] == "2026-07-23"
+
+
 def test_candidate_cycle_refreshes_before_record_and_blocks_same_day_reentry(tmp_path):
     manifest = load_candidate_manifest()
     ledger = tmp_path / "cycle.jsonl"
@@ -2573,6 +3024,107 @@ def test_forward_automation_rechecks_plan_after_lock(tmp_path, monkeypatch):
     assert stored["race_recheck"] is True
 
 
+def test_forward_automation_executes_and_reports_only_locked_target(tmp_path, monkeypatch):
+    config = AutomationConfig(
+        status_path=tmp_path / "status.json",
+        lock_path=tmp_path / "run.lock",
+        log_dir=tmp_path / "logs",
+        candidate_command=("python", "run_candidate_forward.py", "--target-session-date", "1999-01-01"),
+    )
+    plans = iter([
+        {
+            "should_run": True,
+            "target_session_date": "2026-07-23",
+            "reason": "PRE_LOCK",
+        },
+        {
+            "should_run": True,
+            "target_session_date": "2026-07-24",
+            "reason": "LOCKED",
+        },
+        {
+            "should_run": False,
+            "target_session_date": "2026-07-24",
+            "reason": "AFTER_RUN",
+        },
+    ])
+    monkeypatch.setattr(auto_forward_module, "build_automation_plan", lambda **kwargs: next(plans))
+    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", lambda: {})
+    executed = []
+
+    def runner(command):
+        executed.append(command)
+        return auto_forward_module.subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps({"status": "complete", "target_session_date": "2026-07-24"}),
+            "",
+        )
+
+    payload = execute_automation(
+        config=config,
+        now="2026-07-24T22:50:00+02:00",
+        runner=runner,
+    )
+
+    assert executed == [
+        ("python", "run_candidate_forward.py", "--target-session-date", "2026-07-24")
+    ]
+    assert payload["target_session_date"] == "2026-07-24"
+    assert payload["candidate_command"] == list(executed[0])
+    assert json.loads(config.status_path.read_text())["target_session_date"] == "2026-07-24"
+
+
+def test_forward_automation_sanitizes_malformed_template_target_and_uses_locked_target(tmp_path, monkeypatch):
+    config = AutomationConfig(
+        status_path=tmp_path / "status.json",
+        lock_path=tmp_path / "run.lock",
+        log_dir=tmp_path / "logs",
+        candidate_command=(
+            "python",
+            "run_candidate_forward.py",
+            "--target-session-date",
+            "--no-record",
+        ),
+    )
+    plans = iter([
+        {"should_run": True, "target_session_date": "2026-07-23", "reason": "PRE_LOCK"},
+        {"should_run": True, "target_session_date": "2026-07-24", "reason": "LOCKED"},
+        {"should_run": False, "target_session_date": "2026-07-24", "reason": "AFTER_RUN"},
+    ])
+    monkeypatch.setattr(auto_forward_module, "build_automation_plan", lambda **kwargs: next(plans))
+    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", lambda: {})
+    executed = []
+
+    def runner(command):
+        executed.append(command)
+        return auto_forward_module.subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps({"status": "complete", "target_session_date": "2026-07-24"}),
+            "",
+        )
+
+    payload = execute_automation(
+        config=config,
+        now="2026-07-24T22:50:00+02:00",
+        runner=runner,
+    )
+
+    assert executed == [
+        (
+            "python",
+            "run_candidate_forward.py",
+            "--no-record",
+            "--target-session-date",
+            "2026-07-24",
+        )
+    ]
+    assert payload["automation_status"] == "OK"
+    assert payload["target_session_date"] == "2026-07-24"
+    assert payload["candidate_command"] == list(executed[0])
+
+
 def test_forward_automation_lock_blocks_parallel_runs(tmp_path, monkeypatch):
     config = AutomationConfig(
         status_path=tmp_path / "status.json",
@@ -2651,6 +3203,7 @@ def test_candidate_runner_maps_snapshot_integrity_failure_to_exit_65(monkeypatch
         "no_record": False,
         "no_refresh_first": False,
         "allow_before_close": False,
+        "target_session_date": "2026-07-24",
     })())
 
     assert candidate_runner_module.main() == INTEGRITY_EXIT_CODE
@@ -2659,6 +3212,146 @@ def test_candidate_runner_maps_snapshot_integrity_failure_to_exit_65(monkeypatch
     assert payload["failure_kind"] == "INTEGRITY_FAILED"
     assert payload["exit_code"] == 65
     assert payload["integrity_errors"] == ["QQQ: probability_up is non-finite"]
+
+
+def test_candidate_runner_passes_target_and_reports_it_on_success(monkeypatch, capsys):
+    captured = {}
+
+    def successful_cycle(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "complete",
+            "schema_version": CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+            "target_session_date": "2026-07-24",
+            "forward_universe": {},
+            "records": [],
+            "errors": {},
+        }, {"added_signals": 0}
+
+    monkeypatch.setattr(candidate_runner_module, "run_candidate_forward_cycle", successful_cycle)
+    monkeypatch.setattr(candidate_runner_module, "format_forward_cli_summary", lambda *args, **kwargs: "summary")
+    monkeypatch.setattr(candidate_runner_module.argparse.ArgumentParser, "parse_args", lambda self: type("Args", (), {
+        "candidate": "candidate.json",
+        "universe": "universe.json",
+        "snapshot": "snapshot.json",
+        "ledger": "ledger.jsonl",
+        "years": 8,
+        "no_record": False,
+        "no_refresh_first": False,
+        "allow_before_close": False,
+        "target_session_date": "2026-07-24",
+    })())
+
+    assert candidate_runner_module.main() == 0
+    assert captured["target_session_date"] == "2026-07-24"
+    output = capsys.readouterr().out
+    assert '"target_session_date": "2026-07-24"' in output
+
+
+def test_forward_test_runner_passes_target_to_refresh_and_record(monkeypatch, capsys):
+    captured = {}
+    args = type("Args", (), {
+        "snapshot": "snapshot.json",
+        "ledger": "ledger.jsonl",
+        "candidate": "candidate.json",
+        "universe": "universe.json",
+        "years": 3,
+        "target_session_date": "2026-07-24",
+        "record_snapshot": True,
+        "refresh": True,
+    })()
+    monkeypatch.setattr(forward_test_runner_module.argparse.ArgumentParser, "parse_args", lambda self: args)
+    monkeypatch.setattr(forward_test_runner_module, "load_candidate_manifest", lambda path: {"candidate_id": "candidate_v1"})
+    monkeypatch.setattr(forward_test_runner_module, "verify_frozen_hash", lambda *args: True)
+    monkeypatch.setattr(forward_test_runner_module, "load_candidate_snapshot", lambda path: {
+        "status": "complete",
+        "schema_version": CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+        "target_session_date": "2026-07-24",
+        "records": [{**_candidate_integrity_row(), "Data": "2026-07-24"}],
+    })
+
+    def fake_refresh(**kwargs):
+        captured["refresh_target"] = kwargs["target_session_date"]
+        return [], {}, {}
+
+    def fake_record(snapshot, **kwargs):
+        captured["record_target"] = kwargs["target_session_date"]
+        return 0
+
+    monkeypatch.setattr(forward_test_runner_module, "refresh_forward_ledger", fake_refresh)
+    monkeypatch.setattr(forward_test_runner_module, "record_snapshot_forward_signals", fake_record)
+    monkeypatch.setattr(forward_test_runner_module, "load_forward_events", lambda path: [])
+    monkeypatch.setattr(forward_test_runner_module, "reconstruct_forward_state", lambda events: {})
+    monkeypatch.setattr(forward_test_runner_module, "forward_summary", lambda events: {})
+
+    assert forward_test_runner_module.main() == 0
+    assert captured == {
+        "refresh_target": "2026-07-24",
+        "record_target": "2026-07-24",
+    }
+    assert '"added_signals": 0' in capsys.readouterr().out
+
+
+def test_forward_test_runner_maps_target_integrity_failure_to_exit_65(monkeypatch, capsys):
+    args = type("Args", (), {
+        "snapshot": "snapshot.json",
+        "ledger": "ledger.jsonl",
+        "candidate": "candidate.json",
+        "universe": "universe.json",
+        "years": 3,
+        "target_session_date": None,
+        "record_snapshot": False,
+        "refresh": True,
+    })()
+    monkeypatch.setattr(forward_test_runner_module.argparse.ArgumentParser, "parse_args", lambda self: args)
+    monkeypatch.setattr(forward_test_runner_module, "load_candidate_manifest", lambda path: {"candidate_id": "candidate_v1"})
+    monkeypatch.setattr(forward_test_runner_module, "verify_frozen_hash", lambda *args: True)
+    monkeypatch.setattr(
+        forward_test_runner_module,
+        "refresh_forward_ledger",
+        lambda **kwargs: (_ for _ in ()).throw(SnapshotIntegrityError("target_session_date is missing")),
+    )
+
+    assert forward_test_runner_module.main() == INTEGRITY_EXIT_CODE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "error"
+    assert payload["failure_kind"] == "INTEGRITY_FAILED"
+    assert payload["exit_code"] == 65
+
+
+def test_forward_test_runner_validates_recorded_snapshot_before_canonical_refresh(monkeypatch, capsys):
+    args = type("Args", (), {
+        "snapshot": "snapshot.json",
+        "ledger": str(forward_test_runner_module.FORWARD_LEDGER_PATH),
+        "candidate": "candidate.json",
+        "universe": "universe.json",
+        "years": 3,
+        "target_session_date": "2026-07-24",
+        "record_snapshot": True,
+        "refresh": True,
+    })()
+    stale_snapshot = {
+        "schema_version": CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+        "target_session_date": "2026-07-23",
+        "records": [_candidate_integrity_row()],
+    }
+    refresh_called = False
+    monkeypatch.setattr(forward_test_runner_module.argparse.ArgumentParser, "parse_args", lambda self: args)
+    monkeypatch.setattr(forward_test_runner_module, "load_candidate_manifest", lambda path: {"candidate_id": "candidate_v1"})
+    monkeypatch.setattr(forward_test_runner_module, "verify_frozen_hash", lambda *args: True)
+    monkeypatch.setattr(forward_test_runner_module, "load_candidate_snapshot", lambda path: stale_snapshot)
+
+    def forbidden_refresh(**kwargs):
+        nonlocal refresh_called
+        refresh_called = True
+        pytest.fail("snapshot session guard must run before canonical refresh")
+
+    monkeypatch.setattr(forward_test_runner_module, "refresh_forward_ledger", forbidden_refresh)
+
+    assert forward_test_runner_module.main() == INTEGRITY_EXIT_CODE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["failure_kind"] == "INTEGRITY_FAILED"
+    assert refresh_called is False
 
 
 def test_forward_automation_preserves_integrity_failure_kind_and_exit_65(tmp_path, monkeypatch):

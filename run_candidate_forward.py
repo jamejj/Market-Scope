@@ -22,7 +22,12 @@ def main() -> int:
     parser.add_argument("--snapshot", default=str(CANDIDATE_SNAPSHOT_PATH))
     parser.add_argument("--ledger", default=str(FORWARD_LEDGER_PATH))
     parser.add_argument("--years", type=int, default=8)
-    parser.add_argument("--no-record", action="store_true", help="Save snapshot only; do not append to forward ledger.")
+    parser.add_argument("--target-session-date", help="Closed market session bound to this proof run (YYYY-MM-DD).")
+    parser.add_argument(
+        "--no-record",
+        action="store_true",
+        help="Skip snapshot audit/signal recording; refresh may still append lifecycle events.",
+    )
     parser.add_argument("--no-refresh-first", action="store_true", help="Skip pre-scan close/entry refresh. Not recommended.")
     parser.add_argument("--allow-before-close", action="store_true", help="Do not block same-day rows before the US close buffer.")
     args = parser.parse_args()
@@ -37,6 +42,7 @@ def main() -> int:
             record=not args.no_record,
             refresh_first=not args.no_refresh_first,
             require_closed_bar=not args.allow_before_close,
+            target_session_date=args.target_session_date,
         )
     except SnapshotIntegrityError as exc:
         print(json.dumps({
@@ -53,6 +59,7 @@ def main() -> int:
         "forward_universe": snapshot.get("forward_universe"),
         "records": len(snapshot.get("records") or []),
         "errors": snapshot.get("errors") or {},
+        "target_session_date": snapshot.get("target_session_date"),
         **result,
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))

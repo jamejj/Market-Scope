@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, datetime
 import math
 from numbers import Real
 from typing import Any, Iterable
@@ -7,6 +8,7 @@ from typing import Any, Iterable
 
 INTEGRITY_EXIT_CODE = 65
 INTEGRITY_FAILURE_KIND = "INTEGRITY_FAILED"
+CANDIDATE_SNAPSHOT_SCHEMA_VERSION = 2
 
 
 class SnapshotIntegrityError(ValueError):
@@ -18,6 +20,91 @@ class SnapshotIntegrityError(ValueError):
         self.failure_kind = INTEGRITY_FAILURE_KIND
         self.exit_code = INTEGRITY_EXIT_CODE
         super().__init__("Candidate snapshot integrity failed: " + "; ".join(items))
+
+
+def normalize_target_session_date(
+    value: date | str | None,
+    *,
+    required: bool,
+    context: str = "target_session_date",
+) -> str | None:
+    """Return an exact ISO session date or fail closed."""
+
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if required:
+            raise SnapshotIntegrityError(f"{context} is missing")
+        return None
+    if isinstance(value, datetime) or isinstance(value, bool):
+        raise SnapshotIntegrityError(f"{context} is malformed")
+    if isinstance(value, date):
+        return value.isoformat()
+    if not isinstance(value, str):
+        raise SnapshotIntegrityError(f"{context} is malformed")
+    text = value.strip()
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError as exc:
+        raise SnapshotIntegrityError(f"{context} is malformed") from exc
+    if text != parsed.isoformat():
+        raise SnapshotIntegrityError(f"{context} is malformed")
+    return text
+
+
+def validate_candidate_snapshot_session(
+    snapshot: dict[str, Any],
+    *,
+    target_session_date: date | str | None = None,
+    require_target: bool,
+) -> str | None:
+    """Bind a Candidate snapshot and every raw row to one market session."""
+
+    explicit_target = normalize_target_session_date(
+        target_session_date,
+        required=require_target,
+        context="target_session_date",
+    )
+    snapshot_target = normalize_target_session_date(
+        snapshot.get("target_session_date"),
+        required=require_target or explicit_target is not None,
+        context="snapshot target_session_date",
+    )
+    if require_target and snapshot.get("schema_version") != CANDIDATE_SNAPSHOT_SCHEMA_VERSION:
+        raise SnapshotIntegrityError(
+            f"canonical proof input requires schema_version {CANDIDATE_SNAPSHOT_SCHEMA_VERSION}"
+        )
+    if explicit_target is not None and snapshot_target != explicit_target:
+        raise SnapshotIntegrityError(
+            f"snapshot target {snapshot_target!r} does not match runner target {explicit_target!r}"
+        )
+    effective_target = explicit_target or snapshot_target
+    if effective_target is None:
+        return None
+
+    records = snapshot.get("records")
+    if not isinstance(records, list):
+        raise SnapshotIntegrityError("snapshot records are missing for target-session validation")
+    errors: list[str] = []
+    for index, row in enumerate(records):
+        symbol = _symbol(row, index) if isinstance(row, dict) else f"record[{index}]"
+        if not isinstance(row, dict) or "Data" not in row or row.get("Data") is None:
+            errors.append(f"{symbol}: Data is missing")
+            continue
+        try:
+            row_date = normalize_target_session_date(
+                row.get("Data"),
+                required=True,
+                context=f"{symbol}: Data",
+            )
+        except SnapshotIntegrityError as exc:
+            errors.extend(exc.errors)
+            continue
+        if row_date != effective_target:
+            errors.append(
+                f"{symbol}: Data {row_date} does not match target session {effective_target}"
+            )
+    if errors:
+        raise SnapshotIntegrityError(errors)
+    return effective_target
 
 
 def validate_canonical_candidate_universe(

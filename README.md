@@ -66,16 +66,18 @@ Po Reality Check Candidate v1 został zamrożony w `configs/marketscope_20d_long
 Forward Test Ledger zapisuje nowe sygnały jako append-only JSONL w `data/forward_ledger_candidate_v1.jsonl`. Stare rekordy nie są edytowane ani usuwane: każdy wpis ma `previous_event_hash` i `event_hash`, więc ręczna zmiana wcześniejszej linii jest wykrywana przy odczycie. Cykl zdarzeń to `SNAPSHOT_AUDIT`, `SIGNAL_OBSERVED`, potem `POSITION_ACCEPTED` albo `POSITION_SKIPPED`, następnie `ENTRY_FILLED`, a po 20 sesjach `POSITION_CLOSED`.
 
 ```bash
-.venv/bin/python run_candidate_forward.py
+.venv/bin/python run_candidate_forward.py --target-session-date YYYY-MM-DD
 ```
 
-Ta komenda wykonuje właściwą kolejność dowodową: najpierw odświeża stare pozycje na dostępnych cenach `Open`, potem robi pełny skan ML Candidate v1 po zamknięciu świecy, a dopiero na końcu zapisuje nowe obserwacje i przydziela sloty. Zwykły dashboardowy monitor jest radarem użytkowym i nie karmi już proof ledgera, bo używa FAST shortlisty. Proof ledger korzysta z osobnego, zamrożonego `configs/forward_universe_v1.json`: dokładnie 5 symboli oryginalnego USA/ETF koszyka Candidate v1, tylko horyzont 20, pełne ML dla każdego symbolu, bez FAST shortlisty. Snapshot trafia do `data/candidate_v1_snapshot.json` i musi zawierać hash universe oraz pełne pokrycie `requested/completed/failed`.
+Ta komenda wykonuje właściwą kolejność dowodową: najpierw odświeża stare pozycje na dostępnych cenach `Open`, potem robi pełny skan ML Candidate v1 po zamknięciu świecy, a dopiero na końcu zapisuje nowe obserwacje i przydziela sloty. `--target-session-date` jest obowiązkowym, zamkniętym dniem sesyjnym dla każdego kanonicznego zapisu proof state. Snapshot schema v2 zapisuje ten target osobno od rzeczywistego czasu wykonania; każdy z pięciu rekordów musi mieć dokładnie tę samą datę `Data`. Dzięki temu późniejszy recovery run nie może odtworzyć pominiętej sesji przy użyciu nowszych danych. Zwykły dashboardowy monitor jest radarem użytkowym i nie karmi już proof ledgera, bo używa FAST shortlisty. Proof ledger korzysta z osobnego, zamrożonego `configs/forward_universe_v1.json`: dokładnie 5 symboli oryginalnego USA/ETF koszyka Candidate v1, tylko horyzont 20, pełne ML dla każdego symbolu, bez FAST shortlisty. Snapshot trafia do `data/candidate_v1_snapshot.json` i musi zawierać hash universe oraz pełne pokrycie `requested/completed/failed`.
 
 Forward ledger odrzuca snapshoty sprzed `frozen_at`, snapshoty bez zgodnego pipeline hash, brudne pliki modelu/decyzji/kontraktu, niepełny universe, brak jawnego `DecisionReason == LONG_CONFIRMED` dla kandydatów oraz sygnały z dziennej świecy, która według czasu snapshotu nie jest jeszcze bezpiecznie zamknięta. Jeśli chcesz tylko ręcznie uzupełnić wejścia/wyjścia dla istniejącego candidate snapshotu, użyj:
 
 ```bash
-.venv/bin/python run_forward_test.py --record-snapshot --refresh
+.venv/bin/python run_forward_test.py --record-snapshot --refresh --target-session-date YYYY-MM-DD
 ```
+
+Sam `--no-record` nie wyłącza wymogu targetu, jeśli komenda nadal zapisuje kanoniczny snapshot albo odświeża kanoniczny ledger. Brak targetu jest dozwolony wyłącznie dla całkowicie niekanonicznych ścieżek test/research, które nie zapisują `data/candidate_v1_snapshot.json` ani `data/forward_ledger_candidate_v1.jsonl`. Snapshoty schema v1 pozostają czytelne historycznie, ale nie mogą być nowym wejściem do kanonicznego proof write.
 
 Bezpieczna automatyzacja macOS jest osobnym wrapperem wokół Candidate v1. Nie zmienia modeli, progów ani ledgera; przed uruchomieniem sprawdza, czy sesja USA jest już po buforze zamknięcia, czy dana sesja nie została już audytowana, zakłada lock procesu i zapisuje status oraz logi do `data/forward_auto/`.
 
