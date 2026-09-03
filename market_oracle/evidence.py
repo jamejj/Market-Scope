@@ -370,10 +370,10 @@ def evidence_copy(assessment: EvidenceAssessment) -> EvidenceCopy:
     elif historical is HistoricalEvidence.RESEARCH_CANDIDATE and scope is EvidenceScope.AGGREGATE_UNIVERSE:
         icon = "🔬"
         title = "Kandydat badawczy"
-        summary = f"Wynik pochodzi z protokołu zbiorczego, nie z indywidualnej walidacji {symbol}."
+        summary = f"Wynik pochodzi z protokołu zbiorczego, nie z indywidualnego testu przewagi dla {symbol}."
         detail = (
             f"{symbol} należy do universe Candidate v1. Historyczny wynik protokołu zbiorczego "
-            "był obiecujący na ograniczonej próbce; nie jest to indywidualnie potwierdzony edge."
+            "był obiecujący na ograniczonej próbce; nie stanowi indywidualnego potwierdzenia przewagi."
         )
     elif historical is HistoricalEvidence.RESEARCH_CANDIDATE:
         icon = "🔬"
@@ -383,16 +383,16 @@ def evidence_copy(assessment: EvidenceAssessment) -> EvidenceCopy:
     elif str(historical_claim.get("protocol_state") or "") == "PREREGISTERED_NOT_RUN":
         icon = "🧪"
         title = "Eksperymentalny forecast · protokół jeszcze nieuruchomiony"
-        summary = f"{symbol} jest w prerejestrowanym koszyku, ale właściwa walidacja jeszcze nie ruszyła."
+        summary = f"{symbol} jest w prerejestrowanym koszyku, ale właściwy test przewagi jeszcze nie ruszył."
         detail = (
-            f"{symbol} należy do prerejestrowanego koszyka {horizon}d, ale właściwa walidacja "
-            "nie została wykonana. Nie ma jeszcze wyniku evidence."
+            f"{symbol} należy do prerejestrowanego koszyka {horizon}d, ale właściwy test przewagi "
+            "nie został wykonany. Nie ma jeszcze wyniku testu przewagi."
         )
     else:
         icon = "🧪"
         title = "Eksperymentalny forecast"
-        summary = f"Brak zarejestrowanej walidacji dla {symbol} na horyzoncie {horizon}d."
-        detail = f"Brak zarejestrowanej walidacji dla {symbol} na horyzoncie {horizon}d."
+        summary = f"Brak zarejestrowanego testu przewagi dla {symbol} na horyzoncie {horizon}d."
+        detail = f"Brak zarejestrowanego testu przewagi dla {symbol} na horyzoncie {horizon}d."
 
     if assessment.forward_evidence is ForwardEvidence.IN_PROGRESS:
         title += " · Forward trwa"

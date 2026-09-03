@@ -75,7 +75,19 @@ from market_oracle.monitor import (
     select_deep_shortlist,
     snapshot_is_stale,
 )
-from market_oracle.presentation import build_analysis_report, build_start_guidance
+from market_oracle.presentation import (
+    ACCURACY_BASELINE_DELTA_LABEL,
+    AUC_DIRECTION_HELP,
+    MODEL_DIAGNOSTIC_TITLE,
+    PAPER_RESULTS_BY_CLASS_TITLE,
+    PAPER_RESULTS_BY_DIRECTION_TITLE,
+    build_analysis_report,
+    build_start_guidance,
+    display_model_quality,
+    display_radar_action,
+    display_radar_thesis,
+    radar_display_frame,
+)
 from market_oracle.product_verdict import product_forecast_verdict
 from market_oracle.risk import periods_per_year, risk_metrics
 from market_oracle.reality import RealityConfig, reality_check_report, select_non_overlapping_trades
@@ -155,6 +167,29 @@ def load_full_analysis_horizon_card_views():
     module = ast.Module(body=[function], type_ignores=[])
     exec(compile(module, str(source_path), "exec"), namespace)
     return namespace["_full_analysis_horizon_card_views"]
+
+
+def load_setup_risk_note():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "setup_risk_note"
+    )
+
+    def row_number(row, column):
+        value = row.get(column)
+        return None if value is None else float(value)
+
+    namespace = {
+        "pd": pd,
+        "signal_brief_value": lambda row, column: str(row.get(column, "—")),
+        "display_model_quality": display_model_quality,
+        "radar_row_number": row_number,
+    }
+    module = ast.Module(body=[function], type_ignores=[])
+    exec(compile(module, str(source_path), "exec"), namespace)
+    return namespace["setup_risk_note"]
 
 
 def test_features_are_finite_and_past_only():
@@ -3147,9 +3182,9 @@ def test_evidence_copy_preserves_aggregate_scope_without_symbol_overclaim():
 
     spy_copy = evidence_copy(resolve_evidence("SPY", 20, [20], registry))
     assert spy_copy.title == "Kandydat badawczy · Forward trwa"
-    assert spy_copy.summary == "Wynik pochodzi z protokołu zbiorczego, nie z indywidualnej walidacji SPY."
+    assert spy_copy.summary == "Wynik pochodzi z protokołu zbiorczego, nie z indywidualnego testu przewagi dla SPY."
     assert "wynik protokołu zbiorczego" in spy_copy.detail
-    assert "nie jest to indywidualnie potwierdzony edge" in spy_copy.detail
+    assert "nie stanowi indywidualnego potwierdzenia przewagi" in spy_copy.detail
     assert "Forward tego koszyka trwa" in spy_copy.detail
     assert "potwierdzonej przewagi" in spy_copy.detail
     assert len(spy_copy.summary) < len(spy_copy.detail)
@@ -3164,15 +3199,17 @@ def test_evidence_copy_distinguishes_insufficient_unrun_and_unregistered():
 
     btc_60d = evidence_copy(resolve_evidence("BTC-USD", 60, [60], registry))
     assert btc_60d.title == "Eksperymentalny forecast"
-    assert "Brak zarejestrowanej walidacji" in btc_60d.detail
+    assert "Brak zarejestrowanego testu przewagi" in btc_60d.detail
 
     amzn = evidence_copy(resolve_evidence("AMZN", 20, [20], registry))
     assert amzn.title == "Eksperymentalny forecast · protokół jeszcze nieuruchomiony"
     assert "prerejestrowanego koszyka" in amzn.detail
+    assert "właściwy test przewagi" in amzn.detail
+    assert "wyniku testu przewagi" in amzn.detail
 
     xtb = evidence_copy(resolve_evidence("XTB.WA", 20, [20], registry))
     assert xtb.title == "Eksperymentalny forecast"
-    assert "Brak zarejestrowanej walidacji" in xtb.detail
+    assert "Brak zarejestrowanego testu przewagi" in xtb.detail
 
 
 def test_evidence_registry_hash_is_canonical_and_detects_tampering():
@@ -3431,7 +3468,7 @@ def test_analysis_report_separates_radar_and_full_analysis_dates():
     assert "20 sesji" in report["headline"]
     assert "scenariusz wzrostowy spełnia warunki MarketScope" in report["headline"]
     assert report["cards"][0][1] == "Scenariusz wzrostowy spełnia warunki MarketScope"
-    assert report["cards"][1][0] == "Wsparcie w walidacji"
+    assert report["cards"][1][0] == "Bieżąca ocena modelu"
     assert report["freshness"]["radar"] == "2026-08-05 07:13"
     assert report["freshness"]["analysis"] == "2026-08-07"
     assert "Candidate v1" not in report["headline"]
@@ -3472,6 +3509,37 @@ def test_analysis_report_uses_shared_verdict_for_expected_return_conflict():
     assert "kandydat wzrostowy" not in report["headline"].lower()
     assert report["cards"][0][1] == "Obserwuj"
     assert any("konflikt" in item.lower() for item in report["evidence"] + report["counterpoints"])
+
+
+def test_analysis_report_separates_current_model_assessment_from_edge_evidence():
+    result = verdict_integrity_result(0.60, 0.02)
+    result["forecasts"][20]["quality"] = "NISKA — BRAK PRZEWAGI"
+
+    report = build_analysis_report(result, selected_horizon=20)
+    report_text = " ".join(
+        [report["headline"], report["body"]]
+        + report["evidence"]
+        + [part for card in report["cards"] for part in card]
+    )
+
+    assert report["verdict"] == {
+        "label": "BRAK SYGNAŁU",
+        "reason": "LOW_QUALITY",
+        "decision": 0,
+    }
+    assert report["headline"] == "TEST: warunki sygnału kierunkowego nie są spełnione — obserwuj."
+    assert report["cards"][0][1:] == (
+        "Bieżąca ocena modelu jest niska",
+        "Warunki sygnału kierunkowego nie są spełnione — obserwuj.",
+    )
+    assert report["cards"][1][0] == "Bieżąca ocena modelu"
+    assert "szybka interpretacja bieżącej analizy" in report["body"]
+    assert "bieżąca ocena modelu: NISKA" in report["evidence"][0]
+    assert "AUC 0.660, Brier 0.210" in report_text
+    assert "nie stanowi dowodu przewagi inwestycyjnej" in report_text
+    assert "nie zakładaj edge" not in report_text
+    assert "interpretacja dowodów" not in report_text
+    assert "BRAK PRZEWAGI" not in report_text
 
 
 def test_analysis_report_describes_running_radar_snapshot_without_dash():
@@ -3521,6 +3589,105 @@ def guidance_row(symbol="XTB.WA", *, mode="ML", action="PRIORYTET DO ANALIZY", p
         "Radar score": 12,
         "Edge score": 8,
     }
+
+
+def test_radar_display_contract_maps_exact_segments_and_renames_only_display_copy():
+    raw = pd.DataFrame([{
+        "Symbol": "SPY",
+        "Akcja radaru": "OBSERWUJ — BRAK EDGE ML",
+        "Teza radaru": "silne momentum · ML potwierdza edge · wolumen powyżej normy",
+        "Jakość modelu": "NISKA — BRAK PRZEWAGI",
+        "Edge score": 7.25,
+        "Model edge": 64.0,
+    }])
+    original = raw.copy(deep=True)
+
+    display = radar_display_frame(
+        raw,
+        columns=["Symbol", "Akcja radaru", "Teza radaru", "Jakość modelu", "Edge score", "Model edge"],
+    )
+
+    pd.testing.assert_frame_equal(raw, original)
+    assert display.loc[0, "Akcja radaru"] == "Obserwuj — niska ocena modelu"
+    assert display.loc[0, "Teza radaru"] == (
+        "silne momentum · Bieżąca ocena ML wspiera setup · wolumen powyżej normy"
+    )
+    assert list(display.columns) == [
+        "Symbol", "Akcja radaru", "Teza radaru", "Jakość modelu", "Score potencjału", "Wsparcie ML",
+    ]
+    assert display.loc[0, "Jakość modelu"] == "NISKA"
+    assert display.loc[0, "Score potencjału"] == 7.25
+    assert display.loc[0, "Wsparcie ML"] == 64.0
+    assert "Edge score" not in display.columns
+    assert "Model edge" not in display.columns
+
+
+def test_radar_copy_keeps_unknown_action_and_thesis_segments_unchanged():
+    thesis = "nowy segment · ML bez przewagi · przyszły segment"
+
+    assert display_radar_action(np.nan) == "—"
+    assert display_radar_action("NOWA AKCJA") == "NOWA AKCJA"
+    assert display_radar_thesis(thesis) == (
+        "nowy segment · Bieżąca ocena ML jest niska · przyszły segment"
+    )
+    assert thesis == "nowy segment · ML bez przewagi · przyszły segment"
+
+
+def test_setup_risk_note_keeps_low_model_quality_warning_after_display_sanitization():
+    row = pd.Series({
+        "Tryb analizy": "ML",
+        "Jakość modelu": "NISKA — BRAK PRZEWAGI",
+        "RSI 14": 50.0,
+        "Risk control": 80.0,
+        "Max drawdown": -0.10,
+        "Risk/reward": 2.0,
+    })
+
+    label, detail = load_setup_risk_note()(row)
+
+    assert label == "uwaga"
+    assert detail == "bieżąca ocena modelu jest niska"
+    assert "BRAK PRZEWAGI" not in detail
+    assert "edge" not in detail.lower()
+
+
+def test_trust_copy_labels_do_not_present_model_metrics_or_paper_results_as_edge():
+    assert MODEL_DIAGNOSTIC_TITLE == "Diagnostyka modelu — jak wypada względem baseline?"
+    assert ACCURACY_BASELINE_DELTA_LABEL == "Różnica trafności vs baseline"
+    assert "przewaga kierunkowa" not in AUC_DIRECTION_HELP.lower()
+    assert "zdolność modelu do rozróżniania kierunku" in AUC_DIRECTION_HELP
+    assert "nie dowodzi przewagi inwestycyjnej" in AUC_DIRECTION_HELP
+    assert PAPER_RESULTS_BY_CLASS_TITLE == "Wyniki paper według klas aktywów"
+    assert PAPER_RESULTS_BY_DIRECTION_TITLE == "Wyniki paper według kierunku i horyzontu"
+
+
+def test_start_guidance_uses_shared_radar_thesis_copy_without_mutating_snapshot():
+    row = guidance_row(
+        "LPP.WA",
+        mode="FAST",
+        action="FAST SHORTLIST",
+        probability=None,
+        quality="FAST — BEZ ML",
+        thesis="silne momentum · ML potwierdza edge · wolumen powyżej normy",
+    )
+    snapshot = {
+        "status": "complete",
+        "updated_at": "2026-08-08T07:13:00+02:00",
+        "records": [row],
+    }
+
+    guidance = build_start_guidance(
+        snapshot=snapshot,
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+    )
+
+    fast = next(card for card in guidance["cards"] if card["id"] == "fast_setup")
+    assert "silne momentum · Bieżąca ocena ML wspiera setup · wolumen powyżej normy" in fast["body"]
+    assert snapshot["records"][0]["Teza radaru"] == (
+        "silne momentum · ML potwierdza edge · wolumen powyżej normy"
+    )
 
 
 def test_start_guidance_empty_state_has_safe_cards():

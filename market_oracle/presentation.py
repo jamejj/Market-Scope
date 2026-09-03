@@ -12,6 +12,17 @@ from .product_verdict import (
 from .signals import SignalVerdict
 
 
+MODEL_DIAGNOSTIC_TITLE = "Diagnostyka modelu — jak wypada względem baseline?"
+ACCURACY_BASELINE_DELTA_LABEL = "Różnica trafności vs baseline"
+AUC_DIRECTION_HELP = (
+    "AUC mierzy zdolność modelu do rozróżniania kierunku poza próbką; około 0,50 oznacza brak "
+    "zdolności rozróżniania. Wyższy stabilny wynik uzasadnia dalszą ocenę modelu, ale nie dowodzi "
+    "przewagi inwestycyjnej."
+)
+PAPER_RESULTS_BY_CLASS_TITLE = "Wyniki paper według klas aktywów"
+PAPER_RESULTS_BY_DIRECTION_TITLE = "Wyniki paper według kierunku i horyzontu"
+
+
 def _finite_float(value: Any) -> float | None:
     try:
         number = float(value)
@@ -127,12 +138,61 @@ def _reason_label(reason: str) -> str:
     return labels.get(reason, reason.replace("_", " ").lower())
 
 
-def _display_radar_action(value: Any) -> str:
+def _display_text(value: Any) -> str:
+    if value is None:
+        return "—"
+    try:
+        if bool(value != value):
+            return "—"
+    except (TypeError, ValueError):
+        pass
+    text = str(value)
+    return "—" if text in {"nan", "<NA>", "NaT"} else text
+
+
+def display_radar_action(value: Any) -> str:
     labels = {
         "RYZYKO / UNIKAJ": "Podwyższone ryzyko",
+        "OBSERWUJ — BRAK EDGE ML": "Obserwuj — niska ocena modelu",
     }
-    text = str(value or "—")
+    text = _display_text(value)
     return labels.get(text, text)
+
+
+def display_radar_thesis(value: Any) -> str:
+    labels = {
+        "ML potwierdza edge": "Bieżąca ocena ML wspiera setup",
+        "ML bez przewagi": "Bieżąca ocena ML jest niska",
+    }
+    text = _display_text(value)
+    segments = [segment.strip() for segment in text.split("·")]
+    return " · ".join(labels.get(segment, segment) for segment in segments)
+
+
+def display_model_quality(value: Any) -> str:
+    labels = {
+        "NISKA — BRAK PRZEWAGI": "NISKA",
+    }
+    text = _display_text(value)
+    return labels.get(text, text)
+
+
+def radar_display_frame(frame: Any, columns: list[str] | None = None) -> Any:
+    """Return a user-facing Radar copy without mutating raw research data."""
+    output = frame.copy()
+    if "Akcja radaru" in output:
+        output["Akcja radaru"] = output["Akcja radaru"].map(display_radar_action)
+    if "Teza radaru" in output:
+        output["Teza radaru"] = output["Teza radaru"].map(display_radar_thesis)
+    if "Jakość modelu" in output:
+        output["Jakość modelu"] = output["Jakość modelu"].map(display_model_quality)
+    if columns is not None:
+        present = [column for column in columns if column in output.columns]
+        output = output[present].copy()
+    return output.rename(columns={
+        "Edge score": "Score potencjału",
+        "Model edge": "Wsparcie ML",
+    })
 
 
 def _incomplete_forecast_detail(integrity_issue: str | None) -> str:
@@ -150,7 +210,7 @@ def _direction(verdict: SignalVerdict, integrity_issue: str | None = None) -> tu
     if verdict.decision == -1:
         return "Scenariusz spadkowy spełnia warunki MarketScope", f"Werdykt techniczny: SHORT — {reason}."
     if verdict.reason == "LOW_QUALITY":
-        return "Brak potwierdzonej przewagi", "Model został celowo ściągnięty w stronę 50%, bo walidacja nie pokazała stabilnej przewagi."
+        return "Bieżąca ocena modelu jest niska", "Warunki sygnału kierunkowego nie są spełnione — obserwuj."
     if verdict.reason == "INCOMPLETE_FORECAST":
         return "Obserwuj", _incomplete_forecast_detail(integrity_issue)
     return "Obserwuj", f"Reguły MarketScope nie potwierdzają kierunku: {reason}."
@@ -247,7 +307,7 @@ def build_analysis_report(
     forecasts = result.get("forecasts") or {}
     horizon, forecast = _report_forecast(forecasts, selected_horizon)
     selection_mode = "AUTO" if selected_horizon is None else "MANUAL"
-    quality = str(forecast.get("quality") or "—")
+    quality = display_model_quality(forecast.get("quality"))
     probability = finite_probability(forecast.get("probability_up"))
     verdict = _forecast_verdict(forecast)
     integrity_issue = forecast_integrity_issue(forecast)
@@ -267,7 +327,7 @@ def build_analysis_report(
     elif verdict.decision == -1:
         headline = f"{symbol}: scenariusz spadkowy spełnia warunki MarketScope na horyzoncie {horizon_text}."
     elif verdict.reason == "LOW_QUALITY":
-        headline = f"{symbol}: brak potwierdzonej przewagi modelu — obserwuj, nie zakładaj edge."
+        headline = f"{symbol}: warunki sygnału kierunkowego nie są spełnione — obserwuj."
     elif verdict.reason == "INCOMPLETE_FORECAST":
         incomplete_detail = _incomplete_forecast_detail(integrity_issue).rstrip(".")
         incomplete_detail = incomplete_detail[:1].lower() + incomplete_detail[1:]
@@ -279,19 +339,22 @@ def build_analysis_report(
     rsi_text = "—" if rsi is None else f"{rsi:.1f}"
 
     evidence = [
-        f"Horyzont roboczy raportu: {horizon_text}; jakość walidacji: {quality}.",
+        f"Horyzont roboczy raportu: {horizon_text}; bieżąca ocena modelu: {quality}.",
         f"P(wzrost) { _pct(probability) }, oczekiwany ruch {expected}, zakres 90%: {lower} – {upper}.",
         f"Werdykt reguł MarketScope: {verdict.label} — {_reason_label(verdict.reason)}.",
         f"Technicznie: {trend}; zwrot 20 sesji/dni { _signed_pct(technical.get('return_20d')) }, RSI 14: {rsi_text}.",
     ]
     if auc is not None and brier is not None:
-        evidence.append(f"Walidacja: AUC {auc:.3f}, Brier {brier:.3f}; to mówi o jakości kierunku i kalibracji, nie o gwarancji zysku.")
+        evidence.append(
+            f"Bieżąca ocena modelu: AUC {auc:.3f}, Brier {brier:.3f}; opisuje jakość kierunku "
+            "i kalibracji bieżącego modelu, nie stanowi dowodu przewagi inwestycyjnej."
+        )
 
     counterpoints: list[str] = []
     if verdict.decision == 0 and not quality.startswith("NISKA"):
         counterpoints.append(f"Reguły MarketScope zwracają OBSERWUJ ({_reason_label(verdict.reason)}), więc raport nie wskazuje potwierdzonego kierunku mimo pojedynczych mocnych metryk.")
     if quality.startswith("NISKA"):
-        counterpoints.append("Model sam oznacza jakość jako niską — brak przewagi jest ważniejszy niż pojedynczy ładny ruch ceny.")
+        counterpoints.append("Bieżąca ocena modelu jest niska — warunki sygnału kierunkowego nie są spełnione mimo pojedynczego ładnego ruchu ceny.")
     drawdown = _finite_float(risk.get("max_drawdown"))
     if verdict.decision == -1:
         if _finite_float(forecast.get("upper_return")) is not None and float(forecast.get("upper_return")) > 0:
@@ -319,7 +382,7 @@ def build_analysis_report(
     )
     cards = [
         ("Co system widzi?", direction, direction_detail),
-        ("Wsparcie w walidacji", quality, f"AUC {auc:.3f} · Brier {brier:.3f}" if auc is not None and brier is not None else "Brak pełnych metryk walidacji"),
+        ("Bieżąca ocena modelu", quality, f"AUC {auc:.3f} · Brier {brier:.3f}" if auc is not None and brier is not None else "Brak pełnych metryk oceny modelu"),
         ("Horyzont", horizon_text, horizon_detail),
         ("Oczekiwany ruch", expected, f"Zakres 90%: {lower} – {upper}"),
         ("Trend", trend, f"1d {_signed_pct(technical.get('return_1d'))} · 5d {_signed_pct(technical.get('return_5d'))} · 20d {_signed_pct(technical.get('return_20d'))}"),
@@ -336,7 +399,7 @@ def build_analysis_report(
             "expected": _signed_pct(f.get("expected_return")),
             "lower": _signed_pct(f.get("lower_return")),
             "upper": _signed_pct(f.get("upper_return")),
-            "quality": str(f.get("quality") or "—"),
+            "quality": display_model_quality(f.get("quality")),
             "auc": _decimal(f.get("auc")),
             "brier": _decimal(f.get("brier")),
         })
@@ -370,7 +433,7 @@ def build_analysis_report(
         "headline": headline,
         "body": (
             f"Raport łączy istniejące prognozy ML, trend, momentum, ryzyko i świeżość danych. "
-            f"To nie jest rekomendacja kupna ani sprzedaży — to szybka interpretacja dowodów dla {symbol}."
+            f"To nie jest rekomendacja kupna ani sprzedaży — to szybka interpretacja bieżącej analizy dla {symbol}."
         ),
         "cards": cards,
         "evidence": evidence,
@@ -584,9 +647,9 @@ def build_start_guidance(
             card_id="risk_alert",
             priority=90,
             title=f"Przejrzyj ryzyko: {symbol} ma alert radaru.",
-            body=f"{_row_text(risk_leader, 'Teza radaru')}. Horyzont {_horizon_short(risk_leader)}, ruch/impet {_signed_pct(risk_leader.get('Oczekiwany ruch'))}.",
+            body=f"{display_radar_thesis(_row_text(risk_leader, 'Teza radaru'))}. Horyzont {_horizon_short(risk_leader)}, ruch/impet {_signed_pct(risk_leader.get('Oczekiwany ruch'))}.",
             source="Radar FAST/ML",
-            status=_display_radar_action(_row_text(risk_leader, "Akcja radaru")),
+            status=display_radar_action(_row_text(risk_leader, "Akcja radaru")),
             cta=f"Uruchom pełną analizę: {symbol}",
             action="full_analysis",
             symbol=symbol,
@@ -607,7 +670,7 @@ def build_start_guidance(
                 f"oczekiwany ruch {_signed_pct(ml_leader.get('Oczekiwany ruch'))}. To kandydat do analizy, nie polecenie transakcji."
             ),
             source="Deep ML",
-            status=_row_text(ml_leader, "Jakość modelu"),
+            status=display_model_quality(_row_text(ml_leader, "Jakość modelu")),
             cta=f"Uruchom pełną analizę: {symbol}",
             action="full_analysis",
             symbol=symbol,
@@ -643,8 +706,8 @@ def build_start_guidance(
             priority=60,
             title=f"Zobacz, dlaczego {symbol} trafił na shortlistę FAST.",
             body=(
-                f"{_row_text(fast_leader, 'Akcja radaru')} na horyzoncie {_horizon_short(fast_leader)}. "
-                f"Teza: {_row_text(fast_leader, 'Teza radaru')}. FAST pomaga ustawić kolejność pracy, ale nie jest potwierdzeniem ML."
+                f"{display_radar_action(_row_text(fast_leader, 'Akcja radaru'))} na horyzoncie {_horizon_short(fast_leader)}. "
+                f"Teza: {display_radar_thesis(_row_text(fast_leader, 'Teza radaru'))}. FAST pomaga ustawić kolejność pracy, ale nie jest potwierdzeniem ML."
             ),
             source="FAST Radar",
             status="bez potwierdzenia ML",

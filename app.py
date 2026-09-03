@@ -26,7 +26,19 @@ from market_oracle.journal import (
     journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results,
 )
 from market_oracle.monitor import default_universe, load_snapshot, snapshot_is_stale
-from market_oracle.presentation import build_analysis_report, build_start_guidance
+from market_oracle.presentation import (
+    ACCURACY_BASELINE_DELTA_LABEL,
+    AUC_DIRECTION_HELP,
+    MODEL_DIAGNOSTIC_TITLE,
+    PAPER_RESULTS_BY_CLASS_TITLE,
+    PAPER_RESULTS_BY_DIRECTION_TITLE,
+    build_analysis_report,
+    build_start_guidance,
+    display_model_quality,
+    display_radar_action,
+    display_radar_thesis,
+    radar_display_frame,
+)
 from market_oracle.search import search_assets
 from market_oracle.signals import DEFAULT_SIGNAL_THRESHOLD
 from market_oracle.watchlist import (
@@ -1241,23 +1253,6 @@ def display_skip_reason(value: str | None) -> str:
     return labels.get(str(value), str(value))
 
 
-def display_radar_action(value: str | None) -> str:
-    labels = {
-        "RYZYKO / UNIKAJ": "Podwyższone ryzyko",
-    }
-    if value is None or pd.isna(value):
-        return "—"
-    text = str(value)
-    return labels.get(text, text)
-
-
-def radar_display_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    output = frame.copy()
-    if "Akcja radaru" in output:
-        output["Akcja radaru"] = output["Akcja radaru"].map(display_radar_action)
-    return output
-
-
 def prepare_start_observations(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
@@ -1575,11 +1570,11 @@ def build_signal_radar_brief(
     symbol = signal_brief_value(leader, "Symbol")
     horizon = signal_brief_horizon(leader.get("Horyzont") if "Horyzont" in leader else None)
     action = display_radar_action(signal_brief_value(leader, "Akcja radaru"))
-    thesis = signal_brief_value(leader, "Teza radaru")
+    thesis = display_radar_thesis(signal_brief_value(leader, "Teza radaru"))
     leader_mode = signal_brief_value(leader, "Tryb analizy")
     probability = value_pct(leader.get("P(wzrost)") if leader_mode == "ML" and "P(wzrost)" in leader else None)
     expected = signed_pct(leader.get("Oczekiwany ruch") if "Oczekiwany ruch" in leader else None)
-    quality = signal_brief_value(leader, "Jakość modelu")
+    quality = display_model_quality(signal_brief_value(leader, "Jakość modelu"))
     setup_grade = signal_brief_value(leader, "Setup grade")
     hot_symbols = _unique_symbols(frame[frame["Radar momentum"].isin({"PEREŁKA MOMENTUM", "BREAKOUT WATCH", "MOMENTUM WATCH"})])
     confirmed_symbols = _unique_symbols(confirmed)
@@ -1657,15 +1652,17 @@ def setup_destination(symbol: str, klass: str) -> tuple[str, str]:
 def setup_risk_note(row: pd.Series) -> tuple[str, str]:
     notes: list[str] = []
     mode = signal_brief_value(row, "Tryb analizy")
-    quality = signal_brief_value(row, "Jakość modelu")
+    quality = display_model_quality(signal_brief_value(row, "Jakość modelu"))
     rsi = radar_row_number(row, "RSI 14")
     risk_control = radar_row_number(row, "Risk control")
     max_drawdown = radar_row_number(row, "Max drawdown")
     risk_reward = radar_row_number(row, "Risk/reward")
     if mode != "ML":
         notes.append("brak potwierdzenia ML")
-    if "BRAK" in quality.upper() or "FAST" in quality.upper():
-        notes.append("jakość modelu nie potwierdza przewagi")
+    if quality.upper().startswith("NISKA"):
+        notes.append("bieżąca ocena modelu jest niska")
+    elif "FAST" in quality.upper():
+        notes.append("brak pełnej oceny ML")
     if rsi is not None and rsi >= 72:
         notes.append("RSI wysoko — możliwe przegrzanie")
     elif rsi is not None and rsi <= 30:
@@ -1687,7 +1684,7 @@ def build_setup_drilldown(row: pd.Series, bullish_labels: set[str]) -> dict:
     mode = signal_brief_value(row, "Tryb analizy")
     horizon = signal_brief_horizon(row.get("Horyzont") if "Horyzont" in row else None)
     action = display_radar_action(signal_brief_value(row, "Akcja radaru"))
-    thesis = signal_brief_value(row, "Teza radaru")
+    thesis = display_radar_thesis(signal_brief_value(row, "Teza radaru"))
     grade = signal_brief_value(row, "Setup grade")
     direction = signal_brief_value(row, "Ocena kierunku")
     move = signal_brief_value(row, "Ruch / impet")
@@ -2051,9 +2048,9 @@ def render_start_dashboard(
         )
 
     with st.expander("Jak czytać prognozę?"):
-        st.markdown("""
+        st.markdown(f"""
         - **P(wzrost)** to modelowe prawdopodobieństwo, że cena na końcu horyzontu będzie wyższa niż w chwili prognozy.
-        - **AUC** mierzy przewagę kierunkową poza próbką; około 0,50 oznacza brak przewagi.
+        - **AUC** — {AUC_DIRECTION_HELP.removeprefix("AUC ")}
         - **Brier** ocenia jakość prawdopodobieństw; mniej znaczy lepiej.
         - **Forward test** to realne, append-only obserwacje po zamrożeniu Candidate v1 — tego nie tuningujemy po fakcie.
         """)
@@ -2187,12 +2184,12 @@ def render_evidence_status(result: dict, report: dict) -> None:
         copy = evidence_copy(assessment)
     except EvidenceRegistryError:
         st.warning(
-            f"**Status dowodów dla {horizon_label}**\n\n"
-            "Status dowodów jest chwilowo niedostępny — kontrola integralności evidence registry nie przeszła."
+            f"**Status zarejestrowanych dowodów przewagi dla {horizon_label}**\n\n"
+            "Status dowodów jest chwilowo niedostępny — kontrola integralności rejestru dowodów nie przeszła."
         )
         return
     st.info(
-        f"**Status dowodów dla {horizon_label}**\n\n"
+        f"**Status zarejestrowanych dowodów przewagi dla {horizon_label}**\n\n"
         f"{copy.icon} **{copy.title}**  \n{copy.summary}"
     )
     historical_claim = assessment.provenance.get("historical_claim") or {}
@@ -2201,14 +2198,14 @@ def render_evidence_status(result: dict, report: dict) -> None:
         st.write(copy.detail)
         details = [
             f"- Status historyczny: `{assessment.historical_evidence.value}`",
-            f"- Zakres evidence: `{assessment.evidence_scope.value if assessment.evidence_scope else 'BRAK ZAREJESTROWANEGO CLAIMU'}`",
-            f"- Registry: `{assessment.provenance.get('registry_id') or '—'}`",
+            f"- Zakres dowodów: `{assessment.evidence_scope.value if assessment.evidence_scope else 'BRAK ZAREJESTROWANEGO CLAIMU'}`",
+            f"- Rejestr: `{assessment.provenance.get('registry_id') or '—'}`",
         ]
         if historical_claim:
             details.extend([
                 f"- Claim historyczny: `{historical_claim.get('claim_id') or '—'}`",
                 f"- Protokół historyczny: `{historical_claim.get('protocol_id') or '—'}`",
-                f"- Evidence zaktualizowane: `{historical_claim.get('evidence_updated_at') or '—'}`",
+                f"- Dowody zaktualizowane: `{historical_claim.get('evidence_updated_at') or '—'}`",
             ])
             for artifact in historical_claim.get("artifact_refs") or []:
                 details.append(
@@ -2597,7 +2594,7 @@ def render_analysis(
             )
             st.caption(card["caption"])
 
-    with st.expander("Diagnostyka prognozy — czy model naprawdę ma przewagę?"):
+    with st.expander(MODEL_DIAGNOSTIC_TITLE):
         diagnostic_rows = []
         for horizon, forecast in result["forecasts"].items():
             diagnostic_rows.append({
@@ -2605,7 +2602,7 @@ def render_analysis(
                 "AUC": forecast["auc"], "Brier": forecast["brier"],
                 "Trafność modelu": forecast["accuracy"],
                 "Trafność prostego bazowego": forecast["baseline_accuracy"],
-                "Przewaga trafności": forecast["accuracy"] - forecast["baseline_accuracy"],
+                ACCURACY_BASELINE_DELTA_LABEL: forecast["accuracy"] - forecast["baseline_accuracy"],
                 "Okres walidacji": f"{forecast['validation_start']} → {forecast['validation_end']}",
                 "Liczba obserwacji": forecast["samples"],
                 "Udział modelu liniowego": forecast["linear_weight"],
@@ -2616,7 +2613,7 @@ def render_analysis(
         st.dataframe(
             diagnostics.style.format({
                 "AUC": "{:.3f}", "Brier": "{:.3f}", "Trafność modelu": "{:.1%}",
-                "Trafność prostego bazowego": "{:.1%}", "Przewaga trafności": "{:+.1%}",
+                "Trafność prostego bazowego": "{:.1%}", ACCURACY_BASELINE_DELTA_LABEL: "{:+.1%}",
                 "Udział modelu liniowego": "{:.0%}",
             }),
             use_container_width=True, hide_index=True,
@@ -2726,19 +2723,18 @@ def _render_ranking_table(frame: pd.DataFrame, title: str, empty_text: str) -> N
         "Zwrot 1d": "{:+.1%}", "Zwrot 5d": "{:+.1%}", "Zwrot 20d": "{:+.1%}", "RSI 14": "{:.1f}",
         "AUC walidacji": "{:.3f}", "Brier": "{:.3f}", "Pewność": "{:.1%}",
         "Zmienność roczna": "{:.1%}", "Max drawdown": "{:.1%}", "Score": "{:.2f}", "Radar score": "{:.1f}",
-        "Risk/reward": "{:.2f}", "Edge score": "{:.2f}",
+        "Risk/reward": "{:.2f}", "Edge score": "{:.2f}", "Score potencjału": "{:.2f}",
         "Deep score": "{:.0f}",
         "Setup score": "{:.0f}", "Momentum score": "{:.0f}", "Trend score": "{:.0f}",
-        "Risk control": "{:.0f}", "Liquidity score": "{:.0f}", "Model edge": "{:.0f}",
+        "Risk control": "{:.0f}", "Liquidity score": "{:.0f}", "Model edge": "{:.0f}", "Wsparcie ML": "{:.0f}",
     }
     columns = [
         "Symbol", "Klasa", "Tryb analizy", "Setup", "Setup grade", "Akcja radaru", "Radar momentum", "Teza radaru",
         "Setup score", "Ocena", "Ocena kierunku", "Ruch / impet",
         "Risk/reward", "Edge score", "Deep score", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Jakość modelu", "Score",
     ]
-    display_frame = radar_display_frame(frame)
-    present = [column for column in columns if column in display_frame.columns]
-    st.dataframe(display_frame[present].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
+    display_frame = radar_display_frame(frame, columns=columns)
+    st.dataframe(display_frame.style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
 
 
 def _unique_symbols(frame: pd.DataFrame) -> int:
@@ -3079,12 +3075,12 @@ def render_signal_journal() -> None:
                 Średni_wynik=("strategy_return", "mean"),
                 Najgorszy=("strategy_return", "min"),
             ).sort_values("Średni_wynik", ascending=False).reset_index()
-            lab_cols[0].subheader("Edge po klasach aktywów")
+            lab_cols[0].subheader(PAPER_RESULTS_BY_CLASS_TITLE)
             lab_cols[0].dataframe(
                 by_class.style.format({"Trafność": "{:.1%}", "Średni_wynik": "{:+.1%}", "Mediana": "{:+.1%}"}),
                 use_container_width=True, hide_index=True,
             )
-            lab_cols[1].subheader("Edge po kierunku i horyzoncie")
+            lab_cols[1].subheader(PAPER_RESULTS_BY_DIRECTION_TITLE)
             lab_cols[1].dataframe(
                 by_direction.style.format({"Trafność": "{:.1%}", "Średni_wynik": "{:+.1%}", "Najgorszy": "{:+.1%}"}),
                 use_container_width=True, hide_index=True,
@@ -3438,10 +3434,10 @@ def render_signal_dashboard() -> None:
         "Zwrot 1d": "{:+.1%}", "Zwrot 5d": "{:+.1%}", "Zwrot 20d": "{:+.1%}", "RSI 14": "{:.1f}",
         "AUC walidacji": "{:.3f}", "Brier": "{:.3f}", "Pewność": "{:.1%}", "Zmienność roczna": "{:.1%}",
         "Max drawdown": "{:.1%}", "Score": "{:.2f}", "Radar score": "{:.1f}",
-        "Risk/reward": "{:.2f}", "Edge score": "{:.2f}",
+        "Risk/reward": "{:.2f}", "Edge score": "{:.2f}", "Score potencjału": "{:.2f}",
         "Deep score": "{:.0f}",
         "Setup score": "{:.0f}", "Momentum score": "{:.0f}", "Trend score": "{:.0f}",
-        "Risk control": "{:.0f}", "Liquidity score": "{:.0f}", "Model edge": "{:.0f}",
+        "Risk control": "{:.0f}", "Liquidity score": "{:.0f}", "Model edge": "{:.0f}", "Wsparcie ML": "{:.0f}",
     }
 
     horizon_tabs = st.tabs([
@@ -3487,20 +3483,20 @@ def render_signal_dashboard() -> None:
             "Ocena kierunku", "Ruch / impet", "Deep score", "Setup score", "Risk/reward", "Edge score",
         ]
         st.markdown("#### 1. Najważniejsze setupy do dalszej analizy")
-        priority_display = radar_display_frame(priority)
-        st.dataframe(priority_display[[c for c in compact_columns if c in priority_display]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
+        priority_display = radar_display_frame(priority, columns=compact_columns)
+        st.dataframe(priority_display.style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
         st.markdown("#### 2. Autentyczne hot movers — wybrane innym kryterium")
-        hot_display = radar_display_frame(hot_now)
-        st.dataframe(hot_display[[c for c in compact_columns if c in hot_display]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
+        hot_display = radar_display_frame(hot_now, columns=compact_columns)
+        st.dataframe(hot_display.style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
         st.markdown("#### 3. Podwyższone ryzyko")
         if risk_now.empty:
             st.info("Brak wykrytych alertów ryzyka w zapisanym rankingu. To nie oznacza braku ryzyka rynkowego — tylko brak alertu według obecnych filtrów.")
         else:
-            risk_display = radar_display_frame(risk_now)
-            st.dataframe(risk_display[[c for c in compact_columns if c in risk_display]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
+            risk_display = radar_display_frame(risk_now, columns=compact_columns)
+            st.dataframe(risk_display.style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
     with horizon_tabs[1]:
         st.subheader("Setup intelligence")
-        st.caption("Rozbicie score na elementy, które trader sprawdza ręcznie: impet, trend, kontrolę ryzyka, płynność i potwierdzenie modelu.")
+        st.caption("Rozbicie score na elementy, które trader sprawdza ręcznie: impet, trend, kontrolę ryzyka, płynność i bieżące wsparcie ML.")
         setup_frame = (
             frame.sort_values(["Deep score", "Setup score", "Edge score", "Radar score"], ascending=False)
             .drop_duplicates("Symbol")
@@ -3511,7 +3507,8 @@ def render_signal_dashboard() -> None:
             "Momentum score", "Trend score", "Risk control", "Model edge", "Liquidity score",
             "P(wzrost)", "Risk/reward", "AUC walidacji", "Jakość modelu",
         ]
-        st.dataframe(setup_frame[[c for c in setup_columns if c in setup_frame]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
+        setup_display = radar_display_frame(setup_frame, columns=setup_columns)
+        st.dataframe(setup_display.style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
         st.info(
             "**Setup score** to nie sygnał kupna. To priorytet dalszej analizy: im wyżej, tym bardziej spójny jest układ momentum + trend + ryzyko + ML."
         )
@@ -3537,8 +3534,8 @@ def render_signal_dashboard() -> None:
             "Ocena kierunku", "Ruch / impet", "Risk/reward", "Edge score",
             "Deep score", "Setup score", "Risk control", "AUC walidacji", "Brier", "Jakość modelu", "Zmienność roczna",
         ]
-        rr_display = radar_display_frame(rr)
-        st.dataframe(rr_display[[c for c in rr_columns if c in rr_display]].style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
+        rr_display = radar_display_frame(rr, columns=rr_columns)
+        st.dataframe(rr_display.style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
     for tab, horizon, title in [
         (horizon_tabs[4], 1, "Najciekawsze setupy krótkoterminowe"),
         (horizon_tabs[5], 5, "Najciekawsze setupy swingowe"),
@@ -3874,7 +3871,7 @@ with lab_model_tab:
     s1, s2, s3, s4 = st.columns(4)
     s1.markdown("<div class='pro-card'><h3>1. Dane</h3><p>Pobiera ceny, wolumen i benchmark rynku. Krypto liczy w skali 365 dni, giełdy w 252 sesjach.</p></div>", unsafe_allow_html=True)
     s2.markdown("<div class='pro-card'><h3>2. Cechy</h3><p>Buduje momentum, trend, RSI, MACD, ATR, tail ratio, presję ceny/wolumenu i relatywną siłę.</p></div>", unsafe_allow_html=True)
-    s3.markdown("<div class='pro-card'><h3>3. Radar</h3><p>Liczy momentum, setup intelligence, risk/reward i Edge score, żeby ustalić priorytet dalszej analizy.</p></div>", unsafe_allow_html=True)
+    s3.markdown("<div class='pro-card'><h3>3. Radar</h3><p>Liczy momentum, setup intelligence, risk/reward i Score potencjału, żeby ustalić priorytet dalszej analizy.</p></div>", unsafe_allow_html=True)
     s4.markdown("<div class='pro-card'><h3>4. Model zoo</h3><p>Porównuje regresję logistyczną, gradient boosting i ExtraTrees, a wagi dobiera przez walk-forward.</p></div>", unsafe_allow_html=True)
 
     st.subheader("Dlaczego aplikacja czasem mówi „wstrzymaj się”?")
@@ -3893,21 +3890,21 @@ with lab_model_tab:
     st.write("Launcher uruchamia obok aplikacji lekki proces o obniżonym priorytecie. Domyślnie co 6 godzin sprawdza reprezentatywne spółki GPW i USA, ETF-y oraz krypto. Jeśli ranking jest stary, niepełny albo w starym formacie, zakładka **Sygnały** potrafi sama wystartować świeży skan w tle. Wynik zapisuje lokalnie, dlatego dashboard pokazuje ostatni gotowy ranking i odświeża postęp bez przeładowywania całej aplikacji.")
 
     with st.expander("Znaczenie parametrów i skrótów"):
-        st.markdown("""
+        st.markdown(f"""
         - **P(wzrost)** — skalibrowane prawdopodobieństwo dodatniego zwrotu po wybranym czasie.
-        - **AUC** — 0,50 to brak przewagi; około 0,55 może oznaczać małą przewagę; 0,60+ jest interesujące, jeśli utrzymuje się w czasie.
+        - **AUC** — {AUC_DIRECTION_HELP.removeprefix("AUC ")}
         - **Brier** — błąd prognoz probabilistycznych; niżej jest lepiej, okolice 0,25 odpowiadają niepewności bliskiej 50/50.
         - **Zakres 90%** — szeroki przedział możliwego ruchu, a nie obietnica ceny docelowej.
         - **Benchmark** — rynek odniesienia: S&P 500, WIG20 Total Return albo Bitcoin dla altcoinów.
         - **Purge gap** — luka między treningiem i walidacją chroniąca przed podglądaniem przyszłości.
         - **Risk/reward** — relacja potencjalnego ruchu dodatniego do szacowanego downside z przedziału niepewności.
-        - **Edge score** — priorytet analizy łączący oczekiwany ruch, P(wzrost), AUC/Brier, trend i zmienność.
-        - **Setup score** — ocena spójności układu: momentum, trend, kontrola ryzyka, płynność i potwierdzenie modelu.
+        - **Score potencjału** — priorytet analizy łączący oczekiwany ruch, P(wzrost), AUC/Brier, trend i zmienność.
+        - **Setup score** — ocena spójności układu: momentum, trend, kontrola ryzyka, płynność i bieżące wsparcie ML.
         - **Setup grade** — szybka etykieta jakości setupu: A/B/M/R/C. To skrót do ręcznej analizy, nie komenda transakcyjna.
         - **Teza radaru** — krótka lista powodów, dla których instrument znalazł się wysoko lub wymaga ostrożności.
         - **FAST** — lekki pierwszy przebieg techniczny po całym rynku; służy do odkrywania kandydatów, nie do zapisu sygnałów w Journalu.
         - **ML** — pełna walidowana prognoza modelu dla instrumentów z shortlisty; dopiero te wiersze mogą tworzyć directional signals.
-        - **Deep score** — priorytet do pełnego ML, łączący Setup score, momentum, Edge score i kontrolę ryzyka.
+        - **Deep score** — priorytet do pełnego ML, łączący Setup score, momentum, Score potencjału i kontrolę ryzyka.
         - **Target modelu** — kierunek close-to-close, zgodny w produkcji i backteście.
         - **SignalInputs** — wspólny pakiet finalnej decyzji: P(wzrost), oczekiwany ruch i jakość modelu. Produkcja i backtest używają tej samej bramki decyzyjnej.
         - **DecisionReason** — audyt decyzji: potwierdzony LONG/SHORT albo powód odrzucenia, np. niska jakość, brak przebicia progu lub konflikt probability z expected return.
@@ -3925,9 +3922,9 @@ Model korzysta z kilkudziesięciu cech: stóp zwrotu, RSI Wildera, MACD, ATR, pa
 
 Kierunek liczy adaptacyjny ensemble: regularizowana regresja logistyczna, histogram gradient boosting i ExtraTrees. Wagi modeli są dobierane osobno dla każdego instrumentu i horyzontu na walk-forward validation z luką chroniącą przed podglądaniem przyszłości. Oczekiwany ruch liczy osobny ensemble regresyjny: Ridge, Random Forest, histogram gradient boosting i ExtraTrees. Prawdopodobieństwo jest kalibrowane i automatycznie ściągane do 50%, gdy AUC i Brier na późniejszym okresie nie potwierdzają jakości modelu. Po walidacji modele produkcyjne są ponownie trenowane na całej dostępnej historii.
 
-Sygnały mają dwie warstwy. **Perełki momentum** łapią nietypowy ruch ceny, wybicia i silne przyspieszenie — to radar odkrywania okazji do dalszego sprawdzenia, szczególnie przy krypto. **Kandydaci ML** wymagają dodatkowo potwierdzonej jakości modelu poza próbką, dlatego pojawiają się rzadziej. Dzięki temu aplikacja nie gubi gorących ruchów, ale też nie udaje, że każdy szybki wzrost jest statystycznie potwierdzoną przewagą.
+Sygnały mają dwie warstwy. **Perełki momentum** łapią nietypowy ruch ceny, wybicia i silne przyspieszenie — to radar odkrywania okazji do dalszego sprawdzenia, szczególnie przy krypto. **Kandydaci ML** wymagają dodatkowo potwierdzonej jakości modelu poza próbką, dlatego pojawiają się rzadziej. Dzięki temu aplikacja nie gubi gorących ruchów, ale też nie traktuje każdego szybkiego wzrostu jak potwierdzonego setupu ML ani dowodu przewagi inwestycyjnej.
 
-Widok **Dzisiejszy radar** dodaje trzecią warstwę: priorytet analizy. **Risk/reward** porównuje górny potencjał z downside z przedziału niepewności, a **Edge score** łączy oczekiwany ruch, P(wzrost), jakość AUC/Brier, trend techniczny i zmienność. **Setup intelligence** rozbija ranking na momentum, trend, kontrolę ryzyka, płynność i model edge, a **Teza radaru** tłumaczy najważniejsze powody.
+Widok **Dzisiejszy radar** dodaje trzecią warstwę: priorytet analizy. **Risk/reward** porównuje górny potencjał z downside z przedziału niepewności, a **Score potencjału** łączy oczekiwany ruch, P(wzrost), jakość AUC/Brier, trend techniczny i zmienność. **Setup intelligence** rozbija ranking na momentum, trend, kontrolę ryzyka, płynność i bieżące wsparcie ML, a **Teza radaru** tłumaczy najważniejsze powody.
 
 Skaner działa dwustopniowo. **FAST Radar** lekko skanuje cały rynek i wybiera shortlistę przez **Deep score**. Potem **Deep ML** trenuje pełne modele tylko dla najlepszych kandydatów i zastępuje ich wiersze FAST wierszami ML. To skraca czas oczekiwania i zmniejsza szum, ale nadal nie jest poleceniem kupna — to kolejność, w jakiej warto sprawdzać setupy.
 
