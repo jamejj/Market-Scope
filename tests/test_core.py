@@ -1,6 +1,7 @@
 import ast
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -70,7 +71,15 @@ from market_oracle.auto_forward import (
 import market_oracle.auto_forward as auto_forward_module
 import run_candidate_forward as candidate_runner_module
 import run_forward_test as forward_test_runner_module
-from market_oracle.journal import journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results
+from market_oracle.journal import (
+    journal_summary,
+    load_journal,
+    paper_portfolio,
+    record_snapshot_signals,
+    refresh_journal_results,
+    signal_direction,
+    valid_machine_decision_contract,
+)
 from market_oracle.model import fit_forecast, fit_forecast_state
 from market_oracle.monitor import (
     EXPECTED_RECORD_FIELDS,
@@ -92,10 +101,20 @@ from market_oracle.presentation import (
     build_start_guidance,
     display_model_quality,
     display_radar_action,
+    display_radar_direction,
+    display_radar_ml_status,
     display_radar_thesis,
+    confirmed_ml_long_rows,
+    radar_risk_rows,
     radar_display_frame,
 )
-from market_oracle.product_verdict import product_forecast_verdict
+from market_oracle.product_verdict import (
+    MachineDecisionState,
+    dataframe_machine_decision_state,
+    finite_probability,
+    persisted_machine_decision_state,
+    product_forecast_verdict,
+)
 from market_oracle.risk import periods_per_year, risk_metrics
 from market_oracle.reality import RealityConfig, reality_check_report, select_non_overlapping_trades
 from market_oracle.signals import (
@@ -197,6 +216,60 @@ def load_setup_risk_note():
     module = ast.Module(body=[function], type_ignores=[])
     exec(compile(module, str(source_path), "exec"), namespace)
     return namespace["setup_risk_note"]
+
+
+def load_radar_view_functions():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    function_names = {
+        "value_pct",
+        "signed_pct",
+        "signal_brief_value",
+        "signal_brief_horizon",
+        "radar_row_number",
+        "setup_destination",
+        "setup_risk_note",
+        "with_signal_display_columns",
+        "build_signal_radar_brief",
+        "build_setup_drilldown",
+    }
+    functions = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in function_names
+    ]
+    assert {node.name for node in functions} == function_names
+    namespace = {
+        "math": math,
+        "pd": pd,
+        "pct": lambda value: f"{value:.1%}",
+        "MachineDecisionState": MachineDecisionState,
+        "confirmed_ml_long_rows": confirmed_ml_long_rows,
+        "dataframe_machine_decision_state": dataframe_machine_decision_state,
+        "display_model_quality": display_model_quality,
+        "display_radar_action": display_radar_action,
+        "display_radar_direction": display_radar_direction,
+        "display_radar_thesis": display_radar_thesis,
+        "finite_probability": finite_probability,
+        "radar_risk_rows": radar_risk_rows,
+        "_unique_symbols": lambda frame: int(frame["Symbol"].nunique()) if not frame.empty else 0,
+        "signal_scan_contract": lambda frame, snapshot: {
+            "fast_completed": int((frame["Tryb analizy"] == "FAST").sum()),
+            "universe_total": int(frame["Symbol"].nunique()),
+            "ml_rows": int((frame["Tryb analizy"] == "ML").sum()),
+            "fast_rows": int((frame["Tryb analizy"] == "FAST").sum()),
+            "no_data": {},
+            "failed": {},
+        },
+    }
+    future_annotations = ast.ImportFrom(
+        module="__future__",
+        names=[ast.alias(name="annotations")],
+        level=0,
+    )
+    module = ast.Module(body=[future_annotations, *functions], type_ignores=[])
+    module = ast.fix_missing_locations(module)
+    exec(compile(module, str(source_path), "exec"), namespace)
+    return namespace
 
 
 def test_features_are_finite_and_past_only():
@@ -850,6 +923,135 @@ def test_signal_journal_requires_explicit_ml_mode(tmp_path):
     row.update({"Decision": 1, "DecisionReason": "LONG_CONFIRMED"})
 
     assert record_snapshot_signals(_journal_snapshot(row), path=tmp_path / "journal.json") == 0
+
+
+def test_signal_journal_public_contract_preserves_mode_less_legacy_rows():
+    row = {"Decision": 1, "DecisionReason": "LONG_CONFIRMED"}
+
+    assert valid_machine_decision_contract(row) is True
+    assert signal_direction(row) == "LONG"
+
+
+@pytest.mark.parametrize("mode", ["FAST", "RESEARCH", None])
+def test_signal_journal_public_contract_rejects_explicit_non_ml_modes(mode):
+    row = {
+        "Tryb analizy": mode,
+        "Decision": 1,
+        "DecisionReason": "LONG_CONFIRMED",
+    }
+
+    assert valid_machine_decision_contract(row) is False
+    assert signal_direction(row) is None
+
+
+@pytest.mark.parametrize(
+    ("decision", "reason", "expected"),
+    [
+        (1, "LONG_CONFIRMED", MachineDecisionState.LONG),
+        (-1, "SHORT_CONFIRMED", MachineDecisionState.SHORT),
+        (0, "PROBABILITY_INSIDE_BAND", MachineDecisionState.NEUTRAL),
+        (0, "INCOMPLETE_FORECAST", MachineDecisionState.NEUTRAL),
+    ],
+)
+def test_persisted_machine_decision_contract_returns_four_state_semantics(decision, reason, expected):
+    row = _product_scan_row()
+    row.update({"Decision": decision, "DecisionReason": reason})
+
+    assert persisted_machine_decision_state(row) is expected
+
+
+@pytest.mark.parametrize(
+    ("decision", "reason"),
+    [
+        (1.0, "LONG_CONFIRMED"),
+        (True, "LONG_CONFIRMED"),
+        ("1", "LONG_CONFIRMED"),
+        (1.2, "LONG_CONFIRMED"),
+        (np.nan, "LONG_CONFIRMED"),
+        (np.inf, "LONG_CONFIRMED"),
+        (pd.NA, "LONG_CONFIRMED"),
+        (None, "LONG_CONFIRMED"),
+        (1, "SHORT_CONFIRMED"),
+        (0, "LONG_CONFIRMED"),
+    ],
+)
+def test_persisted_machine_decision_contract_rejects_non_json_int_and_conflicts(decision, reason):
+    row = _product_scan_row()
+    row.update({"Decision": decision, "DecisionReason": reason})
+
+    assert persisted_machine_decision_state(row) is MachineDecisionState.INVALID
+
+
+@pytest.mark.parametrize(
+    ("decision", "reason", "expected"),
+    [
+        (np.float64(1.0), "LONG_CONFIRMED", MachineDecisionState.LONG),
+        (np.float64(-1.0), "SHORT_CONFIRMED", MachineDecisionState.SHORT),
+        (np.float64(0.0), "LOW_QUALITY", MachineDecisionState.NEUTRAL),
+        (np.int64(1), "LONG_CONFIRMED", MachineDecisionState.LONG),
+        (1, "LONG_CONFIRMED", MachineDecisionState.LONG),
+    ],
+)
+def test_dataframe_machine_decision_contract_accepts_only_exact_numeric_states(decision, reason, expected):
+    row = pd.Series({
+        "Tryb analizy": "ML",
+        "Decision": decision,
+        "DecisionReason": reason,
+    })
+
+    assert dataframe_machine_decision_state(row) is expected
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [True, np.bool_(True), "1", 1.2, np.nan, np.inf, -np.inf, pd.NA, None],
+)
+def test_dataframe_machine_decision_contract_rejects_lossy_or_missing_values(decision):
+    row = pd.Series({
+        "Tryb analizy": "ML",
+        "Decision": decision,
+        "DecisionReason": "LONG_CONFIRMED",
+    })
+
+    assert dataframe_machine_decision_state(row) is MachineDecisionState.INVALID
+
+
+@pytest.mark.parametrize(
+    ("decision", "reason"),
+    [
+        (1.0, "SHORT_CONFIRMED"),
+        (-1.0, "LONG_CONFIRMED"),
+        (0.0, "LONG_CONFIRMED"),
+        (0.0, "SHORT_CONFIRMED"),
+        (1.0, "LOW_QUALITY"),
+        (-1.0, "PROBABILITY_INSIDE_BAND"),
+    ],
+)
+def test_dataframe_machine_decision_contract_rejects_every_direction_reason_conflict(decision, reason):
+    row = pd.Series({
+        "Tryb analizy": "ML",
+        "Decision": decision,
+        "DecisionReason": reason,
+    })
+
+    assert dataframe_machine_decision_state(row) is MachineDecisionState.INVALID
+
+
+def test_dataframe_machine_decision_contract_rejects_fast_even_with_spoofed_pair():
+    row = pd.Series({
+        "Tryb analizy": "FAST",
+        "Decision": 1.0,
+        "DecisionReason": "LONG_CONFIRMED",
+    })
+
+    assert dataframe_machine_decision_state(row) is MachineDecisionState.INVALID
+
+
+def test_radar_display_distinguishes_explicit_fast_from_missing_mode():
+    assert display_radar_ml_status(pd.Series({"Tryb analizy": "FAST"})) == "FAST — discovery"
+    assert display_radar_ml_status(pd.Series({"Decision": 1.0, "DecisionReason": "LONG_CONFIRMED"})) == (
+        "Brak wiarygodnej klasyfikacji ML"
+    )
 
 
 def _schema_record(*, mode="ML", decision=1, reason="LONG_CONFIRMED"):
@@ -4313,6 +4515,364 @@ def test_radar_display_contract_maps_exact_segments_and_renames_only_display_cop
     assert display.loc[0, "Wsparcie ML"] == 64.0
     assert "Edge score" not in display.columns
     assert "Model edge" not in display.columns
+
+
+def test_radar_machine_contract_survives_dataframe_float_coercion_without_promoting_fast():
+    frame = pd.DataFrame([
+        {
+            "Tryb analizy": "ML",
+            "Decision": 1,
+            "DecisionReason": "LONG_CONFIRMED",
+        },
+        {"Tryb analizy": "FAST"},
+    ])
+
+    assert isinstance(frame.loc[0, "Decision"], float)
+    assert dataframe_machine_decision_state(frame.iloc[0]) is MachineDecisionState.LONG
+    assert dataframe_machine_decision_state(frame.iloc[1]) is MachineDecisionState.INVALID
+
+
+def test_radar_filters_use_machine_long_and_preserve_nondirectional_ml_risk():
+    frame = pd.DataFrame([
+        {
+            "Symbol": "LONG",
+            "Tryb analizy": "ML",
+            "Decision": 1,
+            "DecisionReason": "LONG_CONFIRMED",
+            "Ocena": "DOWOLNE COPY",
+            "Akcja radaru": "OBSERWUJ",
+            "Radar momentum": "NEUTRALNE",
+        },
+        {
+            "Symbol": "NEUTRAL_RISK",
+            "Tryb analizy": "ML",
+            "Decision": 0,
+            "DecisionReason": "PROBABILITY_INSIDE_BAND",
+            "Ocena": "KANDYDAT WZROSTOWY",
+            "Akcja radaru": "RYZYKO / UNIKAJ",
+            "Radar momentum": "NEUTRALNE",
+        },
+        {
+            "Symbol": "SHORT",
+            "Tryb analizy": "ML",
+            "Decision": -1,
+            "DecisionReason": "SHORT_CONFIRMED",
+            "Ocena": "OBSERWUJ",
+            "Akcja radaru": "OBSERWUJ",
+            "Radar momentum": "NEUTRALNE",
+        },
+        {
+            "Symbol": "FAST_RISK",
+            "Tryb analizy": "FAST",
+            "Decision": 1,
+            "DecisionReason": "LONG_CONFIRMED",
+            "Ocena": "KANDYDAT WZROSTOWY",
+            "Akcja radaru": "OBSERWUJ",
+            "Radar momentum": "PANIKA / RYZYKO",
+        },
+    ])
+
+    assert confirmed_ml_long_rows(frame)["Symbol"].tolist() == ["LONG"]
+    assert set(radar_risk_rows(frame)["Symbol"]) == {"NEUTRAL_RISK", "SHORT", "FAST_RISK"}
+    assert dataframe_machine_decision_state(frame.iloc[1]) is MachineDecisionState.NEUTRAL
+    assert dataframe_machine_decision_state(frame.iloc[3]) is MachineDecisionState.INVALID
+
+
+def test_radar_display_frame_uses_machine_status_and_safe_probability_without_mutating_raw():
+    raw = pd.DataFrame([
+        {
+            "Symbol": "NEUTRAL",
+            "Tryb analizy": "ML",
+            "Decision": 0,
+            "DecisionReason": "INCOMPLETE_FORECAST",
+            "Ocena": "KANDYDAT WZROSTOWY",
+            "P(wzrost)": 1.1,
+        },
+        {
+            "Symbol": "INVALID",
+            "Tryb analizy": "ML",
+            "Decision": np.nan,
+            "DecisionReason": None,
+            "Ocena": "SILNY KANDYDAT WZROSTOWY",
+            "P(wzrost)": -0.1,
+        },
+        {
+            "Symbol": "FAST",
+            "Tryb analizy": "FAST",
+            "Decision": 1,
+            "DecisionReason": "LONG_CONFIRMED",
+            "Ocena": "KANDYDAT WZROSTOWY",
+            "P(wzrost)": np.nan,
+        },
+    ])
+    original = raw.copy(deep=True)
+
+    display = radar_display_frame(raw)
+
+    pd.testing.assert_frame_equal(raw, original)
+    assert display["Ocena"].tolist() == [
+        "Obserwuj — brak potwierdzenia kierunku",
+        "Brak wiarygodnej klasyfikacji ML",
+        "FAST — discovery",
+    ]
+    assert display["P(wzrost)"].isna().all()
+
+
+@pytest.mark.parametrize(
+    ("probability", "expected"),
+    [(0.0, "0.0%"), (1.0, "100.0%"), (1.1, "—"), (-0.1, "—"), (np.nan, "—")],
+)
+def test_radar_direction_copy_sanitizes_probability(probability, expected):
+    row = pd.Series({
+        "Tryb analizy": "ML",
+        "Decision": 1.0 if probability in {0.0, 1.0} else 0.0,
+        "DecisionReason": "LONG_CONFIRMED" if probability in {0.0, 1.0} else "INCOMPLETE_FORECAST",
+        "P(wzrost)": probability,
+    })
+
+    assert expected in display_radar_direction(row)
+
+
+def test_radar_ml_status_is_independent_of_presentation_copy():
+    long_row = pd.Series({
+        "Tryb analizy": "ML",
+        "Decision": 1.0,
+        "DecisionReason": "LONG_CONFIRMED",
+        "Ocena": "BRAK SYGNAŁU",
+    })
+    neutral_row = pd.Series({
+        "Tryb analizy": "ML",
+        "Decision": 0.0,
+        "DecisionReason": "LOW_QUALITY",
+        "Ocena": "KANDYDAT WZROSTOWY",
+    })
+
+    assert display_radar_ml_status(long_row) == "Potwierdzony kierunek wzrostowy"
+    assert display_radar_ml_status(neutral_row) == "Obserwuj — brak potwierdzenia kierunku"
+
+
+def _radar_ui_row(
+    symbol,
+    *,
+    mode="ML",
+    decision=0,
+    reason="PROBABILITY_INSIDE_BAND",
+    copy="OBSERWUJ",
+    probability=0.50,
+    action="OBSERWUJ",
+    momentum="NEUTRALNE",
+):
+    row = guidance_row(
+        symbol,
+        mode=mode,
+        action=action,
+        probability=probability,
+        expected_return=0.02,
+    )
+    row.update({
+        "Ocena": copy,
+        "Decision": decision,
+        "DecisionReason": reason,
+        "Radar momentum": momentum,
+        "Score": 5.0,
+    })
+    return row
+
+
+def test_radar_brief_uses_machine_long_even_when_copy_says_no_signal():
+    functions = load_radar_view_functions()
+    frame = pd.DataFrame([
+        _radar_ui_row(
+            "LONG",
+            decision=1,
+            reason="LONG_CONFIRMED",
+            copy="BRAK SYGNAŁU",
+        ),
+        _radar_ui_row(
+            "COPY_ONLY",
+            decision=0,
+            reason="LOW_QUALITY",
+            copy="KANDYDAT WZROSTOWY",
+        ),
+    ])
+
+    brief = functions["build_signal_radar_brief"](frame, {"status": "complete"})
+
+    assert brief["headline"].startswith("LONG jest teraz najmocniejszym potwierdzonym setupem ML")
+    assert brief["cards"][1][1] == "1 symboli"
+
+
+def test_radar_brief_does_not_describe_priority_ml_as_fast():
+    functions = load_radar_view_functions()
+    frame = pd.DataFrame([
+        _radar_ui_row(
+            "ML_NEUTRAL",
+            decision=0,
+            reason="PROBABILITY_INSIDE_BAND",
+            copy="KANDYDAT WZROSTOWY",
+            action="PRIORYTET DO ANALIZY",
+        )
+    ])
+
+    brief = functions["build_signal_radar_brief"](frame, {"status": "complete"})
+    text = f"{brief['headline']} {brief['body']}"
+
+    assert "FAST" not in text
+    assert "bez potwierdzenia kierunku" in text
+    assert "potwierdzonym setupem" not in text
+
+
+@pytest.mark.parametrize(
+    ("decision", "reason", "expected"),
+    [
+        (-1, "SHORT_CONFIRMED", "potwierdzonym setupem spadkowym ML"),
+        (None, None, "klasyfikacja ML nie jest wiarygodna"),
+    ],
+)
+def test_radar_brief_headline_distinguishes_short_from_invalid(decision, reason, expected):
+    functions = load_radar_view_functions()
+    row = _radar_ui_row("TEST", decision=decision, reason=reason)
+    if decision is None:
+        row.pop("Decision")
+        row.pop("DecisionReason")
+
+    brief = functions["build_signal_radar_brief"](pd.DataFrame([row]), {"status": "complete"})
+
+    assert expected in brief["headline"]
+
+
+def test_radar_brief_counts_neutral_ml_heuristic_risk_without_calling_it_short():
+    functions = load_radar_view_functions()
+    frame = pd.DataFrame([
+        _radar_ui_row(
+            "ML_RISK",
+            decision=0,
+            reason="PROBABILITY_INSIDE_BAND",
+            action="RYZYKO / UNIKAJ",
+        )
+    ])
+
+    brief = functions["build_signal_radar_brief"](frame, {"status": "complete"})
+
+    assert brief["cards"][3][1] == "1 alertów"
+    assert "SHORT" not in str(brief)
+
+
+def test_radar_brief_sanitizes_invalid_probability_without_confirming_long():
+    functions = load_radar_view_functions()
+    row = _radar_ui_row(
+        "INVALID_P",
+        decision=0,
+        reason="INCOMPLETE_FORECAST",
+        copy="KANDYDAT WZROSTOWY",
+        probability=1.1,
+    )
+
+    brief = functions["build_signal_radar_brief"](
+        pd.DataFrame([row]),
+        {"status": "complete"},
+    )
+    visible_text = " ".join([
+        brief["headline"],
+        brief["body"],
+        *(f"{title} {value} {detail}" for title, value, detail in brief["cards"]),
+    ])
+
+    assert "110" not in visible_text
+    assert "P(wzrost) —" in visible_text
+    assert "potwierdzonym setupem ML" not in visible_text
+
+
+@pytest.mark.parametrize(
+    ("decision", "reason", "copy", "headline_fragment"),
+    [
+        (1, "LONG_CONFIRMED", "BRAK SYGNAŁU", "potwierdzony setup wzrostowy ml"),
+        (-1, "SHORT_CONFIRMED", "KANDYDAT WZROSTOWY", "potwierdzony setup spadkowy ml"),
+        (0, "LOW_QUALITY", "KANDYDAT WZROSTOWY", "bez potwierdzenia kierunku"),
+        (None, None, "KANDYDAT WZROSTOWY", "brak wiarygodnej klasyfikacji ml"),
+    ],
+)
+def test_setup_drilldown_headline_uses_machine_state_not_copy(decision, reason, copy, headline_fragment):
+    functions = load_radar_view_functions()
+    row = _radar_ui_row("TEST", decision=decision, reason=reason, copy=copy)
+    if decision is None:
+        row.pop("Decision")
+        row.pop("DecisionReason")
+    displayed = functions["with_signal_display_columns"](pd.DataFrame([row])).iloc[0]
+
+    drilldown = functions["build_setup_drilldown"](displayed)
+
+    assert headline_fragment in drilldown["headline"].lower()
+
+
+def test_radar_view_probability_is_safe_in_direction_and_drilldown():
+    functions = load_radar_view_functions()
+    row = _radar_ui_row(
+        "INVALID_P",
+        decision=0,
+        reason="INCOMPLETE_FORECAST",
+        copy="KANDYDAT WZROSTOWY",
+        probability=1.1,
+    )
+
+    displayed = functions["with_signal_display_columns"](pd.DataFrame([row])).iloc[0]
+    drilldown = functions["build_setup_drilldown"](displayed)
+
+    assert "110.0%" not in str(drilldown)
+    assert any("P(wzrost): —" in value for _, value, _ in drilldown["cards"])
+
+
+def test_radar_dashboard_wiring_uses_machine_helpers_without_behavioral_ocena_filters():
+    source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    render = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_signal_dashboard"
+    )
+    render_source = ast.get_source_segment(source, render)
+
+    assert "confirmed_ml_long_rows(scoped)" in render_source
+    assert "confirmed_ml_long_rows(filtered)" in render_source
+    assert "radar_risk_rows(frame)" in render_source
+    assert "radar_risk_rows(base)" in render_source
+    assert "bullish_labels" not in render_source
+    assert "bearish_labels" not in render_source
+    assert '["Ocena"].isin' not in render_source
+
+
+def test_radar_csv_export_wiring_preserves_raw_probability_and_copy():
+    source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    render = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_signal_dashboard"
+    )
+    download = next(
+        node for node in ast.walk(render)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "download_button"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "Pobierz ranking CSV"
+    )
+
+    assert ast.unparse(download.args[1]) == "filtered.to_csv(index=False).encode()"
+
+    raw = pd.DataFrame([{
+        "Tryb analizy": "ML",
+        "Decision": 0,
+        "DecisionReason": "INCOMPLETE_FORECAST",
+        "Ocena": "KANDYDAT WZROSTOWY",
+        "P(wzrost)": 1.1,
+    }])
+    original_csv = raw.to_csv(index=False)
+
+    radar_display_frame(raw)
+
+    assert raw.to_csv(index=False) == original_csv
+    assert "KANDYDAT WZROSTOWY" in original_csv
+    assert "1.1" in original_csv
 
 
 def test_radar_copy_keeps_unknown_action_and_thesis_segments_unchanged():

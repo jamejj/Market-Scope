@@ -7,17 +7,14 @@ from pathlib import Path
 import pandas as pd
 
 from .data import download_history
+from .product_verdict import (
+    MachineDecisionState,
+    persisted_machine_decision_state,
+)
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 JOURNAL_PATH = DATA_DIR / "signal_journal.json"
-NON_DIRECTIONAL_REASONS = {
-    "EXPECTED_RETURN_CONFLICT",
-    "EXPECTED_RETURN_TOO_SMALL",
-    "INCOMPLETE_FORECAST",
-    "LOW_QUALITY",
-    "PROBABILITY_INSIDE_BAND",
-}
 
 
 def load_journal(path: Path = JOURNAL_PATH) -> list[dict]:
@@ -36,23 +33,14 @@ def save_journal(entries: list[dict], path: Path = JOURNAL_PATH) -> None:
 
 
 def valid_machine_decision_contract(row: dict) -> bool:
-    decision = row.get("Decision")
-    reason = row.get("DecisionReason")
-    if type(decision) is not int or decision not in {-1, 0, 1} or not isinstance(reason, str):
-        return False
-    if decision == 1:
-        return reason == "LONG_CONFIRMED"
-    if decision == -1:
-        return reason == "SHORT_CONFIRMED"
-    return reason in NON_DIRECTIONAL_REASONS
+    return persisted_machine_decision_state(row) is not MachineDecisionState.INVALID
 
 
 def signal_direction(row: dict) -> str | None:
-    if not valid_machine_decision_contract(row):
-        return None
-    if row["Decision"] == 1:
+    state = persisted_machine_decision_state(row)
+    if state is MachineDecisionState.LONG:
         return "LONG"
-    if row["Decision"] == -1:
+    if state is MachineDecisionState.SHORT:
         return "SHORT"
     return None
 

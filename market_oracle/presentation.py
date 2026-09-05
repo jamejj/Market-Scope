@@ -4,6 +4,8 @@ import math
 from typing import Any
 
 from .product_verdict import (
+    MachineDecisionState,
+    dataframe_machine_decision_state,
     finite_probability,
     forecast_integrity_issue,
     has_complete_product_forecast,
@@ -177,6 +179,61 @@ def display_model_quality(value: Any) -> str:
     return labels.get(text, text)
 
 
+def display_radar_ml_status(row: Any) -> str:
+    if not hasattr(row, "get"):
+        return "Brak wiarygodnej klasyfikacji ML"
+    mode = str(row.get("Tryb analizy"))
+    if mode == "FAST":
+        return "FAST — discovery"
+    if mode != "ML":
+        return "Brak wiarygodnej klasyfikacji ML"
+    labels = {
+        MachineDecisionState.LONG: "Potwierdzony kierunek wzrostowy",
+        MachineDecisionState.SHORT: "Potwierdzony kierunek spadkowy",
+        MachineDecisionState.NEUTRAL: "Obserwuj — brak potwierdzenia kierunku",
+        MachineDecisionState.INVALID: "Brak wiarygodnej klasyfikacji ML",
+    }
+    return labels[dataframe_machine_decision_state(row)]
+
+
+def display_radar_direction(row: Any) -> str:
+    if hasattr(row, "get") and str(row.get("Tryb analizy")) == "FAST":
+        return "FAST · bez potwierdzenia ML"
+    if not hasattr(row, "get") or str(row.get("Tryb analizy")) != "ML":
+        return "Brak wiarygodnej klasyfikacji ML"
+    probability = finite_probability(row.get("P(wzrost)"))
+    return f"{display_radar_ml_status(row)} · P(wzrost): {_pct(probability)}"
+
+
+def _machine_state_series(frame: Any) -> Any:
+    return frame.apply(dataframe_machine_decision_state, axis=1)
+
+
+def confirmed_ml_long_rows(frame: Any) -> Any:
+    """Return rows with a canonical, pandas-safe LONG machine contract."""
+    if frame.empty:
+        return frame.copy()
+    return frame[_machine_state_series(frame).eq(MachineDecisionState.LONG)].copy()
+
+
+def radar_heuristic_risk_mask(frame: Any) -> Any:
+    """Return non-directional Radar risk flags for both ML and FAST rows."""
+    mask = frame.index.to_series().map(lambda _: False)
+    if "Akcja radaru" in frame:
+        mask |= frame["Akcja radaru"].eq("RYZYKO / UNIKAJ")
+    if "Radar momentum" in frame:
+        mask |= frame["Radar momentum"].eq("PANIKA / RYZYKO")
+    return mask.astype(bool)
+
+
+def radar_risk_rows(frame: Any) -> Any:
+    """Return canonical ML SHORT rows plus independent heuristic risk alerts."""
+    if frame.empty:
+        return frame.copy()
+    short_mask = _machine_state_series(frame).eq(MachineDecisionState.SHORT)
+    return frame[short_mask | radar_heuristic_risk_mask(frame)].copy()
+
+
 def radar_display_frame(frame: Any, columns: list[str] | None = None) -> Any:
     """Return a user-facing Radar copy without mutating raw research data."""
     output = frame.copy()
@@ -186,6 +243,10 @@ def radar_display_frame(frame: Any, columns: list[str] | None = None) -> Any:
         output["Teza radaru"] = output["Teza radaru"].map(display_radar_thesis)
     if "Jakość modelu" in output:
         output["Jakość modelu"] = output["Jakość modelu"].map(display_model_quality)
+    if "Ocena" in output:
+        output["Ocena"] = output.apply(display_radar_ml_status, axis=1)
+    if "P(wzrost)" in output:
+        output["P(wzrost)"] = output["P(wzrost)"].map(finite_probability)
     if columns is not None:
         present = [column for column in columns if column in output.columns]
         output = output[present].copy()
