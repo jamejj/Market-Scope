@@ -5,6 +5,7 @@ import math
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -23,7 +24,8 @@ from market_oracle.engine import analyze_asset, scan_market_multi
 from market_oracle.evidence import EvidenceRegistryError, evidence_copy, resolve_evidence
 from market_oracle.forward import load_forward_cockpit
 from market_oracle.journal import (
-    journal_summary, load_journal, paper_portfolio, record_snapshot_signals, refresh_journal_results,
+    journal_error_code, journal_summary, paper_portfolio, record_snapshot_signals,
+    refresh_journal_results, safe_load_journal,
 )
 from market_oracle.monitor import default_universe, load_snapshot, snapshot_is_stale
 from market_oracle.product_verdict import MachineDecisionState, dataframe_machine_decision_state, finite_probability
@@ -1176,6 +1178,78 @@ def clean_text(value, default: str = "—") -> str:
     return html.escape(str(value))
 
 
+def journal_failure_message(error_code: str | None) -> str:
+    known_codes = {
+        "JOURNAL_CORRUPT",
+        "JOURNAL_READ_FAILED",
+        "JOURNAL_WRITE_FAILED",
+        "JOURNAL_LOCK_FAILED",
+        "JOURNAL_INVALID_SIGNAL",
+        "JOURNAL_UNEXPECTED",
+    }
+    code = error_code if error_code in known_codes else "JOURNAL_UNEXPECTED"
+    return (
+        f"Journal jest niedostępny ({code}). Ranking i analiza pozostają dostępne, "
+        "ale stan dziennika wymaga sprawdzenia."
+    )
+
+
+def _valid_journal_attempted_at(value) -> bool:
+    if not isinstance(value, str) or len(value) <= 10 or value[10] != "T":
+        return False
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return timestamp.tzinfo is not None and timestamp.utcoffset() is not None
+
+
+def journal_scan_status_view(snapshot: dict | None) -> dict[str, str]:
+    payload = snapshot or {}
+    status = payload.get("journal_status")
+    if status == "OK":
+        added = payload.get("journal_added")
+        attempted_at = payload.get("journal_attempted_at")
+        if (
+            type(added) is not int
+            or added < 0
+            or not _valid_journal_attempted_at(attempted_at)
+        ):
+            return {
+                "state": "INCONSISTENT",
+                "tone": "unknown",
+                "text": "Journal: metadane zapisu są niepełne lub niespójne.",
+            }
+        return {
+            "state": "OK",
+            "tone": "ok",
+            "text": f"Journal: zapis zakończony poprawnie · nowych sygnałów: {added}.",
+        }
+    if status == "FAILED":
+        return {
+            "state": "FAILED",
+            "tone": "error",
+            "text": journal_failure_message(payload.get("journal_error")),
+        }
+    if status == "NOT_ATTEMPTED":
+        return {
+            "state": "NOT_ATTEMPTED",
+            "tone": "info",
+            "text": "Journal: automatyczny zapis nie został jeszcze podjęty.",
+        }
+    if status == "NOT_APPLICABLE":
+        return {
+            "state": "NOT_APPLICABLE",
+            "tone": "info",
+            "text": "Journal: zapis nie dotyczy tego niekanonicznego skanu.",
+        }
+    return {
+        "state": "UNKNOWN",
+        "tone": "unknown",
+        "text": "Journal: brak metadanych zapisu w tym starszym snapshotcie.",
+    }
+
+
 def short_datetime(value, default: str = "—") -> str:
     if not value:
         return default
@@ -2025,6 +2099,8 @@ def render_start_dashboard(
         st.warning(state["detail"])
     else:
         st.caption(f"✅ Test forward działa prawidłowo · {state['detail']}")
+    if journal.get("error"):
+        st.warning(journal_failure_message(journal.get("error")))
 
     guidance = build_start_guidance(
         snapshot=snapshot,
@@ -2968,22 +3044,35 @@ def render_signal_journal() -> None:
 
     actions = st.columns([1, 1, 1.35])
     if actions[0].button("Zapisz sygnały z ostatniego rankingu", key="journal_record", use_container_width=True):
-        added = record_snapshot_signals(load_snapshot() or {})
-        st.toast(f"Dodano nowych sygnałów: {added}", icon="📒")
-        st.rerun()
+        try:
+            added = record_snapshot_signals(load_snapshot() or {})
+        except Exception as exc:
+            st.error(journal_failure_message(journal_error_code(exc)))
+        else:
+            st.toast(f"Dodano nowych sygnałów: {added}", icon="📒")
+            st.rerun()
     if actions[1].button("Aktualizuj wyniki", key="journal_refresh", use_container_width=True):
-        with st.spinner("Sprawdzam, które sygnały dojrzały do oceny…"):
-            _, errors = refresh_journal_results()
-        if errors:
-            st.warning(f"Nie udało się odświeżyć części symboli: {len(errors)}")
-        st.toast("Journal odświeżony", icon="✅")
-        st.rerun()
+        try:
+            with st.spinner("Sprawdzam, które sygnały dojrzały do oceny…"):
+                _, errors = refresh_journal_results()
+        except Exception as exc:
+            st.error(journal_failure_message(journal_error_code(exc)))
+        else:
+            if errors:
+                st.warning(f"Nie udało się odświeżyć części symboli: {len(errors)}")
+            st.toast("Journal odświeżony", icon="✅")
+            st.rerun()
     actions[2].markdown(
         "<div class='ms-note'>Pełny skan zapisuje sygnały automatycznie. Ręczny zapis jest przydatny dla gotowego rankingu z poprzedniego uruchomienia.</div>",
         unsafe_allow_html=True,
     )
 
-    entries = load_journal()
+    entries, load_error = safe_load_journal()
+    if load_error:
+        st.error(journal_failure_message(load_error))
+        st.caption("Nie pokazuję zerowych metryk, ponieważ nie udało się wiarygodnie odczytać danych Journala.")
+        return
+    entries = entries or []
     summary = journal_summary(entries)
     metrics = st.columns(6)
     metrics[0].metric("Wszystkie sygnały", summary["total"])
@@ -3372,6 +3461,15 @@ def render_signal_dashboard() -> None:
         else:
             st.success(f"Skan zapisany · aktualizacja: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzonty: **{horizon_text}**")
 
+    if status == "complete":
+        journal_view = journal_scan_status_view(snapshot)
+        if journal_view["tone"] == "error":
+            st.error(journal_view["text"])
+        elif journal_view["tone"] == "ok":
+            st.caption(f"✅ {journal_view['text']}")
+        else:
+            st.caption(journal_view["text"])
+
     frame = pd.DataFrame(snapshot.get("records", []))
     if frame.empty:
         st.warning("Monitor nie ma jeszcze wystarczającej liczby ukończonych analiz.")
@@ -3627,7 +3725,12 @@ def render_signal_dashboard() -> None:
 
 
 _hero_snapshot = load_snapshot() or {}
-_hero_journal = journal_summary(load_journal())
+_hero_journal_entries, _hero_journal_error = safe_load_journal()
+_hero_journal = (
+    journal_summary(_hero_journal_entries)
+    if _hero_journal_entries is not None
+    else {"total": "—", "error": _hero_journal_error}
+)
 _hero_universe = len(default_universe())
 _hero_forward, _hero_forward_error = safe_load_forward_cockpit()
 _hero_automation, _hero_automation_error = safe_load_automation_status()

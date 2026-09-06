@@ -2,6 +2,8 @@ import ast
 import hashlib
 import json
 import math
+import multiprocessing
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -51,6 +53,7 @@ from market_oracle.forward import (
     verify_pipeline_contract,
 )
 import market_oracle.forward as forward_module
+import market_oracle.journal as journal_module
 from market_oracle.integrity import (
     CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
     INTEGRITY_EXIT_CODE,
@@ -77,6 +80,7 @@ from market_oracle.journal import (
     paper_portfolio,
     record_snapshot_signals,
     refresh_journal_results,
+    save_journal,
     signal_direction,
     valid_machine_decision_contract,
 )
@@ -91,6 +95,8 @@ from market_oracle.monitor import (
     select_deep_shortlist,
     snapshot_is_stale,
 )
+import market_oracle.monitor as monitor_module
+import market_oracle.validation as validation_module
 from market_oracle.presentation import (
     ACCURACY_BASELINE_DELTA_LABEL,
     AUC_DIRECTION_HELP,
@@ -142,9 +148,77 @@ from market_oracle.watchlist import (
     watchlist_analysis_matches_selection,
     watchlist_summary,
 )
-import market_oracle.validation as validation_module
 
 
+def _journal_process_snapshot(symbol: str) -> dict:
+    return {
+        "status": "complete",
+        "updated_at": "2026-01-10T12:00:00+00:00",
+        "records": [{
+            "Symbol": symbol,
+            "Klasa": "USA",
+            "Horyzont": 5,
+            "Data": "2026-01-10",
+            "Cena": 100.0,
+            "Setup": "Breakout / momentum",
+            "Ocena": "copy-only",
+            "P(wzrost)": 0.61,
+            "Oczekiwany ruch": 0.03,
+            "AUC walidacji": 0.62,
+            "Brier": 0.22,
+            "Jakość modelu": "WYSOKA",
+            "Score": 4.2,
+            "Tryb analizy": "ML",
+            "Decision": 1,
+            "DecisionReason": "LONG_CONFIRMED",
+        }],
+    }
+
+
+def _journal_record_worker(path_text, symbol, start_event, result_queue):
+    try:
+        start_event.wait(timeout=10)
+        added = journal_module.record_snapshot_signals(
+            _journal_process_snapshot(symbol),
+            path=Path(path_text),
+        )
+        result_queue.put(("ok", symbol, added))
+    except BaseException as exc:
+        result_queue.put(("error", symbol, type(exc).__name__, str(exc)))
+
+
+def _journal_refresh_worker(path_text, download_started, download_release, result_queue):
+    def controlled_download(symbol, years=3):
+        download_started.set()
+        if not download_release.wait(timeout=10):
+            raise TimeoutError("test did not release download")
+        dates = pd.bdate_range("2026-01-09", periods=12)
+        prices = np.linspace(99, 111, len(dates))
+        return pd.DataFrame({"Open": prices, "Close": prices}, index=dates)
+
+    try:
+        journal_module.download_history = controlled_download
+        refreshed, errors = journal_module.refresh_journal_results(path=Path(path_text))
+        result_queue.put(("ok", len(refreshed), errors))
+    except BaseException as exc:
+        result_queue.put(("error", type(exc).__name__, str(exc)))
+
+
+def _journal_ordered_refresh_worker(path_text, periods, download_started, download_release, result_queue):
+    def controlled_download(symbol, years=3):
+        download_started.set()
+        if not download_release.wait(timeout=10):
+            raise TimeoutError("test did not release download")
+        dates = pd.bdate_range("2026-01-09", periods=periods)
+        prices = np.arange(99.0, 99.0 + periods)
+        return pd.DataFrame({"Open": prices, "Close": prices}, index=dates)
+
+    try:
+        journal_module.download_history = controlled_download
+        refreshed, errors = journal_module.refresh_journal_results(path=Path(path_text))
+        result_queue.put(("ok", periods, refreshed[0], errors))
+    except BaseException as exc:
+        result_queue.put(("error", periods, type(exc).__name__, str(exc)))
 def synthetic_data(n=900):
     rng = np.random.default_rng(42)
     returns = 0.00025 + 0.18 * np.sin(np.arange(n) / 17) / 100 + rng.normal(0, 0.011, n)
@@ -270,6 +344,32 @@ def load_radar_view_functions():
     module = ast.fix_missing_locations(module)
     exec(compile(module, str(source_path), "exec"), namespace)
     return namespace
+
+
+def load_journal_ui_functions():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    function_names = {
+        "_valid_journal_attempted_at",
+        "journal_scan_status_view",
+        "journal_failure_message",
+    }
+    functions = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in function_names
+    ]
+    assert {node.name for node in functions} == function_names
+    namespace = {"datetime": datetime}
+    future_annotations = ast.ImportFrom(
+        module="__future__",
+        names=[ast.alias(name="annotations")],
+        level=0,
+    )
+    module = ast.fix_missing_locations(
+        ast.Module(body=[future_annotations, *functions], type_ignores=[])
+    )
+    exec(compile(module, str(source_path), "exec"), namespace)
+    return {name: namespace[name] for name in function_names}
 
 
 def test_features_are_finite_and_past_only():
@@ -780,6 +880,282 @@ def test_background_monitor_persists_snapshot(tmp_path, monkeypatch):
     assert len(default_universe()) >= 100
 
 
+def _run_test_signal_scan(tmp_path, monkeypatch, recorder, *, canonical=True):
+    sample = pd.DataFrame([{
+        "Symbol": "TEST", "Klasa": "USA", "Horyzont": 5, "Ocena": "OBSERWUJ", "Score": 1.5,
+        "Deep score": 70.0, "Setup score": 68.0, "Radar score": 5.0,
+        "P(wzrost)": 0.52, "Oczekiwany ruch": 0.01, "Tryb analizy": "FAST",
+    }])
+    ml_sample = sample.copy()
+    ml_sample["Tryb analizy"] = "ML"
+    path = tmp_path / ("signals.json" if canonical else "research.json")
+    monkeypatch.setattr(monitor_module, "SNAPSHOT_PATH", path if canonical else tmp_path / "canonical.json")
+    monkeypatch.setattr(monitor_module, "LOCK_PATH", tmp_path / "signals.lock")
+    monkeypatch.setattr(monitor_module, "scan_market_fast", lambda symbols, horizons, years: (sample, {}))
+    monkeypatch.setattr(monitor_module, "scan_market_multi", lambda symbols, horizons, years: (ml_sample, {}))
+    monkeypatch.setattr(monitor_module, "record_snapshot_signals", recorder)
+    result = monitor_module.run_signal_scan(["TEST"], path=path, deep_limit=1)
+    return result, monitor_module.load_snapshot(path)
+
+
+@pytest.mark.parametrize("added", [0, 1, 2])
+def test_background_monitor_persists_successful_journal_status(tmp_path, monkeypatch, added):
+    result, loaded = _run_test_signal_scan(
+        tmp_path,
+        monkeypatch,
+        lambda snapshot: added,
+    )
+
+    for payload in (result, loaded):
+        assert payload["status"] == "complete"
+        assert payload["journal_status"] == "OK"
+        assert payload["journal_added"] == added
+        assert payload["journal_attempted_at"].endswith("+00:00")
+        assert "journal_error" not in payload
+        assert payload["forward_ledger_status"] == "not_recorded_generic_two_stage_scan"
+        assert payload["forward_ledger_note"] == (
+            "Candidate v1 proof ledger uses run_candidate_forward.py with a frozen full-ML universe."
+        )
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (journal_module.JournalIntegrityError("JOURNAL_CORRUPT"), "JOURNAL_CORRUPT"),
+        (RuntimeError("secret local path /tmp/private"), "JOURNAL_UNEXPECTED"),
+    ],
+)
+def test_background_monitor_surfaces_journal_failure_without_failing_scan(
+    tmp_path, monkeypatch, error, expected_code,
+):
+    def fail_record(snapshot):
+        raise error
+
+    result, loaded = _run_test_signal_scan(tmp_path, monkeypatch, fail_record)
+
+    for payload in (result, loaded):
+        assert payload["status"] == "complete"
+        assert payload["journal_status"] == "FAILED"
+        assert payload["journal_error"] == expected_code
+        assert payload["journal_attempted_at"].endswith("+00:00")
+        assert "journal_added" not in payload
+        assert "secret" not in json.dumps(payload)
+
+
+def test_background_monitor_noncanonical_scan_marks_journal_not_applicable(tmp_path, monkeypatch):
+    calls = []
+    result, loaded = _run_test_signal_scan(
+        tmp_path,
+        monkeypatch,
+        lambda snapshot: calls.append(snapshot),
+        canonical=False,
+    )
+
+    assert calls == []
+    assert result["journal_status"] == "NOT_APPLICABLE"
+    assert loaded["journal_status"] == "NOT_APPLICABLE"
+    assert "journal_added" not in result
+    assert "journal_error" not in result
+    assert "journal_attempted_at" not in result
+
+
+def test_background_monitor_clears_previous_journal_error_after_later_success(tmp_path, monkeypatch):
+    attempts = 0
+
+    def fail_then_succeed(snapshot):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise journal_module.JournalIntegrityError("JOURNAL_WRITE_FAILED")
+        return 0
+
+    first, _ = _run_test_signal_scan(tmp_path, monkeypatch, fail_then_succeed)
+    second, loaded = _run_test_signal_scan(tmp_path, monkeypatch, fail_then_succeed)
+
+    assert first["journal_status"] == "FAILED"
+    assert first["journal_error"] == "JOURNAL_WRITE_FAILED"
+    assert second["journal_status"] == "OK"
+    assert second["journal_added"] == 0
+    assert "journal_error" not in second
+    assert "journal_error" not in loaded
+
+
+def test_background_monitor_marks_canonical_intermediate_snapshots_not_attempted(tmp_path, monkeypatch):
+    observed_statuses = []
+    original_save_snapshot = monitor_module.save_snapshot
+
+    def capture_save(payload, path=monitor_module.SNAPSHOT_PATH):
+        observed_statuses.append((payload.get("status"), payload.get("journal_status")))
+        original_save_snapshot(payload, path)
+
+    monkeypatch.setattr(monitor_module, "save_snapshot", capture_save)
+
+    result, _ = _run_test_signal_scan(tmp_path, monkeypatch, lambda snapshot: 0)
+
+    assert result["journal_status"] == "OK"
+    assert observed_statuses[0] == ("running", "NOT_ATTEMPTED")
+    assert ("complete", "NOT_ATTEMPTED") in observed_statuses
+    assert observed_statuses[-1] == ("complete", "OK")
+
+
+def test_journal_scan_status_view_distinguishes_ok_failed_and_legacy_unknown():
+    functions = load_journal_ui_functions()
+    status_view = functions["journal_scan_status_view"]
+
+    ok = status_view({
+        "journal_status": "OK",
+        "journal_added": 0,
+        "journal_attempted_at": "2026-01-10T12:00:00+00:00",
+    })
+    failed = status_view({"journal_status": "FAILED", "journal_error": "JOURNAL_CORRUPT"})
+    unknown = status_view({"status": "complete"})
+
+    assert ok == {
+        "state": "OK",
+        "tone": "ok",
+        "text": "Journal: zapis zakończony poprawnie · nowych sygnałów: 0.",
+    }
+    assert failed["state"] == "FAILED"
+    assert failed["tone"] == "error"
+    assert "JOURNAL_CORRUPT" in failed["text"]
+    assert unknown["state"] == "UNKNOWN"
+    assert unknown["tone"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"journal_status": "OK"},
+        {"journal_status": "OK", "journal_added": None},
+        {"journal_status": "OK", "journal_added": False},
+        {"journal_status": "OK", "journal_added": "0"},
+        {"journal_status": "OK", "journal_added": 0.0},
+        {"journal_status": "OK", "journal_added": -1},
+        {"journal_status": "OK", "journal_added": 0},
+        {"journal_status": "OK", "journal_added": 0, "journal_attempted_at": "garbage"},
+        {"journal_status": "OK", "journal_added": 0, "journal_attempted_at": "today"},
+        {"journal_status": "OK", "journal_added": 0, "journal_attempted_at": "2026-13-99"},
+        {"journal_status": "OK", "journal_added": 0, "journal_attempted_at": "2026-01-10"},
+        {
+            "journal_status": "OK",
+            "journal_added": 0,
+            "journal_attempted_at": "2026-01-10T12:00:00",
+        },
+    ],
+)
+def test_journal_scan_status_view_fails_closed_on_inconsistent_ok_metadata(payload):
+    status_view = load_journal_ui_functions()["journal_scan_status_view"]
+
+    view = status_view(payload)
+
+    assert view["state"] != "OK"
+    assert view["tone"] != "ok"
+    assert "nowych sygnałów: 0" not in view["text"]
+
+
+@pytest.mark.parametrize("added", [0, 2])
+@pytest.mark.parametrize(
+    "attempted_at",
+    ["2026-01-10T12:00:00+00:00", "2026-01-10T13:00:00+01:00"],
+)
+def test_journal_scan_status_view_accepts_complete_ok_metadata(added, attempted_at):
+    status_view = load_journal_ui_functions()["journal_scan_status_view"]
+
+    view = status_view({
+        "journal_status": "OK",
+        "journal_added": added,
+        "journal_attempted_at": attempted_at,
+    })
+
+    assert view["state"] == "OK"
+    assert view["tone"] == "ok"
+    assert f"nowych sygnałów: {added}" in view["text"]
+
+
+def test_journal_failure_message_is_controlled_and_contains_no_raw_exception():
+    failure_message = load_journal_ui_functions()["journal_failure_message"]
+
+    message = failure_message("JOURNAL_UNEXPECTED")
+
+    assert "JOURNAL_UNEXPECTED" in message
+    assert "/tmp/private" not in message
+    assert "pusty" not in message.lower()
+
+
+def test_signal_journal_ui_uses_safe_load_and_does_not_rewrite_scan_status():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    render = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_signal_journal"
+    )
+    called_names = {
+        node.func.id
+        for node in ast.walk(render)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+    assert "safe_load_journal" in called_names
+    assert "load_journal" not in called_names
+    assert "save_snapshot" not in called_names
+
+    action_tries = [
+        node for node in ast.walk(render)
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id in {"record_snapshot_signals", "refresh_journal_results"}
+            for call in ast.walk(node)
+        )
+    ]
+    assert len(action_tries) == 2
+    for action_try in action_tries:
+        else_calls = {
+            call.func.attr
+            for node in action_try.orelse
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+        }
+        handler_calls = {
+            call.func.attr
+            for handler in action_try.handlers
+            for call in ast.walk(handler)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+        }
+        assert {"toast", "rerun"}.issubset(else_calls)
+        assert "error" in handler_calls
+
+
+def test_radar_and_start_render_journal_observability_separately():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"render_signal_dashboard", "render_start_dashboard"}
+    }
+    calls = {
+        name: {
+            node.func.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        for name, function in functions.items()
+    }
+
+    assert "journal_scan_status_view" in calls["render_signal_dashboard"]
+    assert "journal_failure_message" in calls["render_start_dashboard"]
+
+
+def test_start_hero_uses_safe_journal_load_instead_of_false_empty_summary():
+    source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+
+    assert "_hero_journal_entries, _hero_journal_error = safe_load_journal()" in source
+    assert "_hero_journal = journal_summary(load_journal())" not in source
+
+
 def test_deep_shortlist_keeps_diverse_high_priority_symbols():
     frame = pd.DataFrame([
         {"Symbol": "A", "Klasa": "USA", "Deep score": 90, "Setup score": 80, "Radar score": 5, "Edge score": 3, "Risk control": 70},
@@ -892,6 +1268,15 @@ def test_signal_journal_uses_machine_contract_not_copy(tmp_path, decision, reaso
     assert entry["decision_reason"] == reason
 
 
+def test_signal_journal_deduplicates_repeated_row_within_one_snapshot(tmp_path):
+    row = _product_scan_row(copy="KANDYDAT WZROSTOWY")
+    row.update({"Decision": 1, "DecisionReason": "LONG_CONFIRMED"})
+    path = tmp_path / "journal.json"
+
+    assert record_snapshot_signals(_journal_snapshot(row, dict(row)), path=path) == 1
+    assert len(load_journal(path)) == 1
+
+
 @pytest.mark.parametrize(
     ("decision", "reason"),
     [
@@ -899,7 +1284,6 @@ def test_signal_journal_uses_machine_contract_not_copy(tmp_path, decision, reaso
         (True, "LONG_CONFIRMED"),
         ("1", "LONG_CONFIRMED"),
         (2, "LONG_CONFIRMED"),
-        (0, "PROBABILITY_INSIDE_BAND"),
         (0, "LONG_CONFIRMED"),
         (0, "SHORT_CONFIRMED"),
         (1, "SHORT_CONFIRMED"),
@@ -913,6 +1297,16 @@ def test_signal_journal_fails_closed_on_invalid_machine_contract(tmp_path, decis
         row["Decision"] = decision
     if reason is not None:
         row["DecisionReason"] = reason
+
+    with pytest.raises(journal_module.JournalIntegrityError) as caught:
+        record_snapshot_signals(_journal_snapshot(row), path=tmp_path / "journal.json")
+
+    assert caught.value.code == "JOURNAL_INVALID_SIGNAL"
+
+
+def test_signal_journal_accepts_canonical_neutral_without_recording(tmp_path):
+    row = _product_scan_row(copy="KANDYDAT WZROSTOWY")
+    row.update({"Decision": 0, "DecisionReason": "PROBABILITY_INSIDE_BAND"})
 
     assert record_snapshot_signals(_journal_snapshot(row), path=tmp_path / "journal.json") == 0
 
@@ -942,6 +1336,271 @@ def test_signal_journal_public_contract_rejects_explicit_non_ml_modes(mode):
 
     assert valid_machine_decision_contract(row) is False
     assert signal_direction(row) is None
+
+
+def test_signal_journal_missing_file_and_valid_empty_list_are_healthy(tmp_path):
+    missing = tmp_path / "missing.json"
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]", encoding="utf-8")
+
+    assert load_journal(missing) == []
+    assert load_journal(empty) == []
+
+
+def test_signal_journal_normalizes_unknown_error_codes():
+    error = journal_module.JournalIntegrityError("private path /tmp/secret")
+
+    assert journal_module.journal_error_code(error) == "JOURNAL_UNEXPECTED"
+
+
+def test_signal_journal_safe_loader_maps_unexpected_failure(monkeypatch):
+    def fail_load(path=journal_module.JOURNAL_PATH):
+        raise RuntimeError("private path /tmp/secret")
+
+    monkeypatch.setattr(journal_module, "load_journal", fail_load)
+
+    assert journal_module.safe_load_journal() == (None, "JOURNAL_UNEXPECTED")
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "[{broken",
+        '{"entries": []}',
+        '[{"id": "valid"}, 7]',
+        '[{"probability_up": NaN}]',
+        '[{"probability_up": Infinity}]',
+        '[{"probability_up": -Infinity}]',
+        '[{"probability_up": 1e999}]',
+    ],
+)
+def test_signal_journal_corrupt_content_fails_closed_without_overwrite(tmp_path, contents):
+    path = tmp_path / "journal.json"
+    path.write_text(contents, encoding="utf-8")
+    before = path.read_bytes()
+    row = _product_scan_row()
+    row.update({"Decision": 1, "DecisionReason": "LONG_CONFIRMED"})
+
+    with pytest.raises(journal_module.JournalIntegrityError) as caught:
+        record_snapshot_signals(_journal_snapshot(row), path=path)
+
+    assert caught.value.code == "JOURNAL_CORRUPT"
+    assert path.read_bytes() == before
+
+
+def test_signal_journal_read_error_fails_closed_without_overwrite(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    path.write_text("[]", encoding="utf-8")
+    before = path.read_bytes()
+    original_read_text = Path.read_text
+
+    def fail_target_read(self, *args, **kwargs):
+        if self == path:
+            raise OSError("simulated read failure")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_target_read)
+    row = _product_scan_row()
+    row.update({"Decision": 1, "DecisionReason": "LONG_CONFIRMED"})
+
+    with pytest.raises(journal_module.JournalIntegrityError) as caught:
+        record_snapshot_signals(_journal_snapshot(row), path=path)
+
+    assert caught.value.code == "JOURNAL_READ_FAILED"
+    assert path.read_bytes() == before
+
+
+def test_signal_journal_writer_rejects_nonfinite_json_without_touching_existing_file(tmp_path):
+    path = tmp_path / "journal.json"
+    path.write_text('[{"id": "history"}]', encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(journal_module.JournalIntegrityError) as caught:
+        save_journal([{"id": "history", "score": float("nan")}], path=path)
+
+    assert caught.value.code == "JOURNAL_WRITE_FAILED"
+    assert path.read_bytes() == before
+
+
+def test_signal_journal_replace_failure_preserves_existing_file(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    path.write_text('[{"id": "history"}]', encoding="utf-8")
+    before = path.read_bytes()
+    original_replace = Path.replace
+
+    def fail_target_replace(self, target):
+        if target == path:
+            raise OSError("simulated replace failure")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", fail_target_replace)
+
+    with pytest.raises(journal_module.JournalIntegrityError) as caught:
+        save_journal([{"id": "new"}], path=path)
+
+    assert caught.value.code == "JOURNAL_WRITE_FAILED"
+    assert path.read_bytes() == before
+    assert not path.with_suffix(".tmp").exists()
+
+
+def test_signal_journal_write_failure_preserves_existing_file(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    path.write_text('[{"id": "history"}]', encoding="utf-8")
+    before = path.read_bytes()
+    original_write_text = Path.write_text
+
+    def fail_temporary_write(self, *args, **kwargs):
+        if self == path.with_suffix(".tmp"):
+            raise OSError("simulated write failure")
+        return original_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_temporary_write)
+
+    with pytest.raises(journal_module.JournalIntegrityError) as caught:
+        save_journal([{"id": "new"}], path=path)
+
+    assert caught.value.code == "JOURNAL_WRITE_FAILED"
+    assert path.read_bytes() == before
+    assert not path.with_suffix(".tmp").exists()
+
+
+@pytest.mark.parametrize("entries", [{"id": "not-a-list"}, [{"id": "ok"}, 7]])
+def test_signal_journal_writer_rejects_invalid_root_shape(tmp_path, entries):
+    path = tmp_path / "journal.json"
+    path.write_text('[{"id": "history"}]', encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(journal_module.JournalIntegrityError) as caught:
+        save_journal(entries, path=path)
+
+    assert caught.value.code == "JOURNAL_WRITE_FAILED"
+    assert path.read_bytes() == before
+
+
+def test_signal_journal_lock_failure_is_controlled(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    path.write_text('[{"id": "history"}]', encoding="utf-8")
+    before = path.read_bytes()
+    original_open = Path.open
+
+    def fail_lock_open(self, *args, **kwargs):
+        if self == path.with_suffix(".json.lock"):
+            raise OSError("private lock path")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_lock_open)
+
+    with pytest.raises(journal_module.JournalIntegrityError) as caught:
+        save_journal([{"id": "new"}], path=path)
+
+    assert caught.value.code == "JOURNAL_LOCK_FAILED"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("DecisionReason", "SHORT_CONFIRMED"),
+        ("P(wzrost)", -0.1),
+        ("P(wzrost)", 1.1),
+        ("P(wzrost)", np.nan),
+        ("P(wzrost)", np.inf),
+        ("P(wzrost)", -np.inf),
+        ("P(wzrost)", None),
+        ("P(wzrost)", True),
+        ("P(wzrost)", "0.61"),
+        ("Oczekiwany ruch", np.nan),
+        ("Oczekiwany ruch", np.inf),
+        ("Oczekiwany ruch", -np.inf),
+        ("Oczekiwany ruch", None),
+        ("Oczekiwany ruch", True),
+        ("Oczekiwany ruch", "0.03"),
+        ("Horyzont", True),
+        ("Horyzont", "5"),
+        ("Horyzont", 5.0),
+        ("Horyzont", 1.2),
+        ("Horyzont", 0),
+        ("Horyzont", -5),
+        ("Cena", True),
+        ("Cena", "100"),
+        ("Cena", np.nan),
+        ("Cena", np.inf),
+        ("Symbol", ""),
+        ("Symbol", "   "),
+        ("Data", "not-a-date"),
+        ("Data", 0),
+        ("Data", 1),
+        ("Data", 1.5),
+        ("Data", True),
+        ("Data", "today"),
+        ("Data", "now"),
+        ("Data", pd.NaT),
+        ("Data", None),
+    ],
+)
+def test_signal_journal_invalid_directional_row_fails_closed(tmp_path, field, value):
+    path = tmp_path / "journal.json"
+    path.write_text('[{"id": "history"}]', encoding="utf-8")
+    before = path.read_bytes()
+    row = _product_scan_row()
+    row.update({"Decision": 1, "DecisionReason": "LONG_CONFIRMED", field: value})
+
+    with pytest.raises(journal_module.JournalIntegrityError) as caught:
+        record_snapshot_signals(_journal_snapshot(row), path=path)
+
+    assert caught.value.code == "JOURNAL_INVALID_SIGNAL"
+    assert path.read_bytes() == before
+    assert not path.with_suffix(".json.lock").exists()
+
+
+@pytest.mark.parametrize("probability", [0.0, 1.0, np.float64(0.61)])
+@pytest.mark.parametrize("expected_return", [0.0, -0.03, np.float64(0.03)])
+@pytest.mark.parametrize(
+    "signal_date",
+    [
+        "2026-01-10",
+        "2026-01-10T12:00:00+00:00",
+        date(2026, 1, 10),
+        datetime(2026, 1, 10, 12, 0),
+        pd.Timestamp("2026-01-10T12:00:00+00:00"),
+    ],
+)
+def test_signal_journal_accepts_strict_numeric_and_canonical_date_forms(
+    tmp_path, probability, expected_return, signal_date,
+):
+    row = _product_scan_row(probability=probability, expected_return=expected_return)
+    row.update({
+        "Decision": 1,
+        "DecisionReason": "LONG_CONFIRMED",
+        "Data": signal_date,
+    })
+
+    assert record_snapshot_signals(
+        _journal_snapshot(row), path=tmp_path / "journal.json",
+    ) == 1
+
+
+def test_signal_journal_invalid_later_directional_row_prevents_partial_save(tmp_path):
+    path = tmp_path / "journal.json"
+    path.write_text('[{"id": "history"}]', encoding="utf-8")
+    before = path.read_bytes()
+    valid = _product_scan_row()
+    valid.update({"Decision": 1, "DecisionReason": "LONG_CONFIRMED"})
+    invalid = dict(valid, Symbol="BROKEN", Cena=float("nan"))
+
+    with pytest.raises(journal_module.JournalIntegrityError) as caught:
+        record_snapshot_signals(_journal_snapshot(valid, invalid), path=path)
+
+    assert caught.value.code == "JOURNAL_INVALID_SIGNAL"
+    assert path.read_bytes() == before
+    assert not path.with_suffix(".json.lock").exists()
+
+
+def test_signal_journal_complete_snapshot_without_records_is_noop(tmp_path):
+    path = tmp_path / "journal.json"
+
+    assert record_snapshot_signals({"status": "complete", "records": None}, path=path) == 0
+    assert not path.exists()
 
 
 @pytest.mark.parametrize(
@@ -1116,6 +1775,21 @@ def test_schema_6_snapshot_is_stale_after_machine_contract_upgrade():
     assert snapshot_is_stale(snapshot) is True
 
 
+@pytest.mark.parametrize("journal_status", ["NOT_ATTEMPTED", "OK", "FAILED", "NOT_APPLICABLE"])
+def test_journal_observability_metadata_does_not_change_snapshot_freshness(journal_status):
+    snapshot = _fresh_schema_snapshot([
+        _schema_record(mode="FAST"),
+        _schema_record(mode="ML", decision=1, reason="LONG_CONFIRMED"),
+    ])
+    snapshot["journal_status"] = journal_status
+    if journal_status == "OK":
+        snapshot["journal_added"] = 1
+    if journal_status == "FAILED":
+        snapshot["journal_error"] = "JOURNAL_WRITE_FAILED"
+
+    assert snapshot_is_stale(snapshot) is False
+
+
 def test_legacy_journal_entries_load_and_refresh_without_machine_provenance(tmp_path, monkeypatch):
     path = tmp_path / "journal.json"
     legacy = {
@@ -1144,6 +1818,334 @@ def test_legacy_journal_entries_load_and_refresh_without_machine_provenance(tmp_
     assert refreshed[0]["direction"] == "LONG"
     assert "decision" not in refreshed[0]
     assert journal_summary(refreshed)["total"] == 1
+
+
+def test_signal_journal_refresh_corrupt_file_fails_without_overwrite(tmp_path):
+    path = tmp_path / "journal.json"
+    path.write_text('[{"id": "broken"}', encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(journal_module.JournalIntegrityError) as caught:
+        refresh_journal_results(path=path)
+
+    assert caught.value.code == "JOURNAL_CORRUPT"
+    assert path.read_bytes() == before
+
+
+def test_signal_journal_refresh_rereads_under_lock_and_preserves_new_entry(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    legacy = {
+        "id": "2026-01-10|OLD|5|LONG",
+        "signal_date": "2026-01-10",
+        "symbol": "OLD",
+        "horizon": 5,
+        "direction": "LONG",
+        "execution": "NEXT_OPEN",
+        "signal_price": 100.0,
+        "entry_date": None,
+        "entry_price": None,
+        "status": "open",
+        "bars_elapsed": 0,
+        "bars_remaining": 5,
+    }
+    path.write_text(json.dumps([legacy]), encoding="utf-8")
+    dates = pd.bdate_range("2026-01-09", periods=12)
+    prices = np.linspace(99, 111, len(dates))
+    history = pd.DataFrame({"Open": prices, "Close": prices}, index=dates)
+    new_row = _product_scan_row()
+    new_row.update({"Symbol": "NEW", "Decision": 1, "DecisionReason": "LONG_CONFIRMED"})
+
+    def download_and_record(symbol, years=3):
+        assert record_snapshot_signals(_journal_snapshot(new_row), path=path) == 1
+        return history
+
+    monkeypatch.setattr("market_oracle.journal.download_history", download_and_record)
+
+    refreshed, errors = refresh_journal_results(path=path)
+
+    assert errors == {}
+    by_symbol = {entry["symbol"]: entry for entry in refreshed}
+    assert set(by_symbol) == {"OLD", "NEW"}
+    assert by_symbol["OLD"]["status"] == "closed"
+    assert by_symbol["NEW"]["status"] == "open"
+
+
+def test_signal_journal_refresh_discards_partial_evaluation_on_error(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    entry = {
+        "id": "2026-01-10|OLD|5|LONG",
+        "signal_date": "2026-01-10",
+        "symbol": "OLD",
+        "horizon": 5,
+        "direction": "LONG",
+        "status": "open",
+        "bars_elapsed": 0,
+        "bars_remaining": 5,
+    }
+    path.write_text(json.dumps([entry]), encoding="utf-8")
+    before = path.read_bytes()
+    monkeypatch.setattr(journal_module, "download_history", lambda symbol, years=3: pd.DataFrame())
+
+    def mutate_then_fail(candidate, history):
+        candidate["status"] = "closed"
+        candidate["bars_elapsed"] = 5
+        raise ValueError("bad history")
+
+    monkeypatch.setattr(journal_module, "_evaluate_entry", mutate_then_fail)
+
+    refreshed, errors = refresh_journal_results(path=path)
+
+    assert errors == {"OLD": "bad history"}
+    assert refreshed == [entry]
+    assert path.read_bytes() == before
+
+
+def test_signal_journal_concurrent_record_processes_preserve_both_entries(tmp_path):
+    path = tmp_path / "journal.json"
+    context = multiprocessing.get_context("fork")
+    start_event = context.Event()
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_journal_record_worker,
+            args=(str(path), symbol, start_event, result_queue),
+        )
+        for symbol in ("AAA", "BBB")
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(timeout=10)
+
+    results = [result_queue.get(timeout=2) for _ in processes]
+    assert all(not process.is_alive() and process.exitcode == 0 for process in processes)
+    assert sorted(results) == [("ok", "AAA", 1), ("ok", "BBB", 1)]
+    assert {entry["symbol"] for entry in load_journal(path)} == {"AAA", "BBB"}
+
+
+def test_signal_journal_refresh_download_is_outside_lock_and_preserves_concurrent_record(tmp_path):
+    path = tmp_path / "journal.json"
+    initial = {
+        "id": "2026-01-10|OLD|5|LONG",
+        "signal_date": "2026-01-10",
+        "symbol": "OLD",
+        "horizon": 5,
+        "direction": "LONG",
+        "execution": "NEXT_OPEN",
+        "signal_price": 100.0,
+        "entry_date": None,
+        "entry_price": None,
+        "status": "open",
+        "bars_elapsed": 0,
+        "bars_remaining": 5,
+    }
+    path.write_text(json.dumps([initial]), encoding="utf-8")
+    context = multiprocessing.get_context("fork")
+    download_started = context.Event()
+    download_release = context.Event()
+    refresh_results = context.Queue()
+    record_results = context.Queue()
+    refresh_process = context.Process(
+        target=_journal_refresh_worker,
+        args=(str(path), download_started, download_release, refresh_results),
+    )
+    refresh_process.start()
+    assert download_started.wait(timeout=5)
+
+    record_start = context.Event()
+    record_process = context.Process(
+        target=_journal_record_worker,
+        args=(str(path), "NEW", record_start, record_results),
+    )
+    record_process.start()
+    record_start.set()
+    record_process.join(timeout=3)
+    record_finished_during_download = not record_process.is_alive()
+
+    download_release.set()
+    record_process.join(timeout=10)
+    refresh_process.join(timeout=10)
+
+    assert record_finished_during_download is True
+    assert record_process.exitcode == 0
+    assert refresh_process.exitcode == 0
+    assert record_results.get(timeout=2) == ("ok", "NEW", 1)
+    refresh_result = refresh_results.get(timeout=2)
+    assert refresh_result[0] == "ok"
+    assert refresh_result[2] == {}
+    by_symbol = {entry["symbol"]: entry for entry in load_journal(path)}
+    assert set(by_symbol) == {"OLD", "NEW"}
+    assert by_symbol["OLD"]["status"] == "closed"
+    assert by_symbol["NEW"]["status"] == "open"
+
+
+def test_signal_journal_stale_refresh_cannot_overwrite_newer_open_lifecycle(tmp_path):
+    path = tmp_path / "journal.json"
+    initial = {
+        "id": "2026-01-10|OLD|20|LONG",
+        "signal_date": "2026-01-10",
+        "symbol": "OLD",
+        "horizon": 20,
+        "direction": "LONG",
+        "execution": "NEXT_OPEN",
+        "signal_price": 100.0,
+        "entry_date": None,
+        "entry_price": None,
+        "status": "open",
+        "bars_elapsed": 0,
+        "bars_remaining": 20,
+        "target_date": None,
+        "target_price": None,
+        "underlying_return": None,
+        "strategy_return": None,
+        "hit": None,
+        "evaluated_at": None,
+    }
+    path.write_text(json.dumps([initial]), encoding="utf-8")
+    context = multiprocessing.get_context("fork")
+    old_started = context.Event()
+    new_started = context.Event()
+    old_release = context.Event()
+    new_release = context.Event()
+    old_results = context.Queue()
+    new_results = context.Queue()
+    old_process = context.Process(
+        target=_journal_ordered_refresh_worker,
+        args=(str(path), 8, old_started, old_release, old_results),
+    )
+    new_process = context.Process(
+        target=_journal_ordered_refresh_worker,
+        args=(str(path), 12, new_started, new_release, new_results),
+    )
+    old_process.start()
+    new_process.start()
+    assert old_started.wait(timeout=5)
+    assert new_started.wait(timeout=5)
+
+    new_release.set()
+    new_process.join(timeout=10)
+    assert not new_process.is_alive() and new_process.exitcode == 0
+    new_result = new_results.get(timeout=2)
+    assert new_result[0] == "ok"
+    assert new_result[2]["bars_elapsed"] == 9
+
+    new_lifecycle = {
+        field: new_result[2].get(field)
+        for field in (
+            "execution", "entry_date", "entry_price", "status", "bars_elapsed",
+            "bars_remaining", "target_date", "target_price", "underlying_return",
+            "strategy_return", "hit", "evaluated_at",
+        )
+    }
+    old_release.set()
+    old_process.join(timeout=10)
+    assert not old_process.is_alive() and old_process.exitcode == 0
+    assert old_results.get(timeout=2)[0] == "ok"
+
+    final_entry = load_journal(path)[0]
+    final_lifecycle = {field: final_entry.get(field) for field in new_lifecycle}
+    assert final_lifecycle == new_lifecycle
+    assert final_entry["bars_elapsed"] == 9
+    assert final_entry["bars_remaining"] == 11
+
+
+def test_signal_journal_refresh_updates_unchanged_baseline(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    initial = {
+        "id": "2026-01-10|OLD|20|LONG",
+        "signal_date": "2026-01-10",
+        "symbol": "OLD",
+        "horizon": 20,
+        "direction": "LONG",
+        "execution": "NEXT_OPEN",
+        "signal_price": 100.0,
+        "entry_date": None,
+        "entry_price": None,
+        "status": "open",
+        "bars_elapsed": 0,
+        "bars_remaining": 20,
+    }
+    path.write_text(json.dumps([initial]), encoding="utf-8")
+    dates = pd.bdate_range("2026-01-09", periods=12)
+    prices = np.arange(99.0, 111.0)
+    history = pd.DataFrame({"Open": prices, "Close": prices}, index=dates)
+    monkeypatch.setattr(journal_module, "download_history", lambda symbol, years=3: history)
+
+    refreshed, errors = refresh_journal_results(path=path)
+
+    assert errors == {}
+    assert refreshed[0]["bars_elapsed"] == 9
+    assert refreshed[0]["bars_remaining"] == 11
+    assert load_journal(path)[0] == refreshed[0]
+
+
+def test_signal_journal_closed_lifecycle_wins_over_stale_open_refresh(tmp_path):
+    path = tmp_path / "journal.json"
+    initial = {
+        "id": "2026-01-10|OLD|5|LONG",
+        "signal_date": "2026-01-10",
+        "symbol": "OLD",
+        "horizon": 5,
+        "direction": "LONG",
+        "execution": "NEXT_OPEN",
+        "signal_price": 100.0,
+        "entry_date": None,
+        "entry_price": None,
+        "status": "open",
+        "bars_elapsed": 0,
+        "bars_remaining": 5,
+        "target_date": None,
+        "target_price": None,
+        "underlying_return": None,
+        "strategy_return": None,
+        "hit": None,
+        "evaluated_at": None,
+    }
+    path.write_text(json.dumps([initial]), encoding="utf-8")
+    context = multiprocessing.get_context("fork")
+    stale_started = context.Event()
+    closing_started = context.Event()
+    stale_release = context.Event()
+    closing_release = context.Event()
+    stale_results = context.Queue()
+    closing_results = context.Queue()
+    stale_process = context.Process(
+        target=_journal_ordered_refresh_worker,
+        args=(str(path), 5, stale_started, stale_release, stale_results),
+    )
+    closing_process = context.Process(
+        target=_journal_ordered_refresh_worker,
+        args=(str(path), 12, closing_started, closing_release, closing_results),
+    )
+    stale_process.start()
+    closing_process.start()
+    assert stale_started.wait(timeout=5)
+    assert closing_started.wait(timeout=5)
+
+    closing_release.set()
+    closing_process.join(timeout=10)
+    assert not closing_process.is_alive() and closing_process.exitcode == 0
+    closing_result = closing_results.get(timeout=2)
+    assert closing_result[0] == "ok"
+    assert closing_result[2]["status"] == "closed"
+    closed_lifecycle = {
+        field: closing_result[2].get(field)
+        for field in (
+            "execution", "entry_date", "entry_price", "status", "bars_elapsed",
+            "bars_remaining", "target_date", "target_price", "underlying_return",
+            "strategy_return", "hit", "evaluated_at",
+        )
+    }
+
+    stale_release.set()
+    stale_process.join(timeout=10)
+    assert not stale_process.is_alive() and stale_process.exitcode == 0
+    assert stale_results.get(timeout=2)[0] == "ok"
+
+    final_entry = load_journal(path)[0]
+    assert {field: final_entry.get(field) for field in closed_lifecycle} == closed_lifecycle
+    assert final_entry["status"] == "closed"
 
 
 def test_signal_journal_records_and_evaluates(tmp_path, monkeypatch):

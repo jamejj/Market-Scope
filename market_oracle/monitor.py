@@ -10,6 +10,7 @@ import pandas as pd
 
 from .catalog import CATEGORIES, CRYPTO, ETF_CATEGORIES
 from .engine import scan_market, scan_market_fast, scan_market_multi
+from .journal import journal_error_code, record_snapshot_signals
 from .product_verdict import product_forecast_verdict
 
 
@@ -129,6 +130,10 @@ def load_snapshot(path: Path = SNAPSHOT_PATH) -> dict | None:
         return None
 
 
+def _is_canonical_snapshot_path(path: Path) -> bool:
+    return path.resolve() == SNAPSHOT_PATH.resolve()
+
+
 def run_signal_scan(
     symbols: list[str] | None = None,
     horizon: int = 20,
@@ -158,6 +163,7 @@ def run_signal_scan(
         candidate_pipeline = pipeline_fingerprint()
     except Exception as exc:
         candidate_pipeline = {"error": str(exc)}
+    canonical_snapshot = _is_canonical_snapshot_path(path)
     payload = {
         "status": "running", "started_at": started.isoformat(), "updated_at": None,
         "schema_version": SCAN_SCHEMA_VERSION,
@@ -167,6 +173,7 @@ def run_signal_scan(
         "fast_completed": 0, "ml_completed": 0, "ml_total": 0,
         "horizon": horizon, "horizons": list(horizons or (horizon,)), "years": years, "completed": 0, "total": len(universe),
         "records": [], "errors": errors,
+        "journal_status": "NOT_ATTEMPTED" if canonical_snapshot else "NOT_APPLICABLE",
     }
     save_snapshot(payload, path)
 
@@ -214,14 +221,23 @@ def run_signal_scan(
             "total": len(universe) + len(shortlist), "records": rows, "errors": errors,
         })
         save_snapshot(payload, path)
-        if path == SNAPSHOT_PATH:
+        if canonical_snapshot:
+            attempted_at = datetime.now(timezone.utc).isoformat()
             try:
-                from .journal import record_snapshot_signals
-
-                record_snapshot_signals(payload)
-            except Exception:
-                # Journal is diagnostic; a write/evaluation issue should never destroy the market scan.
-                pass
+                added = record_snapshot_signals(payload)
+                payload.update({
+                    "journal_status": "OK",
+                    "journal_added": added,
+                    "journal_attempted_at": attempted_at,
+                })
+                payload.pop("journal_error", None)
+            except Exception as exc:
+                payload.update({
+                    "journal_status": "FAILED",
+                    "journal_error": journal_error_code(exc),
+                    "journal_attempted_at": attempted_at,
+                })
+                payload.pop("journal_added", None)
             payload["forward_ledger_status"] = "not_recorded_generic_two_stage_scan"
             payload["forward_ledger_note"] = "Candidate v1 proof ledger uses run_candidate_forward.py with a frozen full-ML universe."
             save_snapshot(payload, path)

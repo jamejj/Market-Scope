@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import copy
+import fcntl
 import json
-from datetime import datetime, timezone
+import math
+from contextlib import contextmanager
+from datetime import date, datetime, timezone
+from numbers import Real
 from pathlib import Path
 
 import pandas as pd
@@ -15,21 +20,135 @@ from .product_verdict import (
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 JOURNAL_PATH = DATA_DIR / "signal_journal.json"
+JOURNAL_LOCK_PATH = DATA_DIR / "signal_journal.lock"
+JOURNAL_ERROR_CODES = frozenset({
+    "JOURNAL_CORRUPT",
+    "JOURNAL_READ_FAILED",
+    "JOURNAL_WRITE_FAILED",
+    "JOURNAL_LOCK_FAILED",
+    "JOURNAL_INVALID_SIGNAL",
+    "JOURNAL_UNEXPECTED",
+})
+REFRESH_CONFLICT_FIELDS = (
+    "symbol", "signal_date", "horizon", "direction", "execution",
+    "entry_date", "entry_price", "status", "bars_elapsed", "bars_remaining",
+    "target_date", "target_price", "underlying_return", "strategy_return",
+    "hit", "evaluated_at",
+)
+REFRESH_LIFECYCLE_FIELDS = (
+    "entry_date", "entry_price", "execution", "status", "bars_elapsed",
+    "bars_remaining", "target_date", "target_price", "underlying_return",
+    "strategy_return", "hit", "evaluated_at",
+)
+
+
+class JournalIntegrityError(RuntimeError):
+    """Controlled Journal storage or input-integrity failure."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+def journal_error_code(exc: BaseException) -> str:
+    if isinstance(exc, JournalIntegrityError) and exc.code in JOURNAL_ERROR_CODES:
+        return exc.code
+    return "JOURNAL_UNEXPECTED"
+
+
+def _refresh_conflict_token(entry: dict) -> tuple:
+    return tuple(entry.get(field) for field in REFRESH_CONFLICT_FIELDS)
+
+
+def _reject_nonfinite_json(value: str):
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _has_nonfinite_number(value) -> bool:
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, list):
+        return any(_has_nonfinite_number(item) for item in value)
+    if isinstance(value, dict):
+        return any(_has_nonfinite_number(item) for item in value.values())
+    return False
 
 
 def load_journal(path: Path = JOURNAL_PATH) -> list[dict]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return []
-    return data if isinstance(data, list) else []
+    except OSError as exc:
+        raise JournalIntegrityError("JOURNAL_READ_FAILED") from exc
+    try:
+        data = json.loads(raw, parse_constant=_reject_nonfinite_json)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise JournalIntegrityError("JOURNAL_CORRUPT") from exc
+    if (
+        not isinstance(data, list)
+        or any(not isinstance(entry, dict) for entry in data)
+        or _has_nonfinite_number(data)
+    ):
+        raise JournalIntegrityError("JOURNAL_CORRUPT")
+    return data
+
+
+def safe_load_journal(path: Path = JOURNAL_PATH) -> tuple[list[dict] | None, str | None]:
+    """Return UI-safe Journal state without turning failure into an empty Journal."""
+    try:
+        return load_journal(path), None
+    except Exception as exc:
+        return None, journal_error_code(exc)
+
+
+def _journal_lock_path(path: Path) -> Path:
+    if path.resolve() == JOURNAL_PATH.resolve():
+        return JOURNAL_LOCK_PATH
+    return path.with_suffix(path.suffix + ".lock")
+
+
+@contextmanager
+def _journal_lock(path: Path):
+    lock_path = _journal_lock_path(path)
+    lock_file = None
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = lock_path.open("a+")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    except OSError as exc:
+        if lock_file is not None:
+            lock_file.close()
+        raise JournalIntegrityError("JOURNAL_LOCK_FAILED") from exc
+    try:
+        yield
+    finally:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
+
+
+def _save_journal_unlocked(entries: list[dict], path: Path) -> None:
+    temporary = path.with_suffix(".tmp")
+    try:
+        if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+            raise ValueError("Journal root must be a list of objects")
+        serialized = json.dumps(entries, ensure_ascii=False, indent=2, allow_nan=False)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(serialized, encoding="utf-8")
+        temporary.replace(path)
+    except (OSError, TypeError, ValueError) as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise JournalIntegrityError("JOURNAL_WRITE_FAILED") from exc
 
 
 def save_journal(entries: list[dict], path: Path = JOURNAL_PATH) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    with _journal_lock(path):
+        _save_journal_unlocked(entries, path)
 
 
 def valid_machine_decision_contract(row: dict) -> bool:
@@ -45,13 +164,103 @@ def signal_direction(row: dict) -> str | None:
     return None
 
 
-def _signal_date(row: dict, snapshot: dict) -> str:
-    value = row.get("Data") or snapshot.get("updated_at") or snapshot.get("started_at")
-    return str(pd.Timestamp(value).date())
+def _signal_date(row: dict) -> str:
+    value = row.get("Data")
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            if len(text) == 10:
+                return date.fromisoformat(text).isoformat()
+            if len(text) > 10 and text[10] in {"T", " "}:
+                return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+        except ValueError as exc:
+            raise JournalIntegrityError("JOURNAL_INVALID_SIGNAL") from exc
+        raise JournalIntegrityError("JOURNAL_INVALID_SIGNAL")
+    if isinstance(value, (pd.Timestamp, datetime, date)) and pd.isna(value):
+        raise JournalIntegrityError("JOURNAL_INVALID_SIGNAL")
+    if isinstance(value, pd.Timestamp):
+        return value.date().isoformat()
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    raise JournalIntegrityError("JOURNAL_INVALID_SIGNAL")
 
 
-def _entry_id(row: dict, snapshot: dict, direction: str) -> str:
-    return f"{_signal_date(row, snapshot)}|{row.get('Symbol')}|{int(row.get('Horyzont', 0))}|{direction}"
+def _strict_finite_real(value) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise JournalIntegrityError("JOURNAL_INVALID_SIGNAL")
+    number = float(value)
+    if not math.isfinite(number):
+        raise JournalIntegrityError("JOURNAL_INVALID_SIGNAL")
+    return number
+
+
+def _entry_id(signal_date: str, symbol: str, horizon: int, direction: str) -> str:
+    return f"{signal_date}|{symbol}|{horizon}|{direction}"
+
+
+def _directional_entry(row: dict, created_at: str) -> dict | None:
+    if not isinstance(row, dict):
+        raise JournalIntegrityError("JOURNAL_INVALID_SIGNAL")
+    if row.get("Tryb analizy") != "ML":
+        return None
+
+    state = persisted_machine_decision_state(row)
+    if state is MachineDecisionState.INVALID:
+        raise JournalIntegrityError("JOURNAL_INVALID_SIGNAL")
+    if state is MachineDecisionState.NEUTRAL:
+        return None
+
+    probability = _strict_finite_real(row.get("P(wzrost)"))
+    expected_return = _strict_finite_real(row.get("Oczekiwany ruch"))
+    horizon = row.get("Horyzont")
+    price = row.get("Cena")
+    symbol = row.get("Symbol")
+    if not 0.0 <= probability <= 1.0:
+        raise JournalIntegrityError("JOURNAL_INVALID_SIGNAL")
+    if type(horizon) is not int or horizon <= 0:
+        raise JournalIntegrityError("JOURNAL_INVALID_SIGNAL")
+    if isinstance(price, bool) or not isinstance(price, Real) or not math.isfinite(float(price)):
+        raise JournalIntegrityError("JOURNAL_INVALID_SIGNAL")
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise JournalIntegrityError("JOURNAL_INVALID_SIGNAL")
+
+    direction = state.value
+    signal_date = _signal_date(row)
+    normalized_symbol = symbol.strip().upper()
+    return {
+        "id": _entry_id(signal_date, normalized_symbol, horizon, direction),
+        "created_at": created_at,
+        "signal_date": signal_date,
+        "symbol": normalized_symbol,
+        "asset_class": row.get("Klasa", "—"),
+        "horizon": horizon,
+        "direction": direction,
+        "execution": "NEXT_OPEN",
+        "signal_price": float(price),
+        "entry_date": None,
+        "entry_price": None,
+        "setup": row.get("Setup", "—"),
+        "label": row.get("Ocena", "—"),
+        "decision": row["Decision"],
+        "decision_reason": row["DecisionReason"],
+        "probability_up": probability,
+        "expected_return": expected_return,
+        "auc": row.get("AUC walidacji"),
+        "brier": row.get("Brier"),
+        "quality": row.get("Jakość modelu"),
+        "score": row.get("Score"),
+        "status": "open",
+        "bars_elapsed": 0,
+        "bars_remaining": horizon,
+        "target_date": None,
+        "target_price": None,
+        "underlying_return": None,
+        "strategy_return": None,
+        "hit": None,
+        "evaluated_at": None,
+    }
 
 
 def record_snapshot_signals(snapshot: dict, path: Path = JOURNAL_PATH) -> int:
@@ -59,63 +268,25 @@ def record_snapshot_signals(snapshot: dict, path: Path = JOURNAL_PATH) -> int:
     if not snapshot or snapshot.get("status") != "complete":
         return 0
 
-    entries = load_journal(path)
-    known_ids = {entry.get("id") for entry in entries}
     created_at = snapshot.get("updated_at") or datetime.now(timezone.utc).isoformat()
-    added = 0
+    candidates = [
+        entry
+        for row in (snapshot.get("records") or [])
+        if (entry := _directional_entry(row, created_at)) is not None
+    ]
 
-    for row in snapshot.get("records", []):
-        if row.get("Tryb analizy") != "ML":
-            continue
-        direction = signal_direction(row)
-        if direction is None:
-            continue
-        try:
-            horizon = int(row.get("Horyzont", 0))
-            signal_price = float(row.get("Cena"))
-        except (TypeError, ValueError):
-            continue
-        entry_id = _entry_id(row, snapshot, direction)
-        if entry_id in known_ids:
-            continue
-        entries.append({
-            "id": entry_id,
-            "created_at": created_at,
-            "signal_date": _signal_date(row, snapshot),
-            "symbol": str(row.get("Symbol", "")).upper(),
-            "asset_class": row.get("Klasa", "—"),
-            "horizon": horizon,
-            "direction": direction,
-            "execution": "NEXT_OPEN",
-            "signal_price": signal_price,
-            "entry_date": None,
-            "entry_price": None,
-            "setup": row.get("Setup", "—"),
-            "label": row.get("Ocena", "—"),
-            "decision": row["Decision"],
-            "decision_reason": row["DecisionReason"],
-            "probability_up": row.get("P(wzrost)"),
-            "expected_return": row.get("Oczekiwany ruch"),
-            "auc": row.get("AUC walidacji"),
-            "brier": row.get("Brier"),
-            "quality": row.get("Jakość modelu"),
-            "score": row.get("Score"),
-            "status": "open",
-            "bars_elapsed": 0,
-            "bars_remaining": horizon,
-            "target_date": None,
-            "target_price": None,
-            "underlying_return": None,
-            "strategy_return": None,
-            "hit": None,
-            "evaluated_at": None,
-        })
-        known_ids.add(entry_id)
-        added += 1
-
-    if added:
-        save_journal(entries, path)
-    return added
+    with _journal_lock(path):
+        entries = load_journal(path)
+        known_ids = {entry.get("id") for entry in entries}
+        additions = []
+        for entry in candidates:
+            if entry["id"] in known_ids:
+                continue
+            additions.append(entry)
+            known_ids.add(entry["id"])
+        if additions:
+            _save_journal_unlocked(entries + additions, path)
+        return len(additions)
 
 
 def _evaluate_entry(entry: dict, history: pd.DataFrame) -> dict:
@@ -169,9 +340,11 @@ def _evaluate_entry(entry: dict, history: pd.DataFrame) -> dict:
 
 
 def refresh_journal_results(path: Path = JOURNAL_PATH, years: int = 3) -> tuple[list[dict], dict[str, str]]:
-    entries = load_journal(path)
+    with _journal_lock(path):
+        entries = copy.deepcopy(load_journal(path))
     errors: dict[str, str] = {}
     histories: dict[str, pd.DataFrame] = {}
+    evaluated_entries: list[dict] = []
 
     for entry in entries:
         if entry.get("status") == "closed":
@@ -179,15 +352,55 @@ def refresh_journal_results(path: Path = JOURNAL_PATH, years: int = 3) -> tuple[
         symbol = entry.get("symbol")
         if not symbol:
             continue
+        candidate = copy.deepcopy(entry)
         try:
             if symbol not in histories:
                 histories[symbol] = download_history(symbol, years=years)
-            _evaluate_entry(entry, histories[symbol])
+            _evaluate_entry(candidate, histories[symbol])
         except Exception as exc:
             errors[str(symbol)] = str(exc)
+        else:
+            evaluated_entries.append(candidate)
 
-    save_journal(entries, path)
-    return entries, errors
+    def entry_key(entry: dict):
+        entry_id = entry.get("id")
+        if isinstance(entry_id, str) and entry_id:
+            return ("id", entry_id)
+        return (
+            "legacy",
+            entry.get("signal_date"),
+            entry.get("symbol"),
+            entry.get("horizon"),
+            entry.get("direction"),
+        )
+
+    baseline_by_key = {entry_key(entry): entry for entry in entries}
+    evaluated_by_key = {entry_key(entry): entry for entry in evaluated_entries}
+    with _journal_lock(path):
+        latest_entries = load_journal(path)
+        changed = False
+        for latest in latest_entries:
+            key = entry_key(latest)
+            baseline = baseline_by_key.get(key)
+            evaluated = evaluated_by_key.get(key)
+            if (
+                baseline is None
+                or evaluated is None
+                or latest.get("status") == "closed"
+                or _refresh_conflict_token(latest) != _refresh_conflict_token(baseline)
+            ):
+                continue
+            lifecycle = {
+                field: evaluated[field]
+                for field in REFRESH_LIFECYCLE_FIELDS
+                if field in evaluated
+            }
+            if any(latest.get(field) != value for field, value in lifecycle.items()):
+                latest.update(lifecycle)
+                changed = True
+        if changed:
+            _save_journal_unlocked(latest_entries, path)
+        return latest_entries, errors
 
 
 def journal_summary(entries: list[dict]) -> dict:
