@@ -69,14 +69,22 @@ def finite_float(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def strict_finite_real(value: Any) -> float | None:
+    """Return a finite real number without coercing bools or strings."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 def has_complete_expected_return(forecast: dict) -> bool:
     """Return whether the product can safely evaluate the forecast direction."""
-    return finite_float(forecast.get("expected_return")) is not None
+    return strict_finite_real(forecast.get("expected_return")) is not None
 
 
 def finite_probability(value: Any) -> float | None:
     """Return a valid probability without changing generic numeric semantics."""
-    probability = finite_float(value)
+    probability = strict_finite_real(value)
     if probability is None or not 0.0 <= probability <= 1.0:
         return None
     return probability
@@ -95,6 +103,17 @@ def has_complete_product_forecast(forecast: dict) -> bool:
     return forecast_integrity_issue(forecast) is None
 
 
+def radar_ml_input_error_code(row: Any) -> str | None:
+    """Return a safe diagnostic code when an ML Radar row cannot be ranked."""
+    if not hasattr(row, "get") or row.get("Tryb analizy") != "ML":
+        return None
+    issue = forecast_integrity_issue({
+        "probability_up": row.get("P(wzrost)"),
+        "expected_return": row.get("Oczekiwany ruch"),
+    })
+    return f"RADAR_ML_INVALID_{issue}" if issue is not None else None
+
+
 def product_forecast_verdict(forecast: dict, *, source: str) -> SignalVerdict:
     """Apply the shared gate, failing closed when product inputs are incomplete.
 
@@ -102,7 +121,7 @@ def product_forecast_verdict(forecast: dict, *, source: str) -> SignalVerdict:
     out-of-range values never impersonate neutral values and therefore cannot
     produce a directional product verdict.
     """
-    expected_return = finite_float(forecast.get("expected_return"))
+    expected_return = strict_finite_real(forecast.get("expected_return"))
     probability = finite_probability(forecast.get("probability_up"))
     if expected_return is None or probability is None:
         return SignalVerdict(0, "INCOMPLETE_FORECAST", "OBSERWUJ")

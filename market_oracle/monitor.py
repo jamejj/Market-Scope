@@ -11,7 +11,7 @@ import pandas as pd
 from .catalog import CATEGORIES, CRYPTO, ETF_CATEGORIES
 from .engine import scan_market, scan_market_fast, scan_market_multi
 from .journal import journal_error_code, record_snapshot_signals
-from .product_verdict import product_forecast_verdict
+from .product_verdict import product_forecast_verdict, radar_ml_input_error_code
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -78,6 +78,21 @@ def _records(frame: pd.DataFrame) -> list[dict]:
             record["DecisionReason"] = verdict.reason
         records.append({key: _json_value(value) for key, value in record.items()})
     return records
+
+
+def _merge_rankable_records(
+    rows_by_key: dict[tuple[str, int], dict],
+    records: list[dict],
+    default_horizon: int,
+    errors: dict[str, str],
+) -> None:
+    for record in records:
+        symbol = str(record.get("Symbol") or "UNKNOWN")
+        error_code = radar_ml_input_error_code(record)
+        if error_code is not None:
+            errors[symbol] = error_code
+            continue
+        rows_by_key[(symbol, int(record.get("Horyzont") or default_horizon))] = record
 
 
 def select_deep_shortlist(frame: pd.DataFrame, limit: int = DEEP_SCAN_LIMIT) -> list[str]:
@@ -181,10 +196,9 @@ def run_signal_scan(
         scan_horizons = horizons or (horizon,)
         for completed, symbol in enumerate(universe, start=1):
             frame, failure = scan_market_fast([symbol], horizons=scan_horizons, years=fast_years)
-            if not frame.empty:
-                for record in _records(frame):
-                    rows_by_key[(record.get("Symbol", ""), int(record.get("Horyzont") or horizon))] = record
             errors.update(failure)
+            if not frame.empty:
+                _merge_rankable_records(rows_by_key, _records(frame), horizon, errors)
             rows = sorted(rows_by_key.values(), key=lambda row: (row.get("Horyzont") or horizon, -(row.get("Deep score") or row.get("Score") or float("-inf"))))
             payload.update({"completed": completed, "fast_completed": completed, "records": rows, "errors": errors})
             save_snapshot(payload, path)
@@ -203,10 +217,9 @@ def run_signal_scan(
                 frame, failure = scan_market_multi([symbol], horizons=scan_horizons, years=years)
             else:
                 frame, failure = scan_market([symbol], horizon=horizon, years=years)
-            if not frame.empty:
-                for record in _records(frame):
-                    rows_by_key[(record.get("Symbol", ""), int(record.get("Horyzont") or horizon))] = record
             errors.update(failure)
+            if not frame.empty:
+                _merge_rankable_records(rows_by_key, _records(frame), horizon, errors)
             rows = sorted(rows_by_key.values(), key=lambda row: (row.get("Horyzont") or horizon, -(row.get("Deep score") or row.get("Score") or float("-inf"))))
             payload.update({
                 "completed": len(universe) + ml_completed, "ml_completed": ml_completed,
@@ -264,7 +277,11 @@ def snapshot_is_stale(snapshot: dict | None, max_age_hours: float = 6) -> bool:
     from .journal import valid_machine_decision_contract
 
     if any(
-        record.get("Tryb analizy") == "ML" and not valid_machine_decision_contract(record)
+        record.get("Tryb analizy") == "ML"
+        and (
+            not valid_machine_decision_contract(record)
+            or radar_ml_input_error_code(record) is not None
+        )
         for record in records
         if isinstance(record, dict)
     ):

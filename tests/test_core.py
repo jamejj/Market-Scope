@@ -96,6 +96,7 @@ from market_oracle.monitor import (
     snapshot_is_stale,
 )
 import market_oracle.monitor as monitor_module
+import market_oracle.product_verdict as product_verdict_module
 import market_oracle.validation as validation_module
 from market_oracle.presentation import (
     ACCURACY_BASELINE_DELTA_LABEL,
@@ -344,6 +345,58 @@ def load_radar_view_functions():
     module = ast.fix_missing_locations(module)
     exec(compile(module, str(source_path), "exec"), namespace)
     return namespace
+
+
+def load_rankable_radar_frame():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    function = next(
+        (
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_rankable_radar_frame"
+        ),
+        None,
+    )
+    assert function is not None, "Radar ranking requires a testable ML input-integrity boundary."
+    namespace = {
+        "pd": pd,
+        "radar_ml_input_error_code": product_verdict_module.radar_ml_input_error_code,
+    }
+    future_annotations = ast.ImportFrom(
+        module="__future__",
+        names=[ast.alias(name="annotations")],
+        level=0,
+    )
+    module = ast.Module(body=[future_annotations, function], type_ignores=[])
+    module = ast.fix_missing_locations(module)
+    exec(compile(module, str(source_path), "exec"), namespace)
+    return namespace["_rankable_radar_frame"]
+
+
+def load_rankable_radar_snapshot():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    function_names = {"_rankable_radar_frame", "_rankable_radar_snapshot"}
+    functions = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in function_names
+    ]
+    assert {node.name for node in functions} == function_names, (
+        "Start requires a testable local snapshot boundary before guidance or top-row rendering."
+    )
+    namespace = {
+        "pd": pd,
+        "radar_ml_input_error_code": product_verdict_module.radar_ml_input_error_code,
+    }
+    future_annotations = ast.ImportFrom(
+        module="__future__",
+        names=[ast.alias(name="annotations")],
+        level=0,
+    )
+    module = ast.Module(body=[future_annotations, *functions], type_ignores=[])
+    module = ast.fix_missing_locations(module)
+    exec(compile(module, str(source_path), "exec"), namespace)
+    return namespace["_rankable_radar_snapshot"]
 
 
 def load_journal_ui_functions():
@@ -880,6 +933,92 @@ def test_background_monitor_persists_snapshot(tmp_path, monkeypatch):
     assert len(default_universe()) >= 100
 
 
+@pytest.mark.parametrize(
+    ("column", "value", "missing", "expected_code"),
+    [
+        ("P(wzrost)", 1.1, False, "RADAR_ML_INVALID_PROBABILITY"),
+        ("P(wzrost)", -0.1, False, "RADAR_ML_INVALID_PROBABILITY"),
+        ("P(wzrost)", np.nan, False, "RADAR_ML_INVALID_PROBABILITY"),
+        ("P(wzrost)", np.inf, False, "RADAR_ML_INVALID_PROBABILITY"),
+        ("P(wzrost)", -np.inf, False, "RADAR_ML_INVALID_PROBABILITY"),
+        ("P(wzrost)", True, False, "RADAR_ML_INVALID_PROBABILITY"),
+        ("P(wzrost)", "0.7", False, "RADAR_ML_INVALID_PROBABILITY"),
+        ("P(wzrost)", pd.NA, False, "RADAR_ML_INVALID_PROBABILITY"),
+        ("P(wzrost)", None, False, "RADAR_ML_INVALID_PROBABILITY"),
+        ("P(wzrost)", None, True, "RADAR_ML_INVALID_PROBABILITY"),
+        ("Oczekiwany ruch", np.nan, False, "RADAR_ML_INVALID_EXPECTED_RETURN"),
+        ("Oczekiwany ruch", np.inf, False, "RADAR_ML_INVALID_EXPECTED_RETURN"),
+        ("Oczekiwany ruch", -np.inf, False, "RADAR_ML_INVALID_EXPECTED_RETURN"),
+        ("Oczekiwany ruch", True, False, "RADAR_ML_INVALID_EXPECTED_RETURN"),
+        ("Oczekiwany ruch", "0.03", False, "RADAR_ML_INVALID_EXPECTED_RETURN"),
+        ("Oczekiwany ruch", pd.NA, False, "RADAR_ML_INVALID_EXPECTED_RETURN"),
+        ("Oczekiwany ruch", None, False, "RADAR_ML_INVALID_EXPECTED_RETURN"),
+        ("Oczekiwany ruch", None, True, "RADAR_ML_INVALID_EXPECTED_RETURN"),
+    ],
+)
+def test_background_monitor_invalid_ml_input_keeps_fast_fallback(
+    tmp_path, monkeypatch, column, value, missing, expected_code,
+):
+    fast = pd.DataFrame([{
+        "Symbol": "TEST", "Klasa": "USA", "Horyzont": 5, "Ocena": "OBSERWUJ",
+        "Score": 1.5, "Deep score": 70.0, "Setup score": 68.0, "Radar score": 5.0,
+        "P(wzrost)": 0.52, "Oczekiwany ruch": 0.01, "Tryb analizy": "FAST",
+    }])
+    ml = fast.copy()
+    ml["Tryb analizy"] = "ML"
+    ml["Score"] = 999.0
+    ml["Deep score"] = 999.0
+    if missing:
+        ml = ml.drop(columns=[column])
+    else:
+        ml[column] = value
+    path = tmp_path / "research-signals.json"
+    monkeypatch.setattr(monitor_module, "SNAPSHOT_PATH", tmp_path / "canonical.json")
+    monkeypatch.setattr(monitor_module, "LOCK_PATH", tmp_path / "signals.lock")
+    monkeypatch.setattr(monitor_module, "scan_market_fast", lambda symbols, horizons, years: (fast, {}))
+    monkeypatch.setattr(monitor_module, "scan_market_multi", lambda symbols, horizons, years: (ml, {}))
+
+    result = monitor_module.run_signal_scan(["TEST"], path=path, deep_limit=1)
+
+    assert [(row["Symbol"], row["Tryb analizy"]) for row in result["records"]] == [("TEST", "FAST")]
+    assert result["errors"] == {"TEST": expected_code}
+    serialized = path.read_text(encoding="utf-8")
+    assert "999.0" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("probability", "expected_return"),
+    [
+        (0.0, 0.0),
+        (1.0, -0.03),
+        (np.float64(0.61), np.float64(0.03)),
+        (np.float32(0.39), np.float32(-0.03)),
+    ],
+)
+def test_background_monitor_valid_real_ml_still_replaces_fast(
+    tmp_path, monkeypatch, probability, expected_return,
+):
+    fast = pd.DataFrame([{
+        "Symbol": "TEST", "Klasa": "USA", "Horyzont": 5, "Ocena": "OBSERWUJ",
+        "Score": 1.5, "Deep score": 70.0, "Setup score": 68.0, "Radar score": 5.0,
+        "P(wzrost)": 0.52, "Oczekiwany ruch": 0.01, "Tryb analizy": "FAST",
+    }])
+    ml = fast.copy()
+    ml["Tryb analizy"] = "ML"
+    ml["P(wzrost)"] = probability
+    ml["Oczekiwany ruch"] = expected_return
+    path = tmp_path / "research-signals.json"
+    monkeypatch.setattr(monitor_module, "SNAPSHOT_PATH", tmp_path / "canonical.json")
+    monkeypatch.setattr(monitor_module, "LOCK_PATH", tmp_path / "signals.lock")
+    monkeypatch.setattr(monitor_module, "scan_market_fast", lambda symbols, horizons, years: (fast, {}))
+    monkeypatch.setattr(monitor_module, "scan_market_multi", lambda symbols, horizons, years: (ml, {}))
+
+    result = monitor_module.run_signal_scan(["TEST"], path=path, deep_limit=1)
+
+    assert [(row["Symbol"], row["Tryb analizy"]) for row in result["records"]] == [("TEST", "ML")]
+    assert result["errors"] == {}
+
+
 def _run_test_signal_scan(tmp_path, monkeypatch, recorder, *, canonical=True):
     sample = pd.DataFrame([{
         "Symbol": "TEST", "Klasa": "USA", "Horyzont": 5, "Ocena": "OBSERWUJ", "Score": 1.5,
@@ -1203,6 +1342,59 @@ def _product_scan_row(
         "Score": 4.2,
         "Tryb analizy": mode,
     }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, np.bool_(True), "0.7", None, pd.NA, np.nan, np.inf, -np.inf, -0.1, 1.1],
+)
+def test_product_probability_boundary_rejects_non_strict_or_invalid_values(value):
+    assert finite_probability(value) is None
+    verdict = product_forecast_verdict(
+        {
+            "probability_up": value,
+            "expected_return": 0.03,
+            "quality": "WYSOKA",
+            "auc": 0.62,
+            "brier": 0.22,
+        },
+        source="RADAR",
+    )
+    assert (verdict.decision, verdict.reason) == (0, "INCOMPLETE_FORECAST")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, np.bool_(True), "0.03", None, pd.NA, np.nan, np.inf, -np.inf],
+)
+def test_product_expected_return_boundary_rejects_non_strict_or_nonfinite_values(value):
+    verdict = product_forecast_verdict(
+        {
+            "probability_up": 0.61,
+            "expected_return": value,
+            "quality": "WYSOKA",
+            "auc": 0.62,
+            "brier": 0.22,
+        },
+        source="RADAR",
+    )
+    assert (verdict.decision, verdict.reason) == (0, "INCOMPLETE_FORECAST")
+
+
+@pytest.mark.parametrize(
+    ("probability", "expected_return"),
+    [
+        (0.0, 0.0),
+        (1.0, -0.03),
+        (np.float64(0.61), np.float64(0.03)),
+        (np.float32(0.39), np.float32(-0.03)),
+    ],
+)
+def test_product_directional_boundary_accepts_finite_real_values(probability, expected_return):
+    assert product_verdict_module.forecast_integrity_issue({
+        "probability_up": probability,
+        "expected_return": expected_return,
+    }) is None
 
 
 @pytest.mark.parametrize(
@@ -1751,6 +1943,26 @@ def test_schema_7_checks_machine_contract_on_every_ml_record():
         _schema_record(mode="ML", decision=1, reason="LONG_CONFIRMED"),
         _schema_record(mode="ML", decision=1, reason="SHORT_CONFIRMED"),
     ])
+
+    assert snapshot_is_stale(snapshot) is True
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("P(wzrost)", 1.1),
+        ("P(wzrost)", True),
+        ("P(wzrost)", "0.7"),
+        ("P(wzrost)", np.inf),
+        ("Oczekiwany ruch", True),
+        ("Oczekiwany ruch", "0.03"),
+        ("Oczekiwany ruch", np.inf),
+    ],
+)
+def test_schema_7_ml_with_invalid_directional_input_is_stale_even_with_neutral_contract(column, value):
+    record = _schema_record(mode="ML", decision=0, reason="INCOMPLETE_FORECAST")
+    record[column] = value
+    snapshot = _fresh_schema_snapshot([record])
 
     assert snapshot_is_stale(snapshot) is True
 
@@ -5875,6 +6087,170 @@ def test_radar_csv_export_wiring_preserves_raw_probability_and_copy():
     assert raw.to_csv(index=False) == original_csv
     assert "KANDYDAT WZROSTOWY" in original_csv
     assert "1.1" in original_csv
+
+
+def test_rankable_radar_frame_excludes_invalid_ml_before_sorting_without_mutating_raw():
+    raw = pd.DataFrame([
+        _radar_ui_row(
+            "VALID_ML",
+            decision=1,
+            reason="LONG_CONFIRMED",
+            probability=0.61,
+        ),
+        _radar_ui_row(
+            "INVALID_P",
+            decision=0,
+            reason="INCOMPLETE_FORECAST",
+            probability=1.1,
+        ),
+        _radar_ui_row(
+            "INVALID_ER",
+            decision=0,
+            reason="INCOMPLETE_FORECAST",
+            probability=0.61,
+        ),
+        _radar_ui_row("FAST", mode="FAST", decision=None, reason=None),
+    ])
+    raw["Oczekiwany ruch"] = raw["Oczekiwany ruch"].astype(object)
+    raw.loc[raw["Symbol"].eq("INVALID_ER"), "Oczekiwany ruch"] = "0.03"
+    raw.loc[raw["Symbol"].eq("INVALID_P"), ["Score", "Deep score"]] = 999.0
+    original = raw.copy(deep=True)
+
+    rankable, errors = load_rankable_radar_frame()(raw, {"OLD": "EXISTING_ERROR"})
+
+    pd.testing.assert_frame_equal(raw, original)
+    assert rankable["Symbol"].tolist() == ["VALID_ML", "FAST"]
+    assert errors == {
+        "OLD": "EXISTING_ERROR",
+        "INVALID_P": "RADAR_ML_INVALID_PROBABILITY",
+        "INVALID_ER": "RADAR_ML_INVALID_EXPECTED_RETURN",
+    }
+    assert "999.0" not in rankable.to_csv(index=False)
+
+
+def test_radar_dashboard_and_custom_scan_filter_invalid_ml_before_ranking_or_export():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(source_path))
+    render = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_signal_dashboard"
+    )
+    rankable_calls = [
+        node for node in ast.walk(render)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_rankable_radar_frame"
+    ]
+    ensure_calls = [
+        node for node in ast.walk(render)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_ensure_radar_columns"
+    ]
+    custom_store = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Subscript)
+            and ast.unparse(target) == "st.session_state['custom_scan']"
+            for target in node.targets
+        )
+    )
+
+    assert rankable_calls
+    assert ensure_calls
+    assert min(node.lineno for node in rankable_calls) < min(node.lineno for node in ensure_calls)
+    assert ast.unparse(custom_store.value) == "_rankable_radar_frame(custom_frame, custom_errors)"
+
+
+def test_start_filters_stale_invalid_ml_before_guidance_and_top_snapshot_without_mutating_raw():
+    invalid_ml = _schema_record(mode="ML", decision=0, reason="INCOMPLETE_FORECAST")
+    invalid_ml.update({
+        "Symbol": "INVALID_ML",
+        "P(wzrost)": -0.1,
+        "Oczekiwany ruch": -0.25,
+        "Akcja radaru": "RYZYKO / UNIKAJ",
+        "Teza radaru": "skażony rekord o wysokim rankingu",
+        "Score": 999.0,
+        "Deep score": 999.0,
+    })
+    valid_fast = _schema_record(mode="FAST")
+    valid_fast.update({
+        "Symbol": "VALID_FAST",
+        "Akcja radaru": "FAST SHORTLIST",
+        "Teza radaru": "poprawny fallback discovery",
+        "Score": 1.0,
+        "Deep score": 1.0,
+    })
+    snapshot = _fresh_schema_snapshot([invalid_ml, valid_fast])
+    original = json.loads(json.dumps(snapshot))
+
+    assert snapshot_is_stale(snapshot) is True
+    raw_guidance = build_start_guidance(
+        snapshot=snapshot,
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+        radar_stale=True,
+    )
+    assert any(
+        card["id"] == "risk_alert" and card.get("symbol") == "INVALID_ML"
+        for card in raw_guidance["cards"]
+    )
+
+    safe_snapshot = load_rankable_radar_snapshot()(snapshot)
+    guidance = build_start_guidance(
+        snapshot=safe_snapshot,
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+        radar_stale=True,
+    )
+
+    assert snapshot == original
+    assert [row["Symbol"] for row in safe_snapshot["records"]] == ["VALID_FAST"]
+    assert safe_snapshot["errors"] == {
+        "INVALID_ML": "RADAR_ML_INVALID_PROBABILITY",
+    }
+    assert all(card.get("symbol") != "INVALID_ML" for card in guidance["cards"])
+    assert any(card.get("symbol") == "VALID_FAST" for card in guidance["cards"])
+
+
+def test_start_dashboard_uses_raw_snapshot_only_for_staleness_then_safe_local_copy_for_views():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    render = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_start_dashboard"
+    )
+    assignments = {
+        target.id: value
+        for node in render.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+        for value in [node.value]
+    }
+    guidance_call = next(
+        node for node in ast.walk(render)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "build_start_guidance"
+    )
+    render_call = next(
+        node for node in ast.walk(render)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "render_start_guidance"
+    )
+    guidance_keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in guidance_call.keywords}
+
+    assert ast.unparse(assignments["radar_stale"]) == "snapshot_is_stale(snapshot, max_age_hours=30)"
+    assert ast.unparse(assignments["start_snapshot"]) == "_rankable_radar_snapshot(snapshot)"
+    assert guidance_keywords["snapshot"] == "start_snapshot"
+    assert guidance_keywords["radar_stale"] == "radar_stale"
+    assert ast.unparse(render_call.args[1]) == "start_snapshot"
 
 
 def test_radar_copy_keeps_unknown_action_and_thesis_segments_unchanged():

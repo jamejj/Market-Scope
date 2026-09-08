@@ -28,7 +28,12 @@ from market_oracle.journal import (
     refresh_journal_results, safe_load_journal,
 )
 from market_oracle.monitor import default_universe, load_snapshot, snapshot_is_stale
-from market_oracle.product_verdict import MachineDecisionState, dataframe_machine_decision_state, finite_probability
+from market_oracle.product_verdict import (
+    MachineDecisionState,
+    dataframe_machine_decision_state,
+    finite_probability,
+    radar_ml_input_error_code,
+)
 from market_oracle.presentation import (
     ACCURACY_BASELINE_DELTA_LABEL,
     AUC_DIRECTION_HELP,
@@ -2033,6 +2038,8 @@ def render_start_dashboard(
     cockpit_error: str | None = None,
     automation_error: str | None = None,
 ) -> None:
+    radar_stale = snapshot_is_stale(snapshot, max_age_hours=30)
+    start_snapshot = _rankable_radar_snapshot(snapshot)
     coverage = (cockpit or {}).get("coverage") or {}
     portfolio = (cockpit or {}).get("portfolio") or {}
     summary = (cockpit or {}).get("summary") or {}
@@ -2055,7 +2062,7 @@ def render_start_dashboard(
     last_auto = stored.get("automation_status") or "—"
     launchd_text = "aktywny" if launchd.get("loaded") else "nieaktywny"
     launchd_exit = launchd.get("last_exit_code") if launchd.get("last_exit_code") is not None else "—"
-    scan_stage = scan_stage_summary(snapshot, universe_size)
+    scan_stage = scan_stage_summary(start_snapshot, universe_size)
 
     st.markdown(f"""
     <div class="command-hero">
@@ -2103,15 +2110,15 @@ def render_start_dashboard(
         st.warning(journal_failure_message(journal.get("error")))
 
     guidance = build_start_guidance(
-        snapshot=snapshot,
+        snapshot=start_snapshot,
         cockpit=cockpit,
         automation=automation,
         proof_state=state,
         journal=journal,
         universe_size=universe_size,
-        radar_stale=snapshot_is_stale(snapshot, max_age_hours=30),
+        radar_stale=radar_stale,
     )
-    render_start_guidance(guidance, snapshot, cockpit)
+    render_start_guidance(guidance, start_snapshot, cockpit)
 
     st.markdown(f"""
     <div class="dashboard-grid">
@@ -2844,6 +2851,39 @@ def _render_ranking_table(frame: pd.DataFrame, title: str, empty_text: str) -> N
     st.dataframe(display_frame.style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
 
 
+def _rankable_radar_frame(frame: pd.DataFrame, errors: dict | None = None) -> tuple[pd.DataFrame, dict]:
+    """Exclude ML rows with invalid directional inputs before any ranking."""
+    output = frame.copy()
+    updated_errors = dict(errors or {})
+    valid_positions: list[int] = []
+    for position, (_, row) in enumerate(output.iterrows()):
+        error_code = radar_ml_input_error_code(row)
+        if error_code is None:
+            valid_positions.append(position)
+            continue
+        symbol = str(row.get("Symbol") or "UNKNOWN")
+        updated_errors[symbol] = error_code
+    return output.iloc[valid_positions].copy(), updated_errors
+
+
+def _rankable_radar_snapshot(snapshot: dict | None) -> dict:
+    """Return a local Start-safe snapshot copy without mutating persisted state."""
+    output = dict(snapshot or {})
+    source_records = [
+        record for record in (output.get("records") or [])
+        if isinstance(record, dict)
+    ]
+    frame = pd.DataFrame(source_records)
+    rankable, errors = _rankable_radar_frame(frame, output.get("errors") or {})
+    valid_positions = set(rankable.index.tolist())
+    output["records"] = [
+        dict(record) for position, record in enumerate(source_records)
+        if position in valid_positions
+    ]
+    output["errors"] = errors
+    return output
+
+
 def _unique_symbols(frame: pd.DataFrame) -> int:
     return int(frame["Symbol"].nunique()) if "Symbol" in frame and not frame.empty else 0
 
@@ -3474,6 +3514,11 @@ def render_signal_dashboard() -> None:
     if frame.empty:
         st.warning("Monitor nie ma jeszcze wystarczającej liczby ukończonych analiz.")
         return
+    frame, radar_errors = _rankable_radar_frame(frame, snapshot.get("errors") or {})
+    snapshot = {**snapshot, "errors": radar_errors}
+    if frame.empty:
+        st.warning("Monitor nie ma jeszcze integralnych rekordów do rankingu.")
+        return
     if "Horyzont" not in frame:
         frame["Horyzont"] = snapshot.get("horizon", 20)
     if "Klasa" not in frame:
@@ -3908,7 +3953,7 @@ with radar:
             try:
                 with st.spinner("Liczenie prywatnego skanu…"):
                     custom_frame, custom_errors = scan_market_multi(symbols, tuple(custom_horizons or [5]), years)
-                st.session_state["custom_scan"] = (custom_frame, custom_errors)
+                st.session_state["custom_scan"] = _rankable_radar_frame(custom_frame, custom_errors)
             except Exception as exc:
                 st.error(str(exc))
         if "custom_scan" in st.session_state:
