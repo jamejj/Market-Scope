@@ -67,6 +67,7 @@ from market_oracle.auto_forward import (
     build_automation_plan,
     eligible_session_dates,
     execute_automation,
+    format_automation_summary,
     launchd_status,
     launchd_plist_payload,
     nyse_full_holidays,
@@ -4389,6 +4390,285 @@ def test_forward_automation_three_day_gap_is_reported_without_backfill():
     assert eligible_session_dates(latest_audit_date="2026-07-20", now="2026-07-24T22:50:00+02:00", config=config)[-1] == "2026-07-24"
 
 
+def _automation_result_config(tmp_path: Path) -> AutomationConfig:
+    return AutomationConfig(
+        status_path=tmp_path / "status.json",
+        lock_path=tmp_path / "run.lock",
+        log_dir=tmp_path / "logs",
+        candidate_command=("python", "run_candidate_forward.py"),
+    )
+
+
+def _automation_success_payload(target: str = "2026-07-24") -> dict:
+    symbols = ["AAPL", "MSFT", "NVDA", "SPY", "QQQ"]
+    return {
+        "status": "complete",
+        "target_session_date": target,
+        "forward_universe": {
+            "requested_symbols": symbols,
+            "completed_symbols": symbols,
+            "failed_symbols": [],
+            "full_coverage": True,
+        },
+        "errors": {},
+        "refresh_errors": {},
+        "run_event_counts": {"SNAPSHOT_AUDIT": 1},
+    }
+
+
+def _automation_healthy_cockpit(target: str = "2026-07-24") -> dict:
+    return {
+        "healthy": True,
+        "problems": [],
+        "latest_audit_date": target,
+    }
+
+
+def _seed_automation_success(config: AutomationConfig, target: str = "2026-07-23") -> dict:
+    stored = {
+        "automation_status": "OK",
+        "target_session_date": target,
+        "ended_at": f"{target}T21:00:00+00:00",
+        "exit_code": 0,
+        "last_successful_run": {
+            "target_session_date": target,
+            "ended_at": f"{target}T21:00:00+00:00",
+            "exit_code": 0,
+            "runner_payload_status": "complete",
+        },
+    }
+    config.status_path.parent.mkdir(parents=True, exist_ok=True)
+    config.status_path.write_text(json.dumps(stored), encoding="utf-8")
+    return stored
+
+
+def _execute_automation_result_case(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    stdout: str,
+    fresh_cockpit=None,
+    returncode: int = 0,
+    stored=None,
+) -> tuple[dict, dict]:
+    config = _automation_result_config(tmp_path)
+    if stored is None:
+        stored = _seed_automation_success(config)
+    else:
+        config.status_path.parent.mkdir(parents=True, exist_ok=True)
+        config.status_path.write_text(json.dumps(stored), encoding="utf-8")
+    cockpits = iter([
+        {"latest_audit_date": "2026-07-23"},
+        {"latest_audit_date": "2026-07-23"},
+        fresh_cockpit or _automation_healthy_cockpit(),
+    ])
+    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", lambda: next(cockpits))
+
+    payload = execute_automation(
+        config=config,
+        now="2026-07-24T22:50:00+02:00",
+        runner=lambda command: auto_forward_module.subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout,
+            "runner stderr" if returncode else "",
+        ),
+    )
+    return payload, json.loads(config.status_path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "case,stdout,fresh_cockpit",
+    [
+        (
+            "partial",
+            json.dumps({**_automation_success_payload(), "status": "partial"}),
+            _automation_healthy_cockpit(),
+        ),
+        ("missing payload", "", _automation_healthy_cockpit()),
+        ("malformed payload", "not-json human output", _automation_healthy_cockpit()),
+        ("non-dict payload", json.dumps(["complete", "2026-07-24"]), _automation_healthy_cockpit()),
+        (
+            "wrong target",
+            json.dumps(_automation_success_payload("2026-07-22")),
+            _automation_healthy_cockpit(),
+        ),
+        (
+            "empty requested universe",
+            json.dumps({
+                **_automation_success_payload(),
+                "forward_universe": {
+                    "requested_symbols": [],
+                    "completed_symbols": [],
+                    "failed_symbols": [],
+                    "full_coverage": True,
+                },
+            }),
+            _automation_healthy_cockpit(),
+        ),
+        (
+            "incomplete coverage",
+            json.dumps({
+                **_automation_success_payload(),
+                "forward_universe": {
+                    "requested_symbols": ["AAPL", "MSFT"],
+                    "completed_symbols": ["AAPL"],
+                    "failed_symbols": [],
+                    "full_coverage": False,
+                },
+            }),
+            _automation_healthy_cockpit(),
+        ),
+        (
+            "failed symbols",
+            json.dumps({
+                **_automation_success_payload(),
+                "forward_universe": {
+                    "requested_symbols": ["AAPL", "MSFT"],
+                    "completed_symbols": ["AAPL", "MSFT"],
+                    "failed_symbols": ["QQQ"],
+                    "full_coverage": True,
+                },
+            }),
+            _automation_healthy_cockpit(),
+        ),
+        (
+            "snapshot errors",
+            json.dumps({**_automation_success_payload(), "errors": {"QQQ": "timeout"}}),
+            _automation_healthy_cockpit(),
+        ),
+        (
+            "refresh errors",
+            json.dumps({**_automation_success_payload(), "refresh_errors": {"SPY": "timeout"}}),
+            _automation_healthy_cockpit(),
+        ),
+        (
+            "missing target audit",
+            json.dumps(_automation_success_payload()),
+            {"healthy": True, "problems": [], "latest_audit_date": "2026-07-23"},
+        ),
+        (
+            "unhealthy proof cockpit",
+            json.dumps(_automation_success_payload()),
+            {"healthy": False, "problems": ["Snapshot audit mismatch"], "latest_audit_date": "2026-07-24"},
+        ),
+    ],
+)
+def test_forward_automation_exit_zero_requires_truthful_proof_result(
+    tmp_path,
+    monkeypatch,
+    case,
+    stdout,
+    fresh_cockpit,
+):
+    payload, stored = _execute_automation_result_case(
+        tmp_path,
+        monkeypatch,
+        stdout=stdout,
+        fresh_cockpit=fresh_cockpit,
+    )
+
+    assert payload["automation_status"] == "FAILED", case
+    assert payload["runner_exit_code"] == 0, case
+    assert payload["exit_code"] == INTEGRITY_EXIT_CODE, case
+    assert payload["failure_kind"] == "INTEGRITY_FAILED", case
+    assert payload["integrity_errors"], case
+    assert payload["last_successful_run"]["target_session_date"] == "2026-07-23", case
+    assert stored["automation_status"] == "FAILED", case
+    assert stored["last_successful_run"]["target_session_date"] == "2026-07-23", case
+
+
+@pytest.mark.parametrize("returncode", [1, 2, INTEGRITY_EXIT_CODE, 75])
+def test_forward_automation_preserves_real_nonzero_child_exit(tmp_path, monkeypatch, returncode):
+    runner_payload = {
+        "status": "error",
+        "failure_kind": "INTEGRITY_FAILED",
+        "integrity_errors": ["runner failure"],
+    }
+    payload, stored = _execute_automation_result_case(
+        tmp_path,
+        monkeypatch,
+        stdout=json.dumps(runner_payload),
+        returncode=returncode,
+        fresh_cockpit={"healthy": False, "problems": ["runner failure"], "latest_audit_date": "2026-07-23"},
+    )
+
+    assert payload["automation_status"] == "FAILED"
+    assert payload["runner_exit_code"] == returncode
+    assert payload["exit_code"] == returncode
+    assert payload["failure_kind"] == "INTEGRITY_FAILED"
+    assert payload["last_successful_run"]["target_session_date"] == "2026-07-23"
+    assert stored["exit_code"] == returncode
+
+
+def test_forward_automation_truthful_success_updates_last_success_and_clears_recovery_warning(tmp_path, monkeypatch):
+    config = _automation_result_config(tmp_path)
+    previous = _seed_automation_success(config)
+    previous["automation_status"] = "FAILED"
+    previous["target_session_date"] = "2026-07-24"
+    previous["exit_code"] = INTEGRITY_EXIT_CODE
+    config.status_path.write_text(json.dumps(previous), encoding="utf-8")
+
+    payload, stored = _execute_automation_result_case(
+        tmp_path,
+        monkeypatch,
+        stdout=json.dumps(_automation_success_payload()),
+        stored=previous,
+    )
+
+    assert payload["automation_status"] == "OK"
+    assert payload["runner_exit_code"] == 0
+    assert payload["exit_code"] == 0
+    assert payload.get("failure_kind") is None
+    assert payload.get("integrity_errors") is None
+    assert payload["last_successful_run"]["target_session_date"] == "2026-07-24"
+    assert payload["last_successful_run"]["runner_payload_status"] == "complete"
+    assert payload["plan_after_run"]["missed_session_warning"] is None
+    assert stored["automation_status"] == "OK"
+
+
+def test_forward_automation_failed_result_preserves_post_lock_success(tmp_path, monkeypatch):
+    config = _automation_result_config(tmp_path)
+    pre_lock = _seed_automation_success(config, "2026-07-22")
+    post_lock = {
+        **pre_lock,
+        "target_session_date": "2026-07-23",
+        "last_successful_run": {
+            **pre_lock["last_successful_run"],
+            "target_session_date": "2026-07-23",
+        },
+    }
+    reads = iter([(pre_lock, None), (post_lock, None)])
+    cockpits = iter([
+        {"latest_audit_date": "2026-07-23"},
+        {"latest_audit_date": "2026-07-23"},
+        {"healthy": False, "problems": ["missing audit"], "latest_audit_date": "2026-07-23"},
+    ])
+    monkeypatch.setattr(auto_forward_module, "_read_json", lambda path: next(reads))
+    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", lambda: next(cockpits))
+
+    payload = execute_automation(
+        config=config,
+        now="2026-07-24T22:50:00+02:00",
+        runner=lambda command: auto_forward_module.subprocess.CompletedProcess(command, 0, "", ""),
+    )
+
+    assert payload["automation_status"] == "FAILED"
+    assert payload["last_successful_run"]["target_session_date"] == "2026-07-23"
+
+
+def test_forward_automation_summary_tolerates_non_dict_runner_payload():
+    summary = format_automation_summary({
+        "automation_status": "FAILED",
+        "target_session_date": "2026-07-24",
+        "exit_code": INTEGRITY_EXIT_CODE,
+        "runner_payload": ["complete", "2026-07-24"],
+    })
+
+    assert "Candidate v1 automation: FAILED" in summary
+    assert "Exit code: 65" in summary
+
+
 def test_forward_automation_skips_when_session_already_audited(tmp_path, monkeypatch):
     config = AutomationConfig(
         status_path=tmp_path / "status.json",
@@ -4465,7 +4745,7 @@ def test_forward_automation_executes_and_reports_only_locked_target(tmp_path, mo
         },
     ])
     monkeypatch.setattr(auto_forward_module, "build_automation_plan", lambda **kwargs: next(plans))
-    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", lambda: {})
+    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", _automation_healthy_cockpit)
     executed = []
 
     def runner(command):
@@ -4473,7 +4753,7 @@ def test_forward_automation_executes_and_reports_only_locked_target(tmp_path, mo
         return auto_forward_module.subprocess.CompletedProcess(
             command,
             0,
-            json.dumps({"status": "complete", "target_session_date": "2026-07-24"}),
+            json.dumps(_automation_success_payload()),
             "",
         )
 
@@ -4509,7 +4789,7 @@ def test_forward_automation_sanitizes_malformed_template_target_and_uses_locked_
         {"should_run": False, "target_session_date": "2026-07-24", "reason": "AFTER_RUN"},
     ])
     monkeypatch.setattr(auto_forward_module, "build_automation_plan", lambda **kwargs: next(plans))
-    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", lambda: {})
+    monkeypatch.setattr(auto_forward_module, "load_forward_cockpit", _automation_healthy_cockpit)
     executed = []
 
     def runner(command):
@@ -4517,7 +4797,7 @@ def test_forward_automation_sanitizes_malformed_template_target_and_uses_locked_
         return auto_forward_module.subprocess.CompletedProcess(
             command,
             0,
-            json.dumps({"status": "complete", "target_session_date": "2026-07-24"}),
+            json.dumps(_automation_success_payload()),
             "",
         )
 

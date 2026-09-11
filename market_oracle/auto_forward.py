@@ -14,6 +14,7 @@ import sys
 from typing import Any, Callable
 
 from .forward import DATA_DIR, ROOT, WARSAW, load_forward_cockpit
+from .integrity import INTEGRITY_EXIT_CODE, INTEGRITY_FAILURE_KIND
 
 
 AUTOMATION_VERSION = 1
@@ -376,13 +377,61 @@ def _last_successful_run(stored_status: dict[str, Any]) -> dict[str, Any] | None
 
 
 def _success_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    runner_payload = payload.get("runner_payload")
     return {
         "target_session_date": payload.get("target_session_date"),
         "ended_at": payload.get("ended_at"),
         "exit_code": payload.get("exit_code"),
         "runner_summary_text": payload.get("runner_summary_text"),
-        "runner_payload_status": (payload.get("runner_payload") or {}).get("status"),
+        "runner_payload_status": runner_payload.get("status") if isinstance(runner_payload, dict) else None,
     }
+
+
+def _run_success_integrity_errors(
+    runner_payload: Any,
+    *,
+    locked_target: str,
+    fresh_cockpit: Any,
+) -> list[str]:
+    """Validate that an exit-zero child produced complete canonical proof."""
+
+    errors: list[str] = []
+    if not isinstance(runner_payload, dict):
+        return ["runner payload is missing or is not a JSON object"]
+    if runner_payload.get("status") != "complete":
+        errors.append(f"runner status is {runner_payload.get('status')!r}, not 'complete'")
+    if runner_payload.get("target_session_date") != locked_target:
+        errors.append("runner target_session_date does not match the locked automation target")
+
+    universe = runner_payload.get("forward_universe")
+    if not isinstance(universe, dict):
+        errors.append("runner forward_universe is missing or is not an object")
+    else:
+        requested = universe.get("requested_symbols")
+        completed = universe.get("completed_symbols")
+        failed = universe.get("failed_symbols")
+        if not isinstance(requested, list) or not requested:
+            errors.append("runner requested_symbols must be a non-empty list")
+        if not isinstance(completed, list) or completed != requested:
+            errors.append("runner completed_symbols do not equal requested_symbols")
+        if not isinstance(failed, list) or failed:
+            errors.append("runner failed_symbols must be an empty list")
+        if universe.get("full_coverage") is not True:
+            errors.append("runner full_coverage is not true")
+
+    for field in ("errors", "refresh_errors"):
+        value = runner_payload.get(field)
+        if not isinstance(value, dict) or value:
+            errors.append(f"runner {field} must be an empty object")
+
+    if not isinstance(fresh_cockpit, dict):
+        errors.append("post-run proof cockpit is unavailable")
+    else:
+        if fresh_cockpit.get("latest_audit_date") != locked_target:
+            errors.append("post-run latest_audit_date does not match the locked automation target")
+        if fresh_cockpit.get("healthy") is not True:
+            errors.append("post-run proof cockpit is unhealthy")
+    return errors
 
 
 @contextmanager
@@ -537,17 +586,42 @@ def execute_automation(
     parsed = _parse_runner_stdout(run.stdout or "")
     ended_at = datetime.now(timezone.utc)
     fresh_cockpit = load_forward_cockpit()
-    fresh_plan = build_automation_plan(cockpit=fresh_cockpit, now=now, config=config, stored_status=stored)
+    runner_exit_code = int(run.returncode)
+    integrity_errors = (
+        _run_success_integrity_errors(
+            parsed["payload"],
+            locked_target=locked_target,
+            fresh_cockpit=fresh_cockpit,
+        )
+        if runner_exit_code == 0
+        else []
+    )
+    run_success = runner_exit_code == 0 and not integrity_errors
+    automation_status = "OK" if run_success else "FAILED"
+    exit_code = INTEGRITY_EXIT_CODE if runner_exit_code == 0 and integrity_errors else runner_exit_code
+    status_for_plan = {
+        **locked_stored,
+        "automation_status": automation_status,
+        "target_session_date": locked_target,
+        "exit_code": exit_code,
+    }
+    fresh_plan = build_automation_plan(
+        cockpit=fresh_cockpit,
+        now=now,
+        config=config,
+        stored_status=status_for_plan,
+    )
     payload = {
         **base,
         "candidate_command": list(executed_command),
         "plan_after_run": fresh_plan,
-        "automation_status": "OK" if run.returncode == 0 else "FAILED",
+        "automation_status": automation_status,
         "started_at": started_at.isoformat(),
         "ended_at": ended_at.isoformat(),
         "duration_seconds": (ended_at - started_at).total_seconds(),
         "target_session_date": locked_target,
-        "exit_code": int(run.returncode),
+        "runner_exit_code": runner_exit_code,
+        "exit_code": exit_code,
         "stdout_log": str(stdout_path),
         "stderr_log": str(stderr_path),
         "stdout_tail": (run.stdout or "")[-4000:],
@@ -556,9 +630,16 @@ def execute_automation(
         "runner_summary_text": parsed["summary_text"],
     }
     runner_payload = parsed["payload"] if isinstance(parsed["payload"], dict) else {}
-    if run.returncode != 0 and runner_payload.get("failure_kind"):
+    if runner_exit_code != 0 and runner_payload.get("failure_kind"):
         payload["failure_kind"] = str(runner_payload["failure_kind"])
-    payload["last_successful_run"] = _success_summary(payload) if run.returncode == 0 else _last_successful_run(stored)
+    elif integrity_errors:
+        payload["failure_kind"] = INTEGRITY_FAILURE_KIND
+        payload["integrity_errors"] = integrity_errors
+    payload["last_successful_run"] = (
+        _success_summary(payload)
+        if run_success
+        else _last_successful_run(locked_stored)
+    )
     _write_json(config.status_path, payload)
     return payload
 
@@ -732,7 +813,8 @@ def format_automation_summary(payload: dict[str, Any]) -> str:
     ]
     if stored.get("exit_code") is not None:
         lines.append(f"Exit code: {stored.get('exit_code')}")
-    runner = stored.get("runner_payload") or {}
+    runner_payload = stored.get("runner_payload")
+    runner = runner_payload if isinstance(runner_payload, dict) else {}
     counts = runner.get("run_event_counts") or {}
     if counts:
         lines.append("Run events: " + ", ".join(f"{key}={value}" for key, value in sorted(counts.items())))
