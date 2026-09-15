@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .monitor import radar_data_date
 from .product_verdict import (
     MachineDecisionState,
     dataframe_machine_decision_state,
@@ -23,6 +24,11 @@ AUC_DIRECTION_HELP = (
 )
 PAPER_RESULTS_BY_CLASS_TITLE = "Wyniki paper według klas aktywów"
 PAPER_RESULTS_BY_DIRECTION_TITLE = "Wyniki paper według kierunku i horyzontu"
+DAILY_CLOSE_DISPLAY_LABEL = "Close z baru 1d (adjusted)"
+DAILY_DATA_SOURCE_NOTE = (
+    "yfinance · adjusted OHLCV · 1d · nie realtime · "
+    "stan ostatniego baru niezweryfikowany"
+)
 
 
 def _finite_float(value: Any) -> float | None:
@@ -247,13 +253,55 @@ def radar_display_frame(frame: Any, columns: list[str] | None = None) -> Any:
         output["Ocena"] = output.apply(display_radar_ml_status, axis=1)
     if "P(wzrost)" in output:
         output["P(wzrost)"] = output["P(wzrost)"].map(finite_probability)
+    if "Data" in output:
+        output["Data"] = output["Data"].map(lambda value: radar_data_date(value) or "UNKNOWN")
     if columns is not None:
         present = [column for column in columns if column in output.columns]
         output = output[present].copy()
     return output.rename(columns={
+        "Data": "Dane do",
+        "Cena": DAILY_CLOSE_DISPLAY_LABEL,
         "Edge score": "Score potencjału",
         "Model edge": "Wsparcie ML",
     })
+
+
+def radar_provenance_view(provenance: dict | None) -> dict:
+    """Build truthful display copy without inferring exchange-specific freshness."""
+    provenance = provenance or {}
+    data_min = provenance.get("data_as_of_min")
+    data_max = provenance.get("data_as_of_max")
+    mixed = bool(provenance.get("mixed_data_dates"))
+    records_total = int(provenance.get("records_total") or 0)
+    invalid_count = int(provenance.get("missing_data_dates") or 0) + int(
+        provenance.get("malformed_data_dates") or 0
+    )
+
+    if not data_min or not data_max:
+        data_as_of = "UNKNOWN"
+    elif mixed:
+        data_as_of = f"{data_min} – {data_max}"
+    else:
+        data_as_of = str(data_max)
+
+    warnings = []
+    if not records_total:
+        warnings.append("Snapshot nie zawiera rekordów, więc data danych rynkowych jest UNKNOWN.")
+    elif data_as_of == "UNKNOWN":
+        warnings.append("Snapshot nie zawiera poprawnej daty danych rynkowych; status to UNKNOWN.")
+    elif mixed:
+        warnings.append(f"Snapshot zawiera mieszane daty danych rynkowych: {data_as_of}.")
+    if invalid_count:
+        noun = "wiersz" if invalid_count == 1 else "wiersze"
+        warnings.append(f"{invalid_count} {noun} nie ma poprawnej daty danych rynkowych.")
+
+    return {
+        "computed_at": _freshness_value(provenance.get("computed_at")),
+        "data_as_of": data_as_of,
+        "warning": " ".join(warnings) or None,
+        "source_note": DAILY_DATA_SOURCE_NOTE,
+        "price_label": DAILY_CLOSE_DISPLAY_LABEL,
+    }
 
 
 def _incomplete_forecast_detail(integrity_issue: str | None) -> str:
@@ -345,8 +393,12 @@ def _radar_freshness(source_context: dict) -> tuple[str, str | None]:
     if source_context.get("radar_status") == "running":
         started = _freshness_value(source_context.get("radar_started_at"))
         if started != "—":
-            return f"skan w toku od {started}", "Pełna analiza została uruchomiona w trakcie odświeżania radaru; wartości mogą różnić się od ostatniego kompletnego snapshotu."
-        return "skan w toku", "Pełna analiza została uruchomiona w trakcie odświeżania radaru; timestamp startu nie jest dostępny."
+            return "—", (
+                f"Skan radaru jest w toku od {started}. Pełna analiza została uruchomiona "
+                "w trakcie odświeżania radaru; wartości mogą różnić się od ostatniego "
+                "kompletnego snapshotu."
+            )
+        return "—", "Skan radaru jest w toku. Pełna analiza została uruchomiona w trakcie odświeżania radaru; timestamp startu nie jest dostępny."
     return "snapshot niedostępny", "Raport uruchomiono poza zapisanym kompletnym snapshotem radaru albo snapshot nie ma timestampu."
 
 
@@ -476,10 +528,16 @@ def build_analysis_report(
     }
     if radar_note:
         freshness["note"] = radar_note
-    elif freshness["radar"] != "snapshot niedostępny" and freshness["analysis"] != "—" and not freshness["radar"].startswith(freshness["analysis"]):
-        freshness["note"] = "Radar i pełna analiza mogą mieć minimalnie różne wartości, bo pełna analiza liczy aktualnie dostępne dane."
+    elif freshness["radar"] != "snapshot niedostępny" and freshness["analysis"] != "—":
+        freshness["note"] = (
+            "Czas policzenia skanu radaru i data danych rynkowych pełnej analizy "
+            "opisują różne momenty; są pokazane osobno."
+        )
     else:
-        freshness["note"] = "Radar i raport są spójne datowo albo raport został uruchomiony ręcznie poza snapshotem radaru."
+        freshness["note"] = (
+            "Pełna analiza pokazuje datę danych rynkowych niezależnie od czasu "
+            "policzenia skanu radaru."
+        )
 
     return {
         "symbol": symbol,
@@ -627,6 +685,7 @@ def build_start_guidance(
     journal: dict | None = None,
     universe_size: int = 0,
     radar_stale: bool = False,
+    market_data_provenance: dict | None = None,
     max_cards: int = 5,
 ) -> dict:
     """Build a short home-screen action plan from existing MarketScope state.
@@ -644,6 +703,8 @@ def build_start_guidance(
     updated = _freshness_value(snapshot.get("updated_at"))
     started = _freshness_value(snapshot.get("started_at"))
     radar_freshness = updated if updated != "—" else (f"skan w toku od {started}" if status == "running" and started != "—" else "brak kompletnego snapshotu")
+    provenance_view = radar_provenance_view(market_data_provenance)
+    computed_at = provenance_view["computed_at"]
     warning = None
     cards: list[dict] = []
     used_symbols: set[str] = set()
@@ -691,7 +752,7 @@ def build_start_guidance(
             card_id="radar_stale",
             priority=92,
             title="Odśwież radar przed głębszą interpretacją rynku.",
-            body=f"Ostatni kompletny snapshot: {updated}. MarketScope może już mieć świeższe ceny niż zapisany ranking.",
+            body=f"Ostatni kompletny snapshot policzono: {updated}. Provider może już udostępniać nowszy dzienny bar niż zapisany ranking.",
             source="Radar",
             status="snapshot wymaga odświeżenia",
             cta="Pokaż status radaru",
@@ -794,13 +855,18 @@ def build_start_guidance(
 
     if records:
         stage_headline, stage_detail = _scan_stage_text(snapshot, universe_size)
+        scan_status = (
+            radar_freshness
+            if status == "running"
+            else f"skan policzony: {radar_freshness}"
+        )
         add(_card(
             card_id="radar_overview",
             priority=30,
-            title="Przejrzyj dzisiejszy radar po filtrach FAST/ML.",
+            title="Przejrzyj ostatni radar po filtrach FAST/ML.",
             body=f"Snapshot zawiera {len(records)} wierszy/horyzontów dla universe {universe_size or snapshot.get('universe_total') or '—'} instrumentów. {stage_detail}. Użyj go jako mapy pracy, nie listy transakcji.",
             source="Radar",
-            status=f"{stage_headline} · świeżość: {radar_freshness}",
+            status=f"{stage_headline} · {scan_status}",
             cta="Pokaż top snapshotu",
             action="show_radar_snapshot",
             tone="neutral",
@@ -836,6 +902,10 @@ def build_start_guidance(
         "title": "Co dziś warto zrobić w MarketScope?",
         "subtitle": "Krótka lista pracy w aplikacji: co sprawdzić, dlaczego to ważne i z jakiego źródła pochodzi sygnał.",
         "freshness": radar_freshness,
+        "computed_at": computed_at,
+        "data_as_of": provenance_view["data_as_of"],
+        "data_warning": provenance_view["warning"],
+        "data_source_note": provenance_view["source_note"],
         "warning": warning,
         "cards": cards[:max_cards],
         "stats": {

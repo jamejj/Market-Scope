@@ -27,7 +27,13 @@ from market_oracle.journal import (
     journal_error_code, journal_summary, paper_portfolio, record_snapshot_signals,
     refresh_journal_results, safe_load_journal,
 )
-from market_oracle.monitor import default_universe, load_snapshot, snapshot_is_stale
+from market_oracle.monitor import (
+    default_universe,
+    load_snapshot,
+    radar_data_date,
+    radar_snapshot_provenance,
+    snapshot_is_stale,
+)
 from market_oracle.product_verdict import (
     MachineDecisionState,
     dataframe_machine_decision_state,
@@ -37,6 +43,8 @@ from market_oracle.product_verdict import (
 from market_oracle.presentation import (
     ACCURACY_BASELINE_DELTA_LABEL,
     AUC_DIRECTION_HELP,
+    DAILY_CLOSE_DISPLAY_LABEL,
+    DAILY_DATA_SOURCE_NOTE,
     MODEL_DIAGNOSTIC_TITLE,
     PAPER_RESULTS_BY_CLASS_TITLE,
     PAPER_RESULTS_BY_DIRECTION_TITLE,
@@ -48,6 +56,7 @@ from market_oracle.presentation import (
     display_radar_direction,
     display_radar_thesis,
     radar_display_frame,
+    radar_provenance_view,
     radar_risk_rows,
 )
 from market_oracle.search import search_assets
@@ -1928,6 +1937,11 @@ def render_start_guidance(guidance: dict, snapshot: dict, cockpit: dict | None) 
         if guidance.get("warning")
         else ""
     )
+    data_warning_html = (
+        f'<div class="guidance-warning">⚠️ {clean_text(guidance.get("data_warning"))}</div>'
+        if guidance.get("data_warning")
+        else ""
+    )
     st.markdown(
         '<div class="guidance-shell">'
         '<div class="guidance-head">'
@@ -1936,9 +1950,14 @@ def render_start_guidance(guidance: dict, snapshot: dict, cockpit: dict | None) 
         f"<h3>{clean_text(guidance.get('title'))}</h3>"
         f"<p>{clean_text(guidance.get('subtitle'))}</p>"
         '</div>'
-        f'<div class="guidance-freshness">źródło: {clean_text(guidance.get("freshness"))}</div>'
+        '<div>'
+        f'<div class="guidance-freshness">Skan policzony: {clean_text(guidance.get("computed_at"))}</div>'
+        f'<div class="guidance-freshness">Dane rynkowe do: {clean_text(guidance.get("data_as_of"))}</div>'
+        f'<div class="guidance-freshness">{clean_text(guidance.get("data_source_note"))}</div>'
+        '</div>'
         '</div>'
         f'{warning_html}'
+        f'{data_warning_html}'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -2013,7 +2032,7 @@ def render_start_guidance(guidance: dict, snapshot: dict, cockpit: dict | None) 
             st.info("Brak wierszy w snapshotcie radaru. Poczekaj na skan albo uruchom radar w zakładce Sygnały.")
         else:
             preferred = [
-                "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Akcja radaru", "Teza radaru",
+                "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Data", "Akcja radaru", "Teza radaru",
                 "Ocena kierunku", "Ruch / impet", "Jakość modelu", "Deep score", "Setup score",
             ]
             st.dataframe(
@@ -2039,6 +2058,7 @@ def render_start_dashboard(
     automation_error: str | None = None,
 ) -> None:
     radar_stale = snapshot_is_stale(snapshot, max_age_hours=30)
+    market_data_provenance = radar_snapshot_provenance(snapshot)
     start_snapshot = _rankable_radar_snapshot(snapshot)
     coverage = (cockpit or {}).get("coverage") or {}
     portfolio = (cockpit or {}).get("portfolio") or {}
@@ -2117,6 +2137,7 @@ def render_start_dashboard(
         journal=journal,
         universe_size=universe_size,
         radar_stale=radar_stale,
+        market_data_provenance=market_data_provenance,
     )
     render_start_guidance(guidance, start_snapshot, cockpit)
 
@@ -2266,7 +2287,7 @@ def render_analysis_report(
         f"<h3>{clean_text(report['headline'])}</h3>"
         f"<p>{clean_text(report['body'])}</p>"
         '<div class="analysis-note">'
-        f"🕒 Radar z: {clean_text(freshness['radar'])} · pełna analiza na danych do: {clean_text(freshness['analysis'])} · benchmark: {clean_text(freshness['benchmark'])}. "
+        f"🕒 Skan radaru policzony: {clean_text(freshness['radar'])} · pełna analiza na danych dziennych do: {clean_text(freshness['analysis'])} · benchmark: {clean_text(freshness['benchmark'])}. "
         f"{clean_text(freshness['note'])}"
         '</div>'
         '</div>'
@@ -2372,6 +2393,7 @@ def watchlist_dataframe(items: list[dict]) -> pd.DataFrame:
             "Horyzont": f"{item.get('horizon', '—')} sesji/dni",
             "Źródło": item.get("source"),
             "Dodano": short_datetime(item.get("created_at")),
+            "Dane z": radar_data_date(item.get("data_as_of")) or "UNKNOWN",
             "P(wzrost)": item.get("probability_up"),
             "Oczekiwany ruch": item.get("expected_return"),
             "Jakość": item.get("quality"),
@@ -2675,7 +2697,10 @@ def render_analysis(
     st.divider()
     title_col, date_col = st.columns([3, 1])
     title_col.subheader(f"{profile_name(profile, symbol)} · {symbol}")
-    date_col.caption(f"Dane do {result['last_date'].date()} · benchmark: {result['benchmark']}")
+    date_col.caption(
+        f"Dane dzienne do {result['last_date'].date()} · yfinance · adjusted · nie realtime · "
+        f"benchmark: {result['benchmark']}"
+    )
     selected_horizon = analysis_horizon_selector(result, view_key)
     report = render_analysis_report(result, profile, source_context, selected_horizon)
     render_watchlist_capture(result, report, source_context)
@@ -2683,7 +2708,11 @@ def render_analysis(
     technical = result["technical"]
     view = aggregate_model_view(result, report)
     summary_cols = st.columns(3)
-    summary_cols[0].metric("Ostatnia cena", f"{result['last_price']:,.2f} {profile.get('currency', '')}".strip())
+    summary_cols[0].metric(
+        DAILY_CLOSE_DISPLAY_LABEL,
+        f"{result['last_price']:,.2f} {profile.get('currency', '')}".strip(),
+        help=DAILY_DATA_SOURCE_NOTE,
+    )
     summary_cols[1].metric("Trend techniczny", view["trend_label"], help="Opis bieżącego trendu, nie prognoza przyszłej ceny.")
     summary_cols[2].metric("Horyzont raportu", view["best_label"])
 
@@ -2833,7 +2862,7 @@ def _render_ranking_table(frame: pd.DataFrame, title: str, empty_text: str) -> N
         st.info(empty_text)
         return
     formats = {
-        "Cena": "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
+        "Cena": "{:.2f}", DAILY_CLOSE_DISPLAY_LABEL: "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
         "Zwrot 1d": "{:+.1%}", "Zwrot 5d": "{:+.1%}", "Zwrot 20d": "{:+.1%}", "RSI 14": "{:.1f}",
         "AUC walidacji": "{:.3f}", "Brier": "{:.3f}", "Pewność": "{:.1%}",
         "Zmienność roczna": "{:.1%}", "Max drawdown": "{:.1%}", "Score": "{:.2f}", "Radar score": "{:.1f}",
@@ -2843,7 +2872,7 @@ def _render_ranking_table(frame: pd.DataFrame, title: str, empty_text: str) -> N
         "Risk control": "{:.0f}", "Liquidity score": "{:.0f}", "Model edge": "{:.0f}", "Wsparcie ML": "{:.0f}",
     }
     columns = [
-        "Symbol", "Klasa", "Tryb analizy", "Setup", "Setup grade", "Akcja radaru", "Radar momentum", "Teza radaru",
+        "Symbol", "Klasa", "Tryb analizy", "Data", "Setup", "Setup grade", "Akcja radaru", "Radar momentum", "Teza radaru",
         "Setup score", "Ocena", "Ocena kierunku", "Ruch / impet",
         "Risk/reward", "Edge score", "Deep score", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Jakość modelu", "Score",
     ]
@@ -3434,6 +3463,7 @@ def render_signal_dashboard() -> None:
             st.info("Ranking nie został jeszcze policzony. Uruchom aplikację plikiem **Uruchom MarketScope.command** albo użyj przycisku pełnego skanu poniżej.")
         return
 
+    market_data_view = radar_provenance_view(radar_snapshot_provenance(snapshot))
     stale_snapshot = snapshot_is_stale(snapshot)
     status = snapshot.get("status")
     completed, total = snapshot.get("completed", 0), snapshot.get("total", 0)
@@ -3499,7 +3529,14 @@ def render_signal_dashboard() -> None:
                     "żeby dostać radar 1d/5d/20d z hot movers."
                 )
         else:
-            st.success(f"Skan zapisany · aktualizacja: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzonty: **{horizon_text}**")
+            st.success(f"Skan policzony: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzonty: **{horizon_text}**")
+
+    st.caption(
+        f"Dane rynkowe do: **{market_data_view['data_as_of']}** · "
+        f"{market_data_view['source_note']}"
+    )
+    if market_data_view["warning"]:
+        st.warning(market_data_view["warning"])
 
     if status == "complete":
         journal_view = journal_scan_status_view(snapshot)
@@ -3596,7 +3633,7 @@ def render_signal_dashboard() -> None:
     )
 
     formats = {
-        "Cena": "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
+        "Cena": "{:.2f}", DAILY_CLOSE_DISPLAY_LABEL: "{:.2f}", "P(wzrost)": "{:.1%}", "Oczekiwany ruch": "{:.1%}",
         "Zwrot 1d": "{:+.1%}", "Zwrot 5d": "{:+.1%}", "Zwrot 20d": "{:+.1%}", "RSI 14": "{:.1f}",
         "AUC walidacji": "{:.3f}", "Brier": "{:.3f}", "Pewność": "{:.1%}", "Zmienność roczna": "{:.1%}",
         "Max drawdown": "{:.1%}", "Score": "{:.2f}", "Radar score": "{:.1f}",
@@ -3607,11 +3644,11 @@ def render_signal_dashboard() -> None:
     }
 
     horizon_tabs = st.tabs([
-        "Dzisiejszy radar", "Setup intelligence", "Perełki momentum", "Risk/reward",
+        "Ostatni radar", "Setup intelligence", "Perełki momentum", "Risk/reward",
         "Szybki ruch 1d", "Swing 5d", "Trend 20d", "Wszystko",
     ])
     with horizon_tabs[0]:
-        st.subheader("Dzisiejszy radar")
+        st.subheader("Ostatni radar")
         st.caption("Szybki briefing: gdzie patrzeć najpierw. To shortlist badawcza, nie automatyczna rekomendacja transakcji.")
         base = frame.copy()
         priority = (
@@ -3641,7 +3678,7 @@ def render_signal_dashboard() -> None:
             .head(5)
         )
         compact_columns = [
-            "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Setup grade", "Akcja radaru", "Teza radaru",
+            "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Data", "Setup grade", "Akcja radaru", "Teza radaru",
             "Ocena kierunku", "Ruch / impet", "Deep score", "Setup score", "Risk/reward", "Edge score",
         ]
         st.markdown("#### 1. Najważniejsze setupy do dalszej analizy")
@@ -3665,7 +3702,7 @@ def render_signal_dashboard() -> None:
             .head(25)
         )
         setup_columns = [
-            "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Setup grade", "Teza radaru", "Deep score", "Setup score",
+            "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Data", "Setup grade", "Teza radaru", "Deep score", "Setup score",
             "Momentum score", "Trend score", "Risk control", "Model edge", "Liquidity score",
             "P(wzrost)", "Risk/reward", "AUC walidacji", "Jakość modelu",
         ]
@@ -3679,10 +3716,10 @@ def render_signal_dashboard() -> None:
         if base.empty:
             base = frame.copy()
         hot = base.sort_values("Radar score", ascending=False).head(18)
-        st.subheader("Perełki momentum i najmocniejsze aktualne ruchy")
+        st.subheader("Perełki momentum i najmocniejsze ruchy z danych dziennych")
         st.caption("Ten widok nie wymaga potwierdzenia ML. Łapie gwałtowne ruchy i breakouty do szybkiego sprawdzenia — szczególnie przy krypto.")
         hot_columns = [
-            "Symbol", "Klasa", "Radar momentum", "Setup", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d",
+            "Symbol", "Klasa", "Data", "Radar momentum", "Setup", "Zwrot 1d", "Zwrot 5d", "Zwrot 20d",
             "RSI 14", "Radar score", "Ocena", "Ocena kierunku", "Ruch / impet", "AUC walidacji", "Jakość modelu",
         ]
         hot_display = radar_display_frame(hot, columns=hot_columns)
@@ -3692,7 +3729,7 @@ def render_signal_dashboard() -> None:
         st.subheader("Najlepszy stosunek potencjału do ryzyka")
         st.caption("Ranking łączy oczekiwany ruch, przedział niepewności, prawdopodobieństwo, AUC/Brier i zmienność. Wysoki wynik oznacza priorytet analizy, nie pewność zysku.")
         rr_columns = [
-            "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Setup grade", "Akcja radaru", "Teza radaru", "Setup", "Ocena",
+            "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Data", "Setup grade", "Akcja radaru", "Teza radaru", "Setup", "Ocena",
             "Ocena kierunku", "Ruch / impet", "Risk/reward", "Edge score",
             "Deep score", "Setup score", "Risk control", "AUC walidacji", "Brier", "Jakość modelu", "Zmienność roczna",
         ]
@@ -3729,7 +3766,7 @@ def render_signal_dashboard() -> None:
             filtered = confirmed_ml_long_rows(filtered)
         filtered = filtered.sort_values(["Deep score", "Radar score", "Score"], ascending=False)
         columns = [
-            "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Setup grade", "Akcja radaru", "Radar momentum", "Teza radaru",
+            "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Data", "Setup grade", "Akcja radaru", "Radar momentum", "Teza radaru",
             "Deep score", "Setup score", "Setup", "Cena", "Ocena", "P(wzrost)", "Oczekiwany ruch",
             "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "RSI 14", "AUC walidacji", "Brier", "Jakość modelu",
             "Momentum score", "Trend score", "Risk control", "Model edge", "Liquidity score",
@@ -3742,7 +3779,7 @@ def render_signal_dashboard() -> None:
     if not risk_rows.empty:
         with st.expander(f"Alerty ryzyka ({_unique_symbols(risk_rows)} symboli)"):
             columns = [
-                "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Setup grade", "Akcja radaru",
+                "Symbol", "Klasa", "Tryb analizy", "Horyzont", "Data", "Setup grade", "Akcja radaru",
                 "Teza radaru", "Ocena kierunku", "Ruch / impet", "AUC walidacji", "Jakość modelu",
             ]
             risk_display = radar_display_frame(risk_rows, columns=columns)
@@ -4091,7 +4128,7 @@ Kierunek liczy adaptacyjny ensemble: regularizowana regresja logistyczna, histog
 
 Sygnały mają dwie warstwy. **Perełki momentum** łapią nietypowy ruch ceny, wybicia i silne przyspieszenie — to radar odkrywania okazji do dalszego sprawdzenia, szczególnie przy krypto. **Kandydaci ML** wymagają dodatkowo potwierdzonej jakości modelu poza próbką, dlatego pojawiają się rzadziej. Dzięki temu aplikacja nie gubi gorących ruchów, ale też nie traktuje każdego szybkiego wzrostu jak potwierdzonego setupu ML ani dowodu przewagi inwestycyjnej.
 
-Widok **Dzisiejszy radar** dodaje trzecią warstwę: priorytet analizy. **Risk/reward** porównuje górny potencjał z downside z przedziału niepewności, a **Score potencjału** łączy oczekiwany ruch, P(wzrost), jakość AUC/Brier, trend techniczny i zmienność. **Setup intelligence** rozbija ranking na momentum, trend, kontrolę ryzyka, płynność i bieżące wsparcie ML, a **Teza radaru** tłumaczy najważniejsze powody.
+Widok **Ostatni radar** dodaje trzecią warstwę: priorytet analizy. **Risk/reward** porównuje górny potencjał z downside z przedziału niepewności, a **Score potencjału** łączy oczekiwany ruch, P(wzrost), jakość AUC/Brier, trend techniczny i zmienność. **Setup intelligence** rozbija ranking na momentum, trend, kontrolę ryzyka, płynność i bieżące wsparcie ML, a **Teza radaru** tłumaczy najważniejsze powody.
 
 Skaner działa dwustopniowo. **FAST Radar** lekko skanuje cały rynek i wybiera shortlistę przez **Deep score**. Potem **Deep ML** trenuje pełne modele tylko dla najlepszych kandydatów i zastępuje ich wiersze FAST wierszami ML. To skraca czas oczekiwania i zmniejsza szum, ale nadal nie jest poleceniem kupna — to kolejność, w jakiej warto sprawdzać setupy.
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 import fcntl
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -143,6 +143,66 @@ def load_snapshot(path: Path = SNAPSHOT_PATH) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
+
+
+def radar_data_date(value) -> str | None:
+    if value is None or value is pd.NA or value is pd.NaT or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        if len(text) == 10:
+            return date.fromisoformat(text).isoformat()
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        return None
+
+
+def radar_snapshot_provenance(snapshot: dict | None) -> dict:
+    """Describe Radar computation time and daily market-data dates separately."""
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    raw_records = snapshot.get("records")
+    records = raw_records if isinstance(raw_records, list) else []
+    valid_dates: set[str] = set()
+    missing = 0
+    malformed = 0
+    for record in records:
+        if not isinstance(record, dict) or "Data" not in record:
+            missing += 1
+            continue
+        value = record.get("Data")
+        if value is None or value is pd.NA or value is pd.NaT or value == "":
+            missing += 1
+            continue
+        parsed = radar_data_date(value)
+        if parsed is None:
+            malformed += 1
+            continue
+        valid_dates.add(parsed)
+
+    ordered_dates = sorted(valid_dates)
+    return {
+        "computed_at": snapshot.get("updated_at"),
+        "data_as_of_min": ordered_dates[0] if ordered_dates else None,
+        "data_as_of_max": ordered_dates[-1] if ordered_dates else None,
+        "distinct_data_dates": len(ordered_dates),
+        "mixed_data_dates": len(ordered_dates) > 1,
+        "missing_data_dates": missing,
+        "malformed_data_dates": malformed,
+        "invalid_data_dates": missing + malformed,
+        "records_total": len(records),
+        "source": "yfinance",
+        "data_kind": "ADJUSTED_DAILY_OHLCV",
+        "interval": "1d",
+        "is_realtime": False,
+    }
 
 
 def _is_canonical_snapshot_path(path: Path) -> bool:

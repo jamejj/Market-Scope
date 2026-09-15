@@ -1,5 +1,6 @@
 import ast
 import hashlib
+import html
 import json
 import math
 import multiprocessing
@@ -97,6 +98,7 @@ from market_oracle.monitor import (
     snapshot_is_stale,
 )
 import market_oracle.monitor as monitor_module
+import market_oracle.presentation as presentation_module
 import market_oracle.product_verdict as product_verdict_module
 import market_oracle.validation as validation_module
 from market_oracle.presentation import (
@@ -424,6 +426,32 @@ def load_journal_ui_functions():
     )
     exec(compile(module, str(source_path), "exec"), namespace)
     return {name: namespace[name] for name in function_names}
+
+
+def load_watchlist_dataframe():
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    function_names = {"short_datetime", "watch_age_days", "watch_status_label", "watchlist_dataframe"}
+    functions = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in function_names
+    ]
+    assert {node.name for node in functions} == function_names
+    namespace = {
+        "html": html,
+        "pd": pd,
+        "radar_data_date": monitor_module.radar_data_date,
+    }
+    future_annotations = ast.ImportFrom(
+        module="__future__",
+        names=[ast.alias(name="annotations")],
+        level=0,
+    )
+    module = ast.fix_missing_locations(
+        ast.Module(body=[future_annotations, *functions], type_ignores=[])
+    )
+    exec(compile(module, str(source_path), "exec"), namespace)
+    return namespace["watchlist_dataframe"]
 
 
 def test_features_are_finite_and_past_only():
@@ -5860,9 +5888,23 @@ def test_analysis_report_separates_radar_and_full_analysis_dates():
     assert report["cards"][1][0] == "Bieżąca ocena modelu"
     assert report["freshness"]["radar"] == "2026-08-05 07:13"
     assert report["freshness"]["analysis"] == "2026-08-07"
+    assert report["freshness"]["note"] == (
+        "Czas policzenia skanu radaru i data danych rynkowych pełnej analizy "
+        "opisują różne momenty; są pokazane osobno."
+    )
+    assert "spójne datowo" not in report["freshness"]["note"]
+    assert "minimalnie różne wartości" not in report["freshness"]["note"]
     assert "Candidate v1" not in report["headline"]
     assert "Candidate v1" not in report["body"]
     assert any("Dolny zakres 90%" in item for item in report["counterpoints"])
+
+    same_day_report = build_analysis_report(
+        result,
+        {},
+        {"radar_updated_at": "2026-08-07T07:13:00+02:00"},
+    )
+    assert same_day_report["freshness"]["note"] == report["freshness"]["note"]
+    assert "spójne datowo" not in same_day_report["freshness"]["note"]
 
 
 def test_analysis_report_uses_shared_verdict_for_expected_return_conflict():
@@ -5931,7 +5973,7 @@ def test_analysis_report_separates_current_model_assessment_from_edge_evidence()
     assert "BRAK PRZEWAGI" not in report_text
 
 
-def test_analysis_report_describes_running_radar_snapshot_without_dash():
+def test_analysis_report_keeps_running_radar_start_separate_from_computed_at():
     result = {
         "symbol": "TEST",
         "last_date": pd.Timestamp("2026-08-07"),
@@ -5952,8 +5994,8 @@ def test_analysis_report_describes_running_radar_snapshot_without_dash():
         {"radar_status": "running", "radar_started_at": "2026-08-08T20:05:12+02:00"},
     )
 
-    assert report["freshness"]["radar"] == "skan w toku od 2026-08-08 20:05"
-    assert report["freshness"]["radar"] != "—"
+    assert report["freshness"]["radar"] == "—"
+    assert "Skan radaru jest w toku od 2026-08-08 20:05" in report["freshness"]["note"]
     assert "trakcie odświeżania" in report["freshness"]["note"]
 
 
@@ -6009,6 +6051,245 @@ def test_radar_display_contract_maps_exact_segments_and_renames_only_display_cop
     assert display.loc[0, "Wsparcie ML"] == 64.0
     assert "Edge score" not in display.columns
     assert "Model edge" not in display.columns
+
+
+def test_radar_snapshot_provenance_keeps_old_market_date_separate_from_fresh_computation():
+    record = _schema_record(mode="ML", decision=1, reason="LONG_CONFIRMED")
+    record["Data"] = "2024-01-05"
+    snapshot = _fresh_schema_snapshot([record])
+
+    provenance = monitor_module.radar_snapshot_provenance(snapshot)
+
+    assert snapshot_is_stale(snapshot) is False
+    assert provenance["computed_at"] == snapshot["updated_at"]
+    assert provenance["data_as_of_min"] == "2024-01-05"
+    assert provenance["data_as_of_max"] == "2024-01-05"
+    assert provenance["distinct_data_dates"] == 1
+    assert provenance["mixed_data_dates"] is False
+    assert "freshness_state" not in provenance
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2026-09-10", "2026-09-10"),
+        ("2026-09-10T22:15:00+00:00", "2026-09-10"),
+        (date(2026, 9, 10), "2026-09-10"),
+        (datetime(2026, 9, 10, 22, 15), "2026-09-10"),
+        (pd.Timestamp("2026-09-10T22:15:00Z"), "2026-09-10"),
+        ("today", None),
+        (0, None),
+        (True, None),
+        (pd.NaT, None),
+    ],
+)
+def test_radar_data_date_accepts_only_explicit_dates(value, expected):
+    assert monitor_module.radar_data_date(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("records", "expected"),
+    [
+        (
+            [{"Data": "2026-09-10"}, {"Data": "2026-09-10"}],
+            {
+                "data_as_of_min": "2026-09-10",
+                "data_as_of_max": "2026-09-10",
+                "distinct_data_dates": 1,
+                "mixed_data_dates": False,
+                "missing_data_dates": 0,
+                "malformed_data_dates": 0,
+            },
+        ),
+        (
+            [{"Data": "2026-09-09"}, {"Data": "2026-09-10"}],
+            {
+                "data_as_of_min": "2026-09-09",
+                "data_as_of_max": "2026-09-10",
+                "distinct_data_dates": 2,
+                "mixed_data_dates": True,
+                "missing_data_dates": 0,
+                "malformed_data_dates": 0,
+            },
+        ),
+        (
+            [{"Data": "2026-09-10"}, {}, {"Data": "today"}, {"Data": pd.NaT}],
+            {
+                "data_as_of_min": "2026-09-10",
+                "data_as_of_max": "2026-09-10",
+                "distinct_data_dates": 1,
+                "mixed_data_dates": False,
+                "missing_data_dates": 2,
+                "malformed_data_dates": 1,
+            },
+        ),
+        (
+            [],
+            {
+                "data_as_of_min": None,
+                "data_as_of_max": None,
+                "distinct_data_dates": 0,
+                "mixed_data_dates": False,
+                "missing_data_dates": 0,
+                "malformed_data_dates": 0,
+            },
+        ),
+    ],
+)
+def test_radar_snapshot_provenance_reports_uniform_mixed_and_unknown_dates(records, expected):
+    snapshot = {
+        "updated_at": "2026-09-14T08:15:00+00:00",
+        "records": records,
+    }
+
+    provenance = monitor_module.radar_snapshot_provenance(snapshot)
+
+    for key, value in expected.items():
+        assert provenance[key] == value
+    assert provenance["records_total"] == len(records)
+    assert provenance["source"] == "yfinance"
+    assert provenance["data_kind"] == "ADJUSTED_DAILY_OHLCV"
+    assert provenance["interval"] == "1d"
+    assert provenance["is_realtime"] is False
+
+
+def test_radar_provenance_view_exposes_scan_time_data_range_and_unknowns_without_fake_freshness():
+    mixed = presentation_module.radar_provenance_view({
+        "computed_at": "2026-09-14T08:15:00+00:00",
+        "data_as_of_min": "2026-09-09",
+        "data_as_of_max": "2026-09-10",
+        "distinct_data_dates": 2,
+        "mixed_data_dates": True,
+        "records_total": 3,
+        "missing_data_dates": 1,
+        "malformed_data_dates": 0,
+        "source": "yfinance",
+        "data_kind": "ADJUSTED_DAILY_OHLCV",
+        "interval": "1d",
+        "is_realtime": False,
+    })
+    unknown = presentation_module.radar_provenance_view({
+        "computed_at": "2026-09-14T08:15:00+00:00",
+        "data_as_of_min": None,
+        "data_as_of_max": None,
+        "distinct_data_dates": 0,
+        "mixed_data_dates": False,
+        "records_total": 0,
+        "missing_data_dates": 0,
+        "malformed_data_dates": 0,
+        "source": "yfinance",
+        "data_kind": "ADJUSTED_DAILY_OHLCV",
+        "interval": "1d",
+        "is_realtime": False,
+    })
+
+    assert mixed["computed_at"] == "2026-09-14 08:15"
+    assert mixed["data_as_of"] == "2026-09-09 – 2026-09-10"
+    assert "mieszane daty" in mixed["warning"]
+    assert "1 wiersz" in mixed["warning"]
+    assert mixed["source_note"] == (
+        "yfinance · adjusted OHLCV · 1d · nie realtime · "
+        "stan ostatniego baru niezweryfikowany"
+    )
+    assert "CURRENT" not in mixed.values()
+    assert "STALE" not in mixed.values()
+    assert unknown["data_as_of"] == "UNKNOWN"
+    assert "nie zawiera rekordów" in unknown["warning"]
+    assert unknown["computed_at"] != unknown["data_as_of"]
+
+
+def test_radar_display_frame_labels_data_date_and_adjusted_daily_close_without_mutating_raw():
+    raw = pd.DataFrame([{"Symbol": "SPY", "Data": "2026-09-10", "Cena": 651.25}])
+    original = raw.copy(deep=True)
+
+    display = radar_display_frame(raw, columns=["Symbol", "Data", "Cena"])
+
+    pd.testing.assert_frame_equal(raw, original)
+    assert list(raw.columns) == ["Symbol", "Data", "Cena"]
+    assert list(display.columns) == ["Symbol", "Dane do", "Close z baru 1d (adjusted)"]
+    assert display.loc[0, "Dane do"] == "2026-09-10"
+    assert display.loc[0, "Close z baru 1d (adjusted)"] == 651.25
+
+
+@pytest.mark.parametrize("value", [None, "", "today", 0, True, pd.NaT])
+def test_radar_display_frame_marks_missing_or_malformed_market_date_unknown(value):
+    raw = pd.DataFrame([{"Symbol": "SPY", "Data": value}])
+    original = raw.copy(deep=True)
+
+    display = radar_display_frame(raw, columns=["Symbol", "Data"])
+
+    pd.testing.assert_frame_equal(raw, original)
+    assert display.loc[0, "Dane do"] == "UNKNOWN"
+
+
+def test_start_guidance_separates_scan_computation_from_market_data_as_of():
+    snapshot = {
+        "status": "complete",
+        "updated_at": "2026-09-14T08:15:00+00:00",
+        "records": [guidance_row("SPY") | {"Data": "2026-09-10"}],
+    }
+    provenance = monitor_module.radar_snapshot_provenance(snapshot)
+
+    guidance = build_start_guidance(
+        snapshot=snapshot,
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+        market_data_provenance=provenance,
+    )
+
+    assert guidance["computed_at"] == "2026-09-14 08:15"
+    assert guidance["data_as_of"] == "2026-09-10"
+    assert guidance["computed_at"] != guidance["data_as_of"]
+    assert guidance["data_source_note"].endswith("stan ostatniego baru niezweryfikowany")
+
+
+def test_start_guidance_running_overview_does_not_label_scan_start_as_computed():
+    snapshot = {
+        "status": "running",
+        "started_at": "2026-09-14T17:05:00+00:00",
+        "updated_at": None,
+        "records": [guidance_row("SPY") | {"Data": "2026-09-10"}],
+        "universe_total": 1,
+        "fast_completed": 1,
+    }
+    guidance = build_start_guidance(
+        snapshot=snapshot,
+        cockpit={},
+        automation={},
+        proof_state={"label": "OK", "klass": "", "detail": "healthy"},
+        market_data_provenance=monitor_module.radar_snapshot_provenance(snapshot),
+    )
+
+    overview = next(card for card in guidance["cards"] if card["id"] == "radar_overview")
+    assert guidance["computed_at"] == "—"
+    assert "skan w toku od 2026-09-14 17:05" in overview["status"]
+    assert "skan policzony: skan w toku" not in overview["status"]
+
+
+def test_watchlist_table_separates_added_time_from_saved_market_data_date():
+    table = load_watchlist_dataframe()([
+        {
+            "symbol": "SPY",
+            "status": "ACTIVE",
+            "horizon": 20,
+            "source": "FULL_ANALYSIS",
+            "created_at": "2026-09-14T08:15:00+00:00",
+            "data_as_of": "2026-09-10",
+            "probability_up": 0.61,
+            "expected_return": 0.03,
+            "quality": "WYSOKA",
+            "thesis": "test",
+        },
+        {"symbol": "QQQ", "status": "ACTIVE", "horizon": 20, "data_as_of": "today"},
+        {"symbol": "IWM", "status": "ACTIVE", "horizon": 20, "data_as_of": None},
+    ])
+
+    assert table.loc[0, "Dodano"] == "2026-09-14 08:15"
+    assert table.loc[0, "Dane z"] == "2026-09-10"
+    assert table.loc[0, "Dodano"] != table.loc[0, "Dane z"]
+    assert table.loc[1, "Dane z"] == "UNKNOWN"
+    assert table.loc[2, "Dane z"] == "UNKNOWN"
 
 
 def test_radar_machine_contract_survives_dataframe_float_coercion_without_promoting_fast():
@@ -6527,9 +6808,11 @@ def test_start_dashboard_uses_raw_snapshot_only_for_staleness_then_safe_local_co
     guidance_keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in guidance_call.keywords}
 
     assert ast.unparse(assignments["radar_stale"]) == "snapshot_is_stale(snapshot, max_age_hours=30)"
+    assert ast.unparse(assignments["market_data_provenance"]) == "radar_snapshot_provenance(snapshot)"
     assert ast.unparse(assignments["start_snapshot"]) == "_rankable_radar_snapshot(snapshot)"
     assert guidance_keywords["snapshot"] == "start_snapshot"
     assert guidance_keywords["radar_stale"] == "radar_stale"
+    assert guidance_keywords["market_data_provenance"] == "market_data_provenance"
     assert ast.unparse(render_call.args[1]) == "start_snapshot"
 
 
@@ -6635,6 +6918,7 @@ def test_start_guidance_running_scan_warns_about_partial_data():
     )
 
     assert guidance["freshness"] == "skan w toku od 2026-08-08 20:05"
+    assert guidance["computed_at"] == "—"
     assert "częściow" in guidance["warning"]
     assert guidance["cards"][0]["id"] == "radar_running"
     assert "aktualizowany" in guidance["cards"][0]["title"]
