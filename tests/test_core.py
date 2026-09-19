@@ -310,6 +310,7 @@ def load_radar_view_functions():
         "with_signal_display_columns",
         "build_signal_radar_brief",
         "build_setup_drilldown",
+        "radar_export_frame",
     }
     functions = [
         node for node in tree.body
@@ -1942,12 +1943,36 @@ def _schema_record(*, mode="ML", decision=1, reason="LONG_CONFIRMED"):
     return record
 
 
-def _fresh_schema_snapshot(records, *, schema_version=7):
+def _fresh_schema_snapshot(records, *, schema_version=8):
+    symbols = sorted({record.get("Symbol") for record in records if isinstance(record, dict) and record.get("Symbol")}) or ["TEST"]
+    horizons = [1, 5, 20]
+    fast_expected = {(symbol, horizon) for symbol in symbols for horizon in horizons}
+    fast_success = {(record.get("Symbol"), record.get("Horyzont")) for record in records if isinstance(record, dict)}
+    shortlist = symbols if any(record.get("Tryb analizy") == "ML" for record in records if isinstance(record, dict)) else []
+    ml_expected = {(symbol, horizon) for symbol in shortlist for horizon in horizons}
+    ml_success = {(record.get("Symbol"), record.get("Horyzont")) for record in records if isinstance(record, dict) and record.get("Tryb analizy") == "ML"}
+
+    def section(expected, successful):
+        return {
+            "expected_pairs": [list(pair) for pair in sorted(expected)],
+            "successful_pairs": [list(pair) for pair in sorted(successful)],
+            "missing_pairs": [list(pair) for pair in sorted(expected - successful)],
+        }
+
     return {
         "status": "complete",
         "schema_version": schema_version,
         "updated_at": pd.Timestamp.now(tz="UTC").isoformat(),
-        "horizons": [1, 5, 20],
+        "horizons": horizons,
+        "universe_total": len(symbols),
+        "shortlist": shortlist,
+        "coverage": {
+            "requested_symbols": symbols,
+            "requested_horizons": horizons,
+            "fast": section(fast_expected, fast_success),
+            "ml": section(ml_expected, ml_success),
+        },
+        "coverage_status": "partial" if fast_expected - fast_success or ml_expected - ml_success else "complete",
         "completed": 10_000,
         "total": 10_000,
         "records": records,
@@ -1955,8 +1980,8 @@ def _fresh_schema_snapshot(records, *, schema_version=7):
     }
 
 
-def test_schema_7_accepts_mixed_fast_ml_records_with_valid_ml_contract():
-    assert SCAN_SCHEMA_VERSION == 7
+def test_schema_8_accepts_mixed_fast_ml_records_with_valid_ml_contract():
+    assert SCAN_SCHEMA_VERSION == 8
     snapshot = _fresh_schema_snapshot([
         _schema_record(mode="FAST"),
         _schema_record(mode="ML", decision=1, reason="LONG_CONFIRMED"),
@@ -6632,7 +6657,8 @@ def test_radar_csv_export_wiring_preserves_raw_probability_and_copy():
         and node.args[0].value == "Pobierz ranking CSV"
     )
 
-    assert ast.unparse(download.args[1]) == "filtered.to_csv(index=False).encode()"
+    assert ast.unparse(download.args[1]) == "export.to_csv(index=False).encode()"
+    assert "radar_export_frame(filtered, snapshot)" in ast.get_source_segment(source, render)
 
     raw = pd.DataFrame([{
         "Tryb analizy": "ML",
@@ -6644,10 +6670,12 @@ def test_radar_csv_export_wiring_preserves_raw_probability_and_copy():
     original_csv = raw.to_csv(index=False)
 
     radar_display_frame(raw)
+    exported = load_radar_view_functions()["radar_export_frame"](raw, {"coverage_status": "partial", "coverage": {}})
 
     assert raw.to_csv(index=False) == original_csv
-    assert "KANDYDAT WZROSTOWY" in original_csv
-    assert "1.1" in original_csv
+    assert "KANDYDAT WZROSTOWY" in exported.to_csv(index=False)
+    assert "1.1" in exported.to_csv(index=False)
+    assert exported["Coverage status"].iloc[0] == "partial"
 
 
 def test_rankable_radar_frame_excludes_invalid_ml_before_sorting_without_mutating_raw():

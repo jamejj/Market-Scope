@@ -1508,9 +1508,12 @@ def signal_scan_contract(frame: pd.DataFrame, snapshot: dict) -> dict:
     fast_rows = frame[frame["Tryb analizy"].astype(str).eq("FAST")] if "Tryb analizy" in frame else pd.DataFrame()
     ml_rows = frame[frame["Tryb analizy"].astype(str).eq("ML")] if "Tryb analizy" in frame else pd.DataFrame()
     universe_total = int(snapshot.get("universe_total") or snapshot.get("total") or _unique_symbols(frame))
-    fast_completed = int(snapshot.get("fast_completed") or (universe_total if not frame.empty else 0))
+    fast_completed = int(snapshot.get("fast_completed") or 0)
     ml_attempted = int(snapshot.get("ml_completed") or 0)
     ml_total = int(snapshot.get("ml_total") or 0)
+    coverage = snapshot.get("coverage") if isinstance(snapshot.get("coverage"), dict) else {}
+    fast_coverage = coverage.get("fast") if isinstance(coverage.get("fast"), dict) else {}
+    ml_coverage = coverage.get("ml") if isinstance(coverage.get("ml"), dict) else {}
     return {
         "universe_total": universe_total,
         "fast_completed": fast_completed,
@@ -1522,6 +1525,11 @@ def signal_scan_contract(frame: pd.DataFrame, snapshot: dict) -> dict:
         "ml_symbols": _unique_symbols(ml_rows),
         "ml_attempted": ml_attempted,
         "ml_total": ml_total,
+        "coverage_status": snapshot.get("coverage_status") or "unknown",
+        "fast_success_pairs": len(fast_coverage.get("successful_pairs") or []),
+        "fast_expected_pairs": len(fast_coverage.get("expected_pairs") or []),
+        "ml_success_pairs": len(ml_coverage.get("successful_pairs") or []),
+        "ml_expected_pairs": len(ml_coverage.get("expected_pairs") or []),
         "deep_limit": snapshot.get("deep_limit"),
         "no_data": errors["no_data"],
         "provider_no_data": errors["provider_no_data"],
@@ -1542,14 +1550,12 @@ def scan_stage_summary(snapshot: dict, universe_size: int = 0) -> dict:
     status = str(snapshot.get("status") or "offline")
     universe_total = to_int(snapshot.get("universe_total") or universe_size)
     fast_completed = to_int(snapshot.get("fast_completed"))
-    if not fast_completed and status == "complete" and universe_total:
-        fast_completed = universe_total
     completed = to_int(snapshot.get("completed"))
     total = to_int(snapshot.get("total"))
     ml_completed = to_int(snapshot.get("ml_completed"))
     ml_total = to_int(snapshot.get("ml_total"))
 
-    fast_label = f"FAST {fast_completed}/{universe_total}" if universe_total else "FAST —"
+    fast_label = f"FAST {fast_completed}/{universe_total} prób" if universe_total else "FAST —"
     if status == "running" and universe_total and fast_completed >= universe_total:
         top_status = "Deep ML trwa"
         primary = fast_label
@@ -1559,18 +1565,19 @@ def scan_stage_summary(snapshot: dict, universe_size: int = 0) -> dict:
         primary = fast_label
         detail = "FAST / Deep ML w toku"
     elif status == "complete":
-        top_status = "Gotowy"
+        coverage_status = snapshot.get("coverage_status")
+        top_status = "Gotowy" if coverage_status == "complete" else "Pokrycie częściowe" if coverage_status == "partial" else "Pokrycie nieznane"
         primary = fast_label
-        detail = "Radar gotowy"
+        detail = "Radar gotowy" if coverage_status == "complete" else "Skan zakończony · pokrycie częściowe" if coverage_status == "partial" else "Skan zakończony · pokrycie nieznane"
     else:
         top_status = "Offline" if status == "offline" else status
         primary = fast_label
         detail = f"Status radaru: {status}"
 
     if ml_total:
-        progress = f"Deep ML {ml_completed}/{ml_total} kandydatów"
+        progress = f"Deep ML {ml_completed}/{ml_total} prób kandydatów"
     elif total:
-        progress = f"pełny workflow {completed}/{total} kroków"
+        progress = f"workflow {completed}/{total} wykonanych prób"
     else:
         progress = "dwustopniowy radar FAST → Deep ML"
     return {
@@ -1582,6 +1589,27 @@ def scan_stage_summary(snapshot: dict, universe_size: int = 0) -> dict:
         "fast_completed": fast_completed,
         "universe_total": universe_total,
     }
+
+
+def radar_scan_completion_view(snapshot: dict, stale: bool) -> dict[str, str]:
+    """Describe workflow completion without claiming unproven market coverage."""
+    if snapshot.get("coverage_status") == "partial":
+        suffix = " Snapshot wymaga też odświeżenia." if stale else ""
+        return {"tone": "warning", "text": f"Skan zakończony · pokrycie częściowe. Ranking obejmuje tylko dostępne wyniki.{suffix}"}
+    if stale or snapshot.get("coverage_status") != "complete":
+        return {"tone": "warning", "text": "Skan zakończony, ale pełne pokrycie nie jest potwierdzone. Snapshot wymaga odświeżenia."}
+    return {"tone": "success", "text": "Skan zakończony · pełne pokrycie."}
+
+
+def radar_export_frame(frame: pd.DataFrame, snapshot: dict) -> pd.DataFrame:
+    """Add coverage provenance to a CSV copy, leaving ranking values untouched."""
+    output = frame.copy()
+    coverage = snapshot.get("coverage") if isinstance(snapshot.get("coverage"), dict) else {}
+    for mode, label in (("fast", "FAST coverage"), ("ml", "ML coverage")):
+        section = coverage.get(mode) if isinstance(coverage.get(mode), dict) else {}
+        output[label] = f"{len(section.get('successful_pairs') or [])}/{len(section.get('expected_pairs') or [])}"
+    output["Coverage status"] = snapshot.get("coverage_status") or "unknown"
+    return output
 
 
 def with_signal_display_columns(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1641,10 +1669,16 @@ def build_signal_radar_brief(
     status = str(snapshot.get("status") or "unknown")
     if status == "running":
         status_text = f"FAST {contract['fast_completed']}/{contract['universe_total']} · skan trwa"
+    elif status == "complete" and snapshot.get("coverage_status") == "complete":
+        status_text = (
+            f"FAST próby {contract['fast_completed']}/{contract['universe_total']} · pokrycie pełne · ML rows {contract['ml_rows']} · "
+            f"krypto bez danych {len(contract['no_data'])} · błędy {len(contract['failed'])}"
+        )
     elif status == "complete":
         status_text = (
-            f"FAST complete · ML rows {contract['ml_rows']} · "
-            f"krypto bez danych {len(contract['no_data'])} · błędy {len(contract['failed'])}"
+            f"Skan zakończony · pokrycie {contract.get('coverage_status', 'unknown')} · "
+            f"FAST {contract.get('fast_success_pairs', 0)}/{contract.get('fast_expected_pairs', 0)} par · "
+            f"ML {contract.get('ml_success_pairs', 0)}/{contract.get('ml_expected_pairs', 0)} par"
         )
     else:
         status_text = f"Status: {status}"
@@ -1707,6 +1741,8 @@ def build_signal_radar_brief(
     note = (
         "Ranking jest jeszcze częściowy — pełny obraz pojawi się po zakończeniu Deep ML."
         if status == "running"
+        else "Pokrycie częściowe — brakujące wyniki mogą zmienić kolejność rankingu."
+        if snapshot.get("coverage_status") == "partial"
         else "To radar badawczy: pomaga ustalić kolejność analizy, ale nie zastępuje decyzji inwestora."
     )
     leader_detail = (
@@ -3516,7 +3552,10 @@ def render_signal_dashboard() -> None:
             updated = updated.tz_convert("Europe/Warsaw")
         horizons = snapshot.get("horizons") or [snapshot.get("horizon", 20)]
         horizon_text = ", ".join(f"{h}d" for h in horizons)
-        if stale_snapshot:
+        completion_view = radar_scan_completion_view(snapshot, stale_snapshot)
+        if snapshot.get("coverage_status") == "partial":
+            st.warning(completion_view["text"])
+        elif stale_snapshot:
             if auto_started:
                 st.warning(
                     f"Ten ranking był stary albo niepełny (**{horizon_text}**, {snapshot.get('total', 0)} instrumentów), "
@@ -3528,8 +3567,10 @@ def render_signal_dashboard() -> None:
                     f"{snapshot.get('total', 0)} instrumentów). Uruchom ponownie aplikację albo kliknij **Przelicz cały ranking teraz**, "
                     "żeby dostać radar 1d/5d/20d z hot movers."
                 )
+        elif completion_view["tone"] == "success":
+            st.success(f"Skan policzony: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzonty: **{horizon_text}** · pełne pokrycie")
         else:
-            st.success(f"Skan policzony: **{updated.strftime('%Y-%m-%d %H:%M')}** · horyzonty: **{horizon_text}**")
+            st.warning(completion_view["text"])
 
     st.caption(
         f"Dane rynkowe do: **{market_data_view['data_as_of']}** · "
@@ -3574,10 +3615,11 @@ def render_signal_dashboard() -> None:
     crypto_failed = [symbol for symbol in data_contract["failed"] if str(symbol).upper().endswith("-USD")]
     summary = st.columns(6)
     summary[0].metric(
-        "FAST skan",
+        "FAST próby",
         f"{data_contract['fast_completed']}/{data_contract['universe_total']}",
-        help="Ile instrumentów przeszło lekki skan techniczny całego universe.",
+        help="Liczba wykonanych prób FAST, nie liczba instrumentów z kompletnym wynikiem.",
     )
+    summary[0].caption(f"Pokrycie FAST: {data_contract['fast_success_pairs']}/{data_contract['fast_expected_pairs']} par symbol–horyzont")
     summary[1].metric(
         "W rankingu",
         data_contract["ranked_symbols"],
@@ -3597,8 +3639,10 @@ def render_signal_dashboard() -> None:
     summary[5].caption("krypto / runtime")
     if snapshot.get("scan_mode") == "two_stage":
         st.caption(
-            f"Tryb dwustopniowy: FAST skanuje cały rynek (**{data_contract['fast_completed']}/{data_contract['universe_total']}**), "
-            f"a Deep ML wzbogaca shortlistę. Próby ML: **{data_contract['ml_attempted']}/{data_contract['ml_total']}**, "
+            f"Tryb dwustopniowy: próby FAST **{data_contract['fast_completed']}/{data_contract['universe_total']}**, "
+            f"pokrycie FAST **{data_contract['fast_success_pairs']}/{data_contract['fast_expected_pairs']}** par. "
+            f"Deep ML wzbogaca shortlistę: próby **{data_contract['ml_attempted']}/{data_contract['ml_total']}**, "
+            f"pokrycie ML **{data_contract['ml_success_pairs']}/{data_contract['ml_expected_pairs']}** par, "
             f"zapisane ML rows: **{data_contract['ml_rows']}**. FAST rows nie są zapisywane do Journala jako directional signals."
         )
 
@@ -3774,7 +3818,9 @@ def render_signal_dashboard() -> None:
         ]
         display_filtered = radar_display_frame(filtered, columns=columns)
         st.dataframe(display_filtered.style.format(formats, na_rep="—"), use_container_width=True, hide_index=True)
-        st.download_button("Pobierz ranking CSV", filtered.to_csv(index=False).encode(), "marketscope_signals.csv", "text/csv")
+        export = radar_export_frame(filtered, snapshot)
+        export_suffix = "partial" if snapshot.get("coverage_status") == "partial" else "full" if snapshot.get("coverage_status") == "complete" else "unknown"
+        st.download_button("Pobierz ranking CSV", export.to_csv(index=False).encode(), f"marketscope_signals_{export_suffix}.csv", "text/csv")
 
     if not risk_rows.empty:
         with st.expander(f"Alerty ryzyka ({_unique_symbols(risk_rows)} symboli)"):

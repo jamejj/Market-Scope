@@ -17,7 +17,7 @@ from .product_verdict import product_forecast_verdict, radar_ml_input_error_code
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SNAPSHOT_PATH = DATA_DIR / "signals.json"
 LOCK_PATH = DATA_DIR / "signals.lock"
-SCAN_SCHEMA_VERSION = 7
+SCAN_SCHEMA_VERSION = 8
 DEEP_SCAN_LIMIT = 36
 EXPECTED_HORIZONS = {1, 5, 20}
 EXPECTED_RECORD_FIELDS = {
@@ -93,6 +93,105 @@ def _merge_rankable_records(
             errors[symbol] = error_code
             continue
         rows_by_key[(symbol, int(record.get("Horyzont") or default_horizon))] = record
+
+
+def _coverage_section(expected: set[tuple[str, int]], successful: set[tuple[str, int]]) -> dict:
+    def pairs(values: set[tuple[str, int]]) -> list[list]:
+        return [[symbol, horizon] for symbol, horizon in sorted(values)]
+
+    accepted = expected & successful
+    return {
+        "expected_pairs": pairs(expected),
+        "successful_pairs": pairs(accepted),
+        "missing_pairs": pairs(expected - accepted),
+    }
+
+
+def _coverage_metadata(
+    symbols: list[str], horizons: tuple[int, ...], shortlist: list[str],
+    fast_success: set[tuple[str, int]], ml_success: set[tuple[str, int]],
+) -> dict:
+    return {
+        "requested_symbols": list(symbols),
+        "requested_horizons": list(horizons),
+        "fast": _coverage_section({(symbol, horizon) for symbol in symbols for horizon in horizons}, fast_success),
+        "ml": _coverage_section({(symbol, horizon) for symbol in shortlist for horizon in horizons}, ml_success),
+    }
+
+
+def _valid_coverage_metadata(snapshot: dict) -> bool:
+    coverage = snapshot.get("coverage")
+    symbols = coverage.get("requested_symbols") if isinstance(coverage, dict) else None
+    horizons = coverage.get("requested_horizons") if isinstance(coverage, dict) else None
+    shortlist = snapshot.get("shortlist")
+    if (
+        not isinstance(symbols, list) or not symbols
+        or any(not isinstance(symbol, str) or not symbol for symbol in symbols)
+        or not isinstance(horizons, list) or not horizons
+        or any(type(horizon) is not int or horizon <= 0 for horizon in horizons)
+        or len(set(horizons)) != len(horizons)
+        or not isinstance(shortlist, list)
+        or any(not isinstance(symbol, str) or symbol not in symbols for symbol in shortlist)
+        or coverage.get("requested_horizons") != snapshot.get("horizons")
+        or snapshot.get("universe_total") != len(symbols)
+        or not isinstance(snapshot.get("errors"), dict)
+    ):
+        return False
+
+    def pair_set(value) -> set[tuple[str, int]] | None:
+        if not isinstance(value, list):
+            return None
+        pairs: set[tuple[str, int]] = set()
+        for pair in value:
+            if (
+                not isinstance(pair, list) or len(pair) != 2
+                or not isinstance(pair[0], str) or not pair[0]
+                or type(pair[1]) is not int or pair[1] <= 0
+            ):
+                return None
+            pairs.add((pair[0], pair[1]))
+        return pairs if len(pairs) == len(value) else None
+
+    missing_any = False
+    success_by_mode: dict[str, set[tuple[str, int]]] = {}
+    for mode, expected in (
+        ("fast", {(symbol, horizon) for symbol in symbols for horizon in horizons}),
+        ("ml", {(symbol, horizon) for symbol in shortlist for horizon in horizons}),
+    ):
+        section = coverage.get(mode)
+        if not isinstance(section, dict):
+            return False
+        declared = pair_set(section.get("expected_pairs"))
+        successful = pair_set(section.get("successful_pairs"))
+        missing = pair_set(section.get("missing_pairs"))
+        if declared != expected or successful is None or missing is None:
+            return False
+        if not successful <= expected or missing != expected - successful:
+            return False
+        success_by_mode[mode] = successful
+        missing_any |= bool(missing)
+
+    records = snapshot.get("records")
+    if not isinstance(records, list):
+        return False
+    observed = {"fast": set(), "ml": set()}
+    for record in records:
+        if not isinstance(record, dict):
+            return False
+        mode = str(record.get("Tryb analizy") or "").lower()
+        symbol, horizon = record.get("Symbol"), record.get("Horyzont")
+        if mode not in observed or not isinstance(symbol, str) or type(horizon) is not int:
+            return False
+        observed[mode].add((symbol, horizon))
+    if not success_by_mode["ml"] <= observed["ml"]:
+        return False
+    if not success_by_mode["fast"] - success_by_mode["ml"] <= observed["fast"]:
+        return False
+    if not observed["ml"] <= success_by_mode["ml"] or not observed["fast"] <= success_by_mode["fast"]:
+        return False
+
+    expected_status = "partial" if missing_any or snapshot["errors"] else "complete"
+    return snapshot.get("coverage_status") == expected_status
 
 
 def select_deep_shortlist(frame: pd.DataFrame, limit: int = DEEP_SCAN_LIMIT) -> list[str]:
@@ -229,6 +328,11 @@ def run_signal_scan(
         return load_snapshot(path) or {"status": "running", "completed": 0, "total": 0, "records": [], "errors": {}}
 
     universe = symbols or default_universe()
+    scan_horizons = horizons or (horizon,)
+    fast_expected = {(symbol, item) for symbol in universe for item in scan_horizons}
+    fast_success: set[tuple[str, int]] = set()
+    ml_success: set[tuple[str, int]] = set()
+    shortlist: list[str] = []
     started = datetime.now(timezone.utc)
     rows_by_key: dict[tuple[str, int], dict] = {}
     errors: dict[str, str] = {}
@@ -246,21 +350,32 @@ def run_signal_scan(
         "scan_mode": "two_stage", "scan_phase": "fast_radar",
         "deep_limit": deep_limit, "shortlist": [], "universe_total": len(universe),
         "fast_completed": 0, "ml_completed": 0, "ml_total": 0,
-        "horizon": horizon, "horizons": list(horizons or (horizon,)), "years": years, "completed": 0, "total": len(universe),
+        "horizon": horizon, "horizons": list(scan_horizons), "years": years, "completed": 0, "total": len(universe),
         "records": [], "errors": errors,
         "journal_status": "NOT_ATTEMPTED" if canonical_snapshot else "NOT_APPLICABLE",
     }
+
+    def update_coverage() -> None:
+        payload["coverage"] = _coverage_metadata(universe, scan_horizons, shortlist, fast_success, ml_success)
+        missing = payload["coverage"]["fast"]["missing_pairs"] or payload["coverage"]["ml"]["missing_pairs"]
+        payload["coverage_status"] = "partial" if missing or errors else "complete"
+
+    update_coverage()
     save_snapshot(payload, path)
 
     try:
-        scan_horizons = horizons or (horizon,)
         for completed, symbol in enumerate(universe, start=1):
             frame, failure = scan_market_fast([symbol], horizons=scan_horizons, years=fast_years)
             errors.update(failure)
             if not frame.empty:
                 _merge_rankable_records(rows_by_key, _records(frame), horizon, errors)
+                fast_success.update({
+                    key for key, row in rows_by_key.items()
+                    if key in fast_expected and row.get("Tryb analizy") == "FAST"
+                })
             rows = sorted(rows_by_key.values(), key=lambda row: (row.get("Horyzont") or horizon, -(row.get("Deep score") or row.get("Score") or float("-inf"))))
             payload.update({"completed": completed, "fast_completed": completed, "records": rows, "errors": errors})
+            update_coverage()
             save_snapshot(payload, path)
 
         fast_frame = pd.DataFrame(rows_by_key.values())
@@ -270,8 +385,10 @@ def run_signal_scan(
             "completed": len(universe), "total": len(universe) + len(shortlist),
             "records": sorted(rows_by_key.values(), key=lambda row: (row.get("Horyzont") or horizon, -(row.get("Deep score") or row.get("Score") or float("-inf")))),
         })
+        update_coverage()
         save_snapshot(payload, path)
 
+        ml_expected = {(symbol, item) for symbol in shortlist for item in scan_horizons}
         for ml_completed, symbol in enumerate(shortlist, start=1):
             if horizons:
                 frame, failure = scan_market_multi([symbol], horizons=scan_horizons, years=years)
@@ -280,11 +397,16 @@ def run_signal_scan(
             errors.update(failure)
             if not frame.empty:
                 _merge_rankable_records(rows_by_key, _records(frame), horizon, errors)
+                ml_success.update({
+                    key for key, row in rows_by_key.items()
+                    if key in ml_expected and row.get("Tryb analizy") == "ML"
+                })
             rows = sorted(rows_by_key.values(), key=lambda row: (row.get("Horyzont") or horizon, -(row.get("Deep score") or row.get("Score") or float("-inf"))))
             payload.update({
                 "completed": len(universe) + ml_completed, "ml_completed": ml_completed,
                 "records": rows, "errors": errors,
             })
+            update_coverage()
             save_snapshot(payload, path)
 
         rows = sorted(rows_by_key.values(), key=lambda row: (row.get("Horyzont") or horizon, -(row.get("Deep score") or row.get("Score") or float("-inf"))))
@@ -293,6 +415,7 @@ def run_signal_scan(
             "scan_phase": "complete", "completed": len(universe) + len(shortlist),
             "total": len(universe) + len(shortlist), "records": rows, "errors": errors,
         })
+        update_coverage()
         save_snapshot(payload, path)
         if canonical_snapshot:
             attempted_at = datetime.now(timezone.utc).isoformat()
@@ -325,6 +448,8 @@ def snapshot_is_stale(snapshot: dict | None, max_age_hours: float = 6) -> bool:
         return True
     if int(snapshot.get("schema_version") or 0) < SCAN_SCHEMA_VERSION:
         return True
+    if not _valid_coverage_metadata(snapshot):
+        return True
     horizons = set(snapshot.get("horizons") or [snapshot.get("horizon")])
     if not EXPECTED_HORIZONS.issubset(horizons):
         return True
@@ -345,8 +470,6 @@ def snapshot_is_stale(snapshot: dict | None, max_age_hours: float = 6) -> bool:
         for record in records
         if isinstance(record, dict)
     ):
-        return True
-    if snapshot.get("total", 0) < min(100, len(default_universe())):
         return True
     try:
         updated = datetime.fromisoformat(snapshot["updated_at"])

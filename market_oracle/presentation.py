@@ -360,27 +360,30 @@ def _scan_stage_text(snapshot: dict, universe_size: int = 0) -> tuple[str, str]:
     """Human label for the two-step radar without changing scan logic."""
     universe_total = _int_value(snapshot.get("universe_total") or universe_size)
     fast_completed = _int_value(snapshot.get("fast_completed"))
-    if not fast_completed and snapshot.get("status") == "complete" and universe_total:
-        fast_completed = universe_total
     completed = _int_value(snapshot.get("completed"))
     total = _int_value(snapshot.get("total"))
     ml_completed = _int_value(snapshot.get("ml_completed"))
     ml_total = _int_value(snapshot.get("ml_total"))
-    fast = f"FAST {fast_completed}/{universe_total}" if universe_total else "FAST —"
+    fast = f"FAST {fast_completed}/{universe_total} prób" if universe_total else "FAST —"
     if str(snapshot.get("status") or "") == "running":
         if universe_total and fast_completed >= universe_total:
             headline = f"{fast} · Deep ML w toku"
         else:
             headline = f"{fast} · skan w toku"
     elif str(snapshot.get("status") or "") == "complete":
-        headline = f"{fast} · radar gotowy"
+        if snapshot.get("coverage_status") == "complete":
+            headline = f"{fast} · radar gotowy · pełne pokrycie"
+        elif snapshot.get("coverage_status") == "partial":
+            headline = f"{fast} · skan zakończony · pokrycie częściowe"
+        else:
+            headline = f"{fast} · skan zakończony · pokrycie nieznane"
     else:
         headline = f"{fast} · status {snapshot.get('status') or 'offline'}"
 
     if ml_total:
-        detail = f"Deep ML: {ml_completed}/{ml_total} kandydatów"
+        detail = f"Deep ML: {ml_completed}/{ml_total} prób kandydatów"
     elif total:
-        detail = f"Pełny workflow: {completed}/{total} kroków"
+        detail = f"Workflow: {completed}/{total} wykonanych prób"
     else:
         detail = "Dwustopniowy radar FAST → Deep ML"
     return headline, detail
@@ -743,6 +746,21 @@ def build_start_guidance(
             source="Radar",
             status=stage_headline,
             cta="Pokaż bieżący snapshot",
+            action="show_radar_snapshot",
+            tone="warn",
+        ))
+    elif status == "complete" and snapshot.get("coverage_status") == "partial":
+        warning = "Skan zakończony, ale pokrycie Radaru jest częściowe — ranking pomija nieudane pary symbol–horyzont."
+        if radar_stale:
+            warning += " Snapshot wymaga też odświeżenia."
+        add(_card(
+            card_id="radar_partial",
+            priority=92,
+            title="Sprawdź niepełne pokrycie Radaru.",
+            body="Poprawne rekordy pozostają użyteczne, lecz brakujące instrumenty lub horyzonty mogą zmienić kolejność rankingu.",
+            source="Radar",
+            status="pokrycie częściowe",
+            cta="Pokaż status radaru",
             action="show_radar_snapshot",
             tone="warn",
         ))
