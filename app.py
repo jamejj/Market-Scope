@@ -24,8 +24,9 @@ from market_oracle.engine import analyze_asset, scan_market_multi
 from market_oracle.evidence import EvidenceRegistryError, evidence_copy, resolve_evidence
 from market_oracle.forward import load_forward_cockpit
 from market_oracle.journal import (
+    JournalSnapshotEligibility,
     journal_error_code, journal_summary, paper_portfolio, record_snapshot_signals,
-    refresh_journal_results, safe_load_journal,
+    journal_snapshot_eligibility, refresh_journal_results, safe_load_journal,
 )
 from market_oracle.monitor import (
     default_universe,
@@ -1208,6 +1209,14 @@ def journal_failure_message(error_code: str | None) -> str:
     )
 
 
+def journal_snapshot_skip_message(eligibility: JournalSnapshotEligibility) -> str:
+    if eligibility is JournalSnapshotEligibility.SKIPPED_PARTIAL_COVERAGE:
+        return "Journal przyjmuje sygnały tylko ze skanu o pełnym pokryciu Radaru. Ten snapshot ma pokrycie częściowe."
+    if eligibility is JournalSnapshotEligibility.SKIPPED_INVALID_COVERAGE:
+        return "Nie można potwierdzić integralności pokrycia tego snapshotu, więc Journal nie zapisze jego sygnałów."
+    return "Skan Radaru nie jest jeszcze zakończony, więc Journal nie zapisze jego sygnałów."
+
+
 def _valid_journal_attempted_at(value) -> bool:
     if not isinstance(value, str) or len(value) <= 10 or value[10] != "T":
         return False
@@ -1244,6 +1253,18 @@ def journal_scan_status_view(snapshot: dict | None) -> dict[str, str]:
             "state": "FAILED",
             "tone": "error",
             "text": journal_failure_message(payload.get("journal_error")),
+        }
+    if status == "SKIPPED_PARTIAL_COVERAGE":
+        return {
+            "state": status,
+            "tone": "warning",
+            "text": "Journal: pominięto zapis, ponieważ pokrycie Radaru jest częściowe.",
+        }
+    if status == "SKIPPED_INVALID_COVERAGE":
+        return {
+            "state": status,
+            "tone": "warning",
+            "text": "Journal: pominięto zapis, ponieważ nie potwierdzono integralności pokrycia Radaru.",
         }
     if status == "NOT_ATTEMPTED":
         return {
@@ -3149,13 +3170,18 @@ def render_signal_journal() -> None:
 
     actions = st.columns([1, 1, 1.35])
     if actions[0].button("Zapisz sygnały z ostatniego rankingu", key="journal_record", use_container_width=True):
-        try:
-            added = record_snapshot_signals(load_snapshot() or {})
-        except Exception as exc:
-            st.error(journal_failure_message(journal_error_code(exc)))
+        snapshot = load_snapshot() or {}
+        eligibility = journal_snapshot_eligibility(snapshot)
+        if eligibility is not JournalSnapshotEligibility.ELIGIBLE:
+            st.warning(journal_snapshot_skip_message(eligibility))
         else:
-            st.toast(f"Dodano nowych sygnałów: {added}", icon="📒")
-            st.rerun()
+            try:
+                added = record_snapshot_signals(snapshot)
+            except Exception as exc:
+                st.error(journal_failure_message(journal_error_code(exc)))
+            else:
+                st.toast(f"Dodano nowych sygnałów: {added}", icon="📒")
+                st.rerun()
     if actions[1].button("Aktualizuj wyniki", key="journal_refresh", use_container_width=True):
         try:
             with st.spinner("Sprawdzam, które sygnały dojrzały do oceny…"):

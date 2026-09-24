@@ -77,6 +77,8 @@ import market_oracle.auto_forward as auto_forward_module
 import run_candidate_forward as candidate_runner_module
 import run_forward_test as forward_test_runner_module
 from market_oracle.journal import (
+    JournalSnapshotEligibility,
+    journal_snapshot_eligibility,
     journal_summary,
     load_journal,
     paper_portfolio,
@@ -125,6 +127,7 @@ from market_oracle.product_verdict import (
     persisted_machine_decision_state,
     product_forecast_verdict,
 )
+from market_oracle.radar_contract import RadarCoverageState, radar_coverage_state
 from market_oracle.risk import periods_per_year, risk_metrics
 from market_oracle.reality import RealityConfig, reality_check_report, select_non_overlapping_trades
 from market_oracle.signals import (
@@ -155,28 +158,25 @@ from market_oracle.watchlist import (
 
 
 def _journal_process_snapshot(symbol: str) -> dict:
-    return {
-        "status": "complete",
-        "updated_at": "2026-01-10T12:00:00+00:00",
-        "records": [{
-            "Symbol": symbol,
-            "Klasa": "USA",
-            "Horyzont": 5,
-            "Data": "2026-01-10",
-            "Cena": 100.0,
-            "Setup": "Breakout / momentum",
-            "Ocena": "copy-only",
-            "P(wzrost)": 0.61,
-            "Oczekiwany ruch": 0.03,
-            "AUC walidacji": 0.62,
-            "Brier": 0.22,
-            "Jakość modelu": "WYSOKA",
-            "Score": 4.2,
-            "Tryb analizy": "ML",
-            "Decision": 1,
-            "DecisionReason": "LONG_CONFIRMED",
-        }],
+    row = {
+        "Symbol": symbol,
+        "Klasa": "USA",
+        "Horyzont": 5,
+        "Data": "2026-01-10",
+        "Cena": 100.0,
+        "Setup": "Breakout / momentum",
+        "Ocena": "copy-only",
+        "P(wzrost)": 0.61,
+        "Oczekiwany ruch": 0.03,
+        "AUC walidacji": 0.62,
+        "Brier": 0.22,
+        "Jakość modelu": "WYSOKA",
+        "Score": 4.2,
+        "Tryb analizy": "ML",
+        "Decision": 1,
+        "DecisionReason": "LONG_CONFIRMED",
     }
+    return _journal_snapshot(row)
 
 
 def _journal_record_worker(path_text, symbol, start_event, result_queue):
@@ -408,6 +408,7 @@ def load_journal_ui_functions():
     tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
     function_names = {
         "_valid_journal_attempted_at",
+        "journal_snapshot_skip_message",
         "journal_scan_status_view",
         "journal_failure_message",
     }
@@ -416,7 +417,10 @@ def load_journal_ui_functions():
         if isinstance(node, ast.FunctionDef) and node.name in function_names
     ]
     assert {node.name for node in functions} == function_names
-    namespace = {"datetime": datetime}
+    namespace = {
+        "datetime": datetime,
+        "JournalSnapshotEligibility": JournalSnapshotEligibility,
+    }
     future_annotations = ast.ImportFrom(
         module="__future__",
         names=[ast.alias(name="annotations")],
@@ -1063,7 +1067,7 @@ def _run_test_signal_scan(tmp_path, monkeypatch, recorder, *, canonical=True):
     monkeypatch.setattr(monitor_module, "scan_market_fast", lambda symbols, horizons, years: (sample, {}))
     monkeypatch.setattr(monitor_module, "scan_market_multi", lambda symbols, horizons, years: (ml_sample, {}))
     monkeypatch.setattr(monitor_module, "record_snapshot_signals", recorder)
-    result = monitor_module.run_signal_scan(["TEST"], path=path, deep_limit=1)
+    result = monitor_module.run_signal_scan(["TEST"], horizons=(5,), path=path, deep_limit=1)
     return result, monitor_module.load_snapshot(path)
 
 
@@ -1128,6 +1132,58 @@ def test_background_monitor_noncanonical_scan_marks_journal_not_applicable(tmp_p
     assert "journal_attempted_at" not in result
 
 
+def test_background_monitor_skips_partial_coverage_without_calling_journal(tmp_path, monkeypatch):
+    fast_row = pd.DataFrame([{
+        "Symbol": "TEST", "Klasa": "USA", "Horyzont": 5, "Ocena": "OBSERWUJ", "Score": 1.5,
+        "Deep score": 70.0, "Setup score": 68.0, "Radar score": 5.0,
+        "P(wzrost)": 0.52, "Oczekiwany ruch": 0.01, "Tryb analizy": "FAST",
+    }])
+    ml_row = fast_row.copy()
+    ml_row["Tryb analizy"] = "ML"
+    path = tmp_path / "signals.json"
+    calls = []
+
+    monkeypatch.setattr(monitor_module, "SNAPSHOT_PATH", path)
+    monkeypatch.setattr(monitor_module, "LOCK_PATH", tmp_path / "signals.lock")
+    monkeypatch.setattr(
+        monitor_module,
+        "scan_market_fast",
+        lambda symbols, horizons, years: (fast_row, {}) if symbols == ["TEST"] else (pd.DataFrame(), {"MISS": "failure"}),
+    )
+    monkeypatch.setattr(monitor_module, "scan_market_multi", lambda symbols, horizons, years: (ml_row, {}))
+    monkeypatch.setattr(monitor_module, "select_deep_shortlist", lambda frame, limit: ["TEST"])
+    monkeypatch.setattr(monitor_module, "record_snapshot_signals", lambda snapshot: calls.append(snapshot))
+
+    result = monitor_module.run_signal_scan(["TEST", "MISS"], horizons=(5,), path=path, deep_limit=1)
+
+    assert result["coverage_status"] == "partial"
+    assert result["journal_status"] == "SKIPPED_PARTIAL_COVERAGE"
+    assert calls == []
+    assert "journal_added" not in result
+    assert "journal_error" not in result
+
+
+def test_background_monitor_skips_invalid_coverage_without_calling_journal(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        monitor_module,
+        "journal_snapshot_eligibility",
+        lambda snapshot: JournalSnapshotEligibility.SKIPPED_INVALID_COVERAGE,
+    )
+
+    result, loaded = _run_test_signal_scan(
+        tmp_path,
+        monkeypatch,
+        lambda snapshot: calls.append(snapshot),
+    )
+
+    for payload in (result, loaded):
+        assert payload["journal_status"] == "SKIPPED_INVALID_COVERAGE"
+        assert "journal_added" not in payload
+        assert "journal_error" not in payload
+    assert calls == []
+
+
 def test_background_monitor_clears_previous_journal_error_after_later_success(tmp_path, monkeypatch):
     attempts = 0
 
@@ -1189,6 +1245,28 @@ def test_journal_scan_status_view_distinguishes_ok_failed_and_legacy_unknown():
     assert "JOURNAL_CORRUPT" in failed["text"]
     assert unknown["state"] == "UNKNOWN"
     assert unknown["tone"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_fragment"),
+    [
+        ("SKIPPED_PARTIAL_COVERAGE", "częściowe"),
+        ("SKIPPED_INVALID_COVERAGE", "integralności pokrycia"),
+    ],
+)
+def test_journal_scan_status_view_exposes_controlled_coverage_skip(status, expected_fragment):
+    view = load_journal_ui_functions()["journal_scan_status_view"]({"journal_status": status})
+
+    assert view["state"] == status
+    assert view["tone"] == "warning"
+    assert expected_fragment in view["text"].lower()
+
+
+def test_manual_journal_skip_messages_distinguish_partial_from_invalid_coverage():
+    message = load_journal_ui_functions()["journal_snapshot_skip_message"]
+
+    assert "pełnym pokryciu" in message(JournalSnapshotEligibility.SKIPPED_PARTIAL_COVERAGE).lower()
+    assert "nie można potwierdzić" in message(JournalSnapshotEligibility.SKIPPED_INVALID_COVERAGE).lower()
 
 
 @pytest.mark.parametrize(
@@ -1265,6 +1343,8 @@ def test_signal_journal_ui_uses_safe_load_and_does_not_rewrite_scan_status():
     }
 
     assert "safe_load_journal" in called_names
+    assert "journal_snapshot_eligibility" in called_names
+    assert "journal_snapshot_skip_message" in called_names
     assert "load_journal" not in called_names
     assert "save_snapshot" not in called_names
 
@@ -1462,12 +1542,113 @@ def test_product_snapshot_serialization_does_not_add_machine_contract_to_fast():
 
 
 def _journal_snapshot(*rows):
+    records = list(rows)
+    symbols = sorted({row["Symbol"] for row in records if isinstance(row, dict) and row.get("Symbol")}) or ["TEST"]
+    horizons = sorted({row["Horyzont"] for row in records if isinstance(row, dict) and type(row.get("Horyzont")) is int}) or [5]
+    shortlist = sorted({row["Symbol"] for row in records if isinstance(row, dict) and row.get("Tryb analizy") == "ML"})
+    fast_expected = {(symbol, horizon) for symbol in symbols for horizon in horizons}
+    ml_expected = {(symbol, horizon) for symbol in shortlist for horizon in horizons}
+
+    def section(expected, successful):
+        return {
+            "expected_pairs": [list(pair) for pair in sorted(expected)],
+            "successful_pairs": [list(pair) for pair in sorted(successful)],
+            "missing_pairs": [list(pair) for pair in sorted(expected - successful)],
+        }
+
     return {
         "status": "complete",
-        "schema_version": 7,
+        "schema_version": 8,
         "updated_at": "2026-01-10T12:00:00+00:00",
-        "records": list(rows),
+        "horizons": horizons,
+        "universe_total": len(symbols),
+        "shortlist": shortlist,
+        "coverage": {
+            "requested_symbols": symbols,
+            "requested_horizons": horizons,
+            "fast": section(fast_expected, fast_expected),
+            "ml": section(ml_expected, ml_expected),
+        },
+        "coverage_status": "complete",
+        "records": records,
+        "errors": {},
     }
+
+
+def _partial_journal_snapshot(row):
+    snapshot = _journal_snapshot(row)
+    snapshot["coverage"]["requested_symbols"].append("MISSING")
+    snapshot["coverage"]["fast"]["expected_pairs"].append(["MISSING", row["Horyzont"]])
+    snapshot["coverage"]["fast"]["missing_pairs"].append(["MISSING", row["Horyzont"]])
+    snapshot["universe_total"] = 2
+    snapshot["coverage_status"] = "partial"
+    snapshot["errors"] = {"MISSING": "provider failure"}
+    return snapshot
+
+
+def test_signal_journal_coverage_gate_classifies_full_partial_and_invalid():
+    row = _product_scan_row()
+    row.update({"Decision": 1, "DecisionReason": "LONG_CONFIRMED"})
+    full = _journal_snapshot(row)
+    partial = _partial_journal_snapshot(row)
+
+    assert journal_snapshot_eligibility(full) is JournalSnapshotEligibility.ELIGIBLE
+    assert journal_snapshot_eligibility(partial) is JournalSnapshotEligibility.SKIPPED_PARTIAL_COVERAGE
+    assert journal_snapshot_eligibility({**full, "schema_version": 6}) is JournalSnapshotEligibility.SKIPPED_INVALID_COVERAGE
+
+
+@pytest.mark.parametrize("kind", ["partial", "legacy", "forged"])
+def test_signal_journal_direct_call_cannot_mutate_on_untrusted_coverage(tmp_path, kind):
+    row = _product_scan_row()
+    row.update({"Decision": 1, "DecisionReason": "LONG_CONFIRMED"})
+    full = _journal_snapshot(row)
+    if kind == "partial":
+        snapshot = _partial_journal_snapshot(row)
+        expected_state = RadarCoverageState.PARTIAL
+    elif kind == "legacy":
+        snapshot = {**full, "schema_version": 6}
+        expected_state = RadarCoverageState.INVALID
+    else:
+        snapshot = {**_partial_journal_snapshot(row), "coverage_status": "complete"}
+        expected_state = RadarCoverageState.INVALID
+
+    path = tmp_path / "journal.json"
+    path.write_text("[]", encoding="utf-8")
+    before = path.read_bytes()
+
+    assert radar_coverage_state(snapshot) is expected_state
+    assert record_snapshot_signals(snapshot, path=path) == 0
+    assert path.read_bytes() == before
+
+
+def test_signal_journal_partial_ml_with_fast_fallback_does_not_record(tmp_path):
+    fast = _product_scan_row(mode="FAST")
+    snapshot = _journal_snapshot(fast)
+    snapshot["shortlist"] = ["TEST"]
+    snapshot["coverage"]["ml"] = {
+        "expected_pairs": [["TEST", 5]],
+        "successful_pairs": [],
+        "missing_pairs": [["TEST", 5]],
+    }
+    snapshot["coverage_status"] = "partial"
+    snapshot["errors"] = {"TEST": "model failure"}
+    path = tmp_path / "journal.json"
+    path.write_text("[]", encoding="utf-8")
+    before = path.read_bytes()
+
+    assert journal_snapshot_eligibility(snapshot) is JournalSnapshotEligibility.SKIPPED_PARTIAL_COVERAGE
+    assert record_snapshot_signals(snapshot, path=path) == 0
+    assert path.read_bytes() == before
+
+
+def test_signal_journal_incomplete_lifecycle_does_not_record(tmp_path):
+    row = _product_scan_row()
+    row.update({"Decision": 1, "DecisionReason": "LONG_CONFIRMED"})
+    snapshot = {**_journal_snapshot(row), "status": "running"}
+
+    assert journal_snapshot_eligibility(snapshot) is JournalSnapshotEligibility.SKIPPED_INCOMPLETE_SCAN
+    assert record_snapshot_signals(snapshot, path=tmp_path / "journal.json") == 0
+    assert not (tmp_path / "journal.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -1737,17 +1918,10 @@ def test_signal_journal_lock_failure_is_controlled(tmp_path, monkeypatch):
         ("Oczekiwany ruch", None),
         ("Oczekiwany ruch", True),
         ("Oczekiwany ruch", "0.03"),
-        ("Horyzont", True),
-        ("Horyzont", "5"),
-        ("Horyzont", 5.0),
-        ("Horyzont", 1.2),
-        ("Horyzont", 0),
-        ("Horyzont", -5),
         ("Cena", True),
         ("Cena", "100"),
         ("Cena", np.nan),
         ("Cena", np.inf),
-        ("Symbol", ""),
         ("Symbol", "   "),
         ("Data", "not-a-date"),
         ("Data", 0),
@@ -1771,6 +1945,32 @@ def test_signal_journal_invalid_directional_row_fails_closed(tmp_path, field, va
         record_snapshot_signals(_journal_snapshot(row), path=path)
 
     assert caught.value.code == "JOURNAL_INVALID_SIGNAL"
+    assert path.read_bytes() == before
+    assert not path.with_suffix(".json.lock").exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("Horyzont", True),
+        ("Horyzont", "5"),
+        ("Horyzont", 5.0),
+        ("Horyzont", 1.2),
+        ("Horyzont", 0),
+        ("Horyzont", -5),
+        ("Symbol", ""),
+    ],
+)
+def test_signal_journal_invalid_coverage_fields_skip_without_mutation(tmp_path, field, value):
+    path = tmp_path / "journal.json"
+    path.write_text('[{"id": "history"}]', encoding="utf-8")
+    before = path.read_bytes()
+    row = _product_scan_row()
+    row.update({"Decision": 1, "DecisionReason": "LONG_CONFIRMED", field: value})
+    snapshot = _journal_snapshot(row)
+
+    assert radar_coverage_state(snapshot) is RadarCoverageState.INVALID
+    assert record_snapshot_signals(snapshot, path=path) == 0
     assert path.read_bytes() == before
     assert not path.with_suffix(".json.lock").exists()
 
@@ -2041,7 +2241,17 @@ def test_schema_6_snapshot_is_stale_after_machine_contract_upgrade():
     assert snapshot_is_stale(snapshot) is True
 
 
-@pytest.mark.parametrize("journal_status", ["NOT_ATTEMPTED", "OK", "FAILED", "NOT_APPLICABLE"])
+@pytest.mark.parametrize(
+    "journal_status",
+    [
+        "NOT_ATTEMPTED",
+        "OK",
+        "FAILED",
+        "NOT_APPLICABLE",
+        "SKIPPED_PARTIAL_COVERAGE",
+        "SKIPPED_INVALID_COVERAGE",
+    ],
+)
 def test_journal_observability_metadata_does_not_change_snapshot_freshness(journal_status):
     snapshot = _fresh_schema_snapshot([
         _schema_record(mode="FAST"),
@@ -2415,9 +2625,7 @@ def test_signal_journal_closed_lifecycle_wins_over_stale_open_refresh(tmp_path):
 
 
 def test_signal_journal_records_and_evaluates(tmp_path, monkeypatch):
-    snapshot = {
-        "status": "complete", "updated_at": "2026-01-10T12:00:00+00:00",
-        "records": [
+    records = [
             {
                 "Symbol": "TEST", "Klasa": "USA", "Horyzont": 5, "Data": "2026-01-10",
                 "Cena": 100.0, "Setup": "Breakout / momentum",
@@ -2431,9 +2639,12 @@ def test_signal_journal_records_and_evaluates(tmp_path, monkeypatch):
                 "Cena": 50.0, "Setup": "Breakout / momentum", "Ocena": "KANDYDAT WZROSTOWY",
                 "P(wzrost)": 0.70, "Oczekiwany ruch": 0.05, "Tryb analizy": "FAST",
             },
-            {"Symbol": "SKIP", "Horyzont": 5, "Cena": 10.0, "Ocena": "BRAK SYGNAŁU"},
-        ],
-    }
+            {
+                "Symbol": "SKIP", "Klasa": "USA", "Horyzont": 5, "Data": "2026-01-10",
+                "Cena": 10.0, "Ocena": "BRAK SYGNAŁU", "Tryb analizy": "FAST",
+            },
+        ]
+    snapshot = _journal_snapshot(*records)
     path = tmp_path / "journal.json"
     assert record_snapshot_signals(snapshot, path=path) == 1
     assert record_snapshot_signals(snapshot, path=path) == 0

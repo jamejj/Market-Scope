@@ -10,8 +10,14 @@ import pandas as pd
 
 from .catalog import CATEGORIES, CRYPTO, ETF_CATEGORIES
 from .engine import scan_market, scan_market_fast, scan_market_multi
-from .journal import journal_error_code, record_snapshot_signals
+from .journal import (
+    JournalSnapshotEligibility,
+    journal_error_code,
+    journal_snapshot_eligibility,
+    record_snapshot_signals,
+)
 from .product_verdict import product_forecast_verdict, radar_ml_input_error_code
+from .radar_contract import RadarCoverageState, radar_coverage_state
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -117,81 +123,6 @@ def _coverage_metadata(
         "fast": _coverage_section({(symbol, horizon) for symbol in symbols for horizon in horizons}, fast_success),
         "ml": _coverage_section({(symbol, horizon) for symbol in shortlist for horizon in horizons}, ml_success),
     }
-
-
-def _valid_coverage_metadata(snapshot: dict) -> bool:
-    coverage = snapshot.get("coverage")
-    symbols = coverage.get("requested_symbols") if isinstance(coverage, dict) else None
-    horizons = coverage.get("requested_horizons") if isinstance(coverage, dict) else None
-    shortlist = snapshot.get("shortlist")
-    if (
-        not isinstance(symbols, list) or not symbols
-        or any(not isinstance(symbol, str) or not symbol for symbol in symbols)
-        or not isinstance(horizons, list) or not horizons
-        or any(type(horizon) is not int or horizon <= 0 for horizon in horizons)
-        or len(set(horizons)) != len(horizons)
-        or not isinstance(shortlist, list)
-        or any(not isinstance(symbol, str) or symbol not in symbols for symbol in shortlist)
-        or coverage.get("requested_horizons") != snapshot.get("horizons")
-        or snapshot.get("universe_total") != len(symbols)
-        or not isinstance(snapshot.get("errors"), dict)
-    ):
-        return False
-
-    def pair_set(value) -> set[tuple[str, int]] | None:
-        if not isinstance(value, list):
-            return None
-        pairs: set[tuple[str, int]] = set()
-        for pair in value:
-            if (
-                not isinstance(pair, list) or len(pair) != 2
-                or not isinstance(pair[0], str) or not pair[0]
-                or type(pair[1]) is not int or pair[1] <= 0
-            ):
-                return None
-            pairs.add((pair[0], pair[1]))
-        return pairs if len(pairs) == len(value) else None
-
-    missing_any = False
-    success_by_mode: dict[str, set[tuple[str, int]]] = {}
-    for mode, expected in (
-        ("fast", {(symbol, horizon) for symbol in symbols for horizon in horizons}),
-        ("ml", {(symbol, horizon) for symbol in shortlist for horizon in horizons}),
-    ):
-        section = coverage.get(mode)
-        if not isinstance(section, dict):
-            return False
-        declared = pair_set(section.get("expected_pairs"))
-        successful = pair_set(section.get("successful_pairs"))
-        missing = pair_set(section.get("missing_pairs"))
-        if declared != expected or successful is None or missing is None:
-            return False
-        if not successful <= expected or missing != expected - successful:
-            return False
-        success_by_mode[mode] = successful
-        missing_any |= bool(missing)
-
-    records = snapshot.get("records")
-    if not isinstance(records, list):
-        return False
-    observed = {"fast": set(), "ml": set()}
-    for record in records:
-        if not isinstance(record, dict):
-            return False
-        mode = str(record.get("Tryb analizy") or "").lower()
-        symbol, horizon = record.get("Symbol"), record.get("Horyzont")
-        if mode not in observed or not isinstance(symbol, str) or type(horizon) is not int:
-            return False
-        observed[mode].add((symbol, horizon))
-    if not success_by_mode["ml"] <= observed["ml"]:
-        return False
-    if not success_by_mode["fast"] - success_by_mode["ml"] <= observed["fast"]:
-        return False
-    if not observed["ml"] <= success_by_mode["ml"] or not observed["fast"] <= success_by_mode["fast"]:
-        return False
-
-    expected_status = "partial" if missing_any or snapshot["errors"] else "complete"
-    return snapshot.get("coverage_status") == expected_status
 
 
 def select_deep_shortlist(frame: pd.DataFrame, limit: int = DEEP_SCAN_LIMIT) -> list[str]:
@@ -418,22 +349,33 @@ def run_signal_scan(
         update_coverage()
         save_snapshot(payload, path)
         if canonical_snapshot:
-            attempted_at = datetime.now(timezone.utc).isoformat()
-            try:
-                added = record_snapshot_signals(payload)
-                payload.update({
-                    "journal_status": "OK",
-                    "journal_added": added,
-                    "journal_attempted_at": attempted_at,
-                })
-                payload.pop("journal_error", None)
-            except Exception as exc:
-                payload.update({
-                    "journal_status": "FAILED",
-                    "journal_error": journal_error_code(exc),
-                    "journal_attempted_at": attempted_at,
-                })
+            eligibility = journal_snapshot_eligibility(payload)
+            if eligibility is not JournalSnapshotEligibility.ELIGIBLE:
+                payload["journal_status"] = (
+                    "SKIPPED_PARTIAL_COVERAGE"
+                    if eligibility is JournalSnapshotEligibility.SKIPPED_PARTIAL_COVERAGE
+                    else "SKIPPED_INVALID_COVERAGE"
+                )
                 payload.pop("journal_added", None)
+                payload.pop("journal_error", None)
+                payload.pop("journal_attempted_at", None)
+            else:
+                attempted_at = datetime.now(timezone.utc).isoformat()
+                try:
+                    added = record_snapshot_signals(payload)
+                    payload.update({
+                        "journal_status": "OK",
+                        "journal_added": added,
+                        "journal_attempted_at": attempted_at,
+                    })
+                    payload.pop("journal_error", None)
+                except Exception as exc:
+                    payload.update({
+                        "journal_status": "FAILED",
+                        "journal_error": journal_error_code(exc),
+                        "journal_attempted_at": attempted_at,
+                    })
+                    payload.pop("journal_added", None)
             payload["forward_ledger_status"] = "not_recorded_generic_two_stage_scan"
             payload["forward_ledger_note"] = "Candidate v1 proof ledger uses run_candidate_forward.py with a frozen full-ML universe."
             save_snapshot(payload, path)
@@ -446,9 +388,10 @@ def run_signal_scan(
 def snapshot_is_stale(snapshot: dict | None, max_age_hours: float = 6) -> bool:
     if not snapshot or snapshot.get("status") != "complete" or not snapshot.get("updated_at"):
         return True
-    if int(snapshot.get("schema_version") or 0) < SCAN_SCHEMA_VERSION:
+    schema_version = snapshot.get("schema_version")
+    if type(schema_version) is not int or schema_version < SCAN_SCHEMA_VERSION:
         return True
-    if not _valid_coverage_metadata(snapshot):
+    if radar_coverage_state(snapshot) is RadarCoverageState.INVALID:
         return True
     horizons = set(snapshot.get("horizons") or [snapshot.get("horizon")])
     if not EXPECTED_HORIZONS.issubset(horizons):

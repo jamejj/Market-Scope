@@ -6,6 +6,7 @@ import json
 import math
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
+from enum import Enum
 from numbers import Real
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from .product_verdict import (
     MachineDecisionState,
     persisted_machine_decision_state,
 )
+from .radar_contract import RadarCoverageState, radar_coverage_state
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -48,6 +50,24 @@ class JournalIntegrityError(RuntimeError):
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)
+
+
+class JournalSnapshotEligibility(str, Enum):
+    ELIGIBLE = "ELIGIBLE"
+    SKIPPED_INCOMPLETE_SCAN = "SKIPPED_INCOMPLETE_SCAN"
+    SKIPPED_PARTIAL_COVERAGE = "SKIPPED_PARTIAL_COVERAGE"
+    SKIPPED_INVALID_COVERAGE = "SKIPPED_INVALID_COVERAGE"
+
+
+def journal_snapshot_eligibility(snapshot: object) -> JournalSnapshotEligibility:
+    if not isinstance(snapshot, dict) or snapshot.get("status") != "complete":
+        return JournalSnapshotEligibility.SKIPPED_INCOMPLETE_SCAN
+    coverage_state = radar_coverage_state(snapshot)
+    if coverage_state is RadarCoverageState.COMPLETE:
+        return JournalSnapshotEligibility.ELIGIBLE
+    if coverage_state is RadarCoverageState.PARTIAL:
+        return JournalSnapshotEligibility.SKIPPED_PARTIAL_COVERAGE
+    return JournalSnapshotEligibility.SKIPPED_INVALID_COVERAGE
 
 
 def journal_error_code(exc: BaseException) -> str:
@@ -265,7 +285,7 @@ def _directional_entry(row: dict, created_at: str) -> dict | None:
 
 def record_snapshot_signals(snapshot: dict, path: Path = JOURNAL_PATH) -> int:
     """Persist directional signals from a completed market scan. Returns number of new entries."""
-    if not snapshot or snapshot.get("status") != "complete":
+    if journal_snapshot_eligibility(snapshot) is not JournalSnapshotEligibility.ELIGIBLE:
         return 0
 
     created_at = snapshot.get("updated_at") or datetime.now(timezone.utc).isoformat()

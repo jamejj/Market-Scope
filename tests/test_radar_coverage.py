@@ -5,9 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 import market_oracle.monitor as monitor
+from market_oracle.journal import JournalSnapshotEligibility, journal_snapshot_eligibility
 from market_oracle.presentation import _scan_stage_text, build_start_guidance
+from market_oracle.radar_contract import RadarCoverageState, radar_coverage_state
 
 
 def _row(symbol, horizon, mode="FAST"):
@@ -88,6 +91,41 @@ def test_all_expected_fast_and_ml_pairs_are_complete(tmp_path, monkeypatch):
     assert {row["Tryb analizy"] for row in result["records"]} == {"ML"}
 
 
+def test_canonical_coverage_contract_distinguishes_full_partial_and_invalid(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        monitor,
+        "scan_market_fast",
+        lambda symbols, horizons, years: (pd.DataFrame([_row("A", 1)]), {}),
+    )
+    monkeypatch.setattr(monitor, "select_deep_shortlist", lambda frame, limit: [])
+    partial = monitor.run_signal_scan(["A"], horizons=(1, 5), path=tmp_path / "partial.json")
+
+    monkeypatch.setattr(
+        monitor,
+        "scan_market_fast",
+        lambda symbols, horizons, years: (pd.DataFrame([_row("A", 1), _row("A", 5)]), {}),
+    )
+    complete = monitor.run_signal_scan(["A"], horizons=(1, 5), path=tmp_path / "complete.json")
+
+    assert radar_coverage_state(complete) is RadarCoverageState.COMPLETE
+    assert radar_coverage_state(partial) is RadarCoverageState.PARTIAL
+    assert radar_coverage_state({**partial, "schema_version": 6}) is RadarCoverageState.INVALID
+    assert radar_coverage_state({**partial, "coverage_status": "complete"}) is RadarCoverageState.INVALID
+    assert radar_coverage_state({**complete, "coverage": None}) is RadarCoverageState.INVALID
+
+
+@pytest.mark.parametrize("schema_version", [True, "8", {"version": 8}])
+def test_malformed_schema_version_is_invalid_and_stale(schema_version):
+    snapshot = {
+        "status": "complete",
+        "schema_version": schema_version,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    assert radar_coverage_state(snapshot) is RadarCoverageState.INVALID
+    assert monitor.snapshot_is_stale(snapshot) is True
+
+
 def test_fresh_partial_snapshot_is_not_stale_but_missing_or_malformed_coverage_is(tmp_path, monkeypatch):
     monkeypatch.setattr(monitor, "scan_market_fast", lambda symbols, horizons, years: (pd.DataFrame(), {"A": "failure"}))
     monkeypatch.setattr(monitor, "select_deep_shortlist", lambda frame, limit: [])
@@ -97,6 +135,10 @@ def test_fresh_partial_snapshot_is_not_stale_but_missing_or_malformed_coverage_i
     assert monitor.snapshot_is_stale({**snapshot, "coverage": None}) is True
     assert monitor.snapshot_is_stale({**snapshot, "coverage_status": "complete"}) is True
     assert monitor.snapshot_is_stale({**snapshot, "schema_version": 7}) is True
+
+    malformed = {**snapshot, "coverage": None}
+    assert radar_coverage_state(malformed) is RadarCoverageState.INVALID
+    assert journal_snapshot_eligibility(malformed) is JournalSnapshotEligibility.SKIPPED_INVALID_COVERAGE
 
 
 def test_snapshot_claiming_accepted_ml_pair_without_its_record_is_stale(tmp_path, monkeypatch):
