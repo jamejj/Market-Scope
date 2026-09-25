@@ -2,15 +2,76 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
+import tempfile
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import fcntl
 
 from market_oracle.product_verdict import finite_probability, product_forecast_verdict
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 WATCHLIST_PATH = DATA_DIR / "watchlist.json"
+WATCHLIST_SCHEMA_VERSION = 1
+
+
+class WatchlistIntegrityError(RuntimeError):
+    """Controlled persistence-boundary failure with no raw data disclosure."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+def watchlist_error_code(error: BaseException) -> str:
+    if isinstance(error, WatchlistIntegrityError):
+        return error.code
+    return "WATCHLIST_UNEXPECTED"
+
+
+def _reject_json_constant(_: str) -> None:
+    raise ValueError("non-standard JSON number")
+
+
+def _json_tree_is_finite(value: Any) -> bool:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_json_tree_is_finite(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _json_tree_is_finite(item) for key, item in value.items())
+    return value is None or isinstance(value, (str, int, bool))
+
+
+def _nonempty_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _validate_persisted_items(items: Any) -> list[dict]:
+    if not isinstance(items, list) or not _json_tree_is_finite(items):
+        raise WatchlistIntegrityError("WATCHLIST_CORRUPT")
+
+    seen_ids: set[str] = set()
+    validated: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise WatchlistIntegrityError("WATCHLIST_CORRUPT")
+        if not all(_nonempty_text(item.get(field)) for field in ("id", "symbol", "created_at", "status")):
+            raise WatchlistIntegrityError("WATCHLIST_CORRUPT")
+        horizon = item.get("horizon")
+        if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon <= 0:
+            raise WatchlistIntegrityError("WATCHLIST_CORRUPT")
+        item_id = item["id"].strip()
+        if item_id in seen_ids:
+            raise WatchlistIntegrityError("WATCHLIST_CORRUPT")
+        seen_ids.add(item_id)
+        validated.append(item)
+    return validated
 
 
 def _now_iso() -> str:
@@ -39,23 +100,102 @@ def _make_id(symbol: str, horizon: int, created_at: str, salt: str = "") -> str:
 
 
 def load_watchlist(path: Path = WATCHLIST_PATH) -> list[dict]:
-    if not path.exists():
-        return []
     try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return []
+    except UnicodeError as exc:
+        raise WatchlistIntegrityError("WATCHLIST_CORRUPT") from exc
+    except OSError as exc:
+        raise WatchlistIntegrityError("WATCHLIST_READ_FAILED") from exc
+    try:
+        payload = json.loads(raw, parse_constant=_reject_json_constant)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise WatchlistIntegrityError("WATCHLIST_CORRUPT") from exc
     if isinstance(payload, dict):
-        items = payload.get("items", [])
-    else:
+        schema_version = payload.get("schema_version")
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != WATCHLIST_SCHEMA_VERSION
+            or "items" not in payload
+        ):
+            raise WatchlistIntegrityError("WATCHLIST_CORRUPT")
+        items = payload["items"]
+    elif isinstance(payload, list):
         items = payload
-    return [item for item in items if isinstance(item, dict)]
+    else:
+        raise WatchlistIntegrityError("WATCHLIST_CORRUPT")
+    return _validate_persisted_items(items)
+
+
+def safe_load_watchlist(path: Path = WATCHLIST_PATH) -> tuple[list[dict] | None, str | None]:
+    try:
+        return load_watchlist(path), None
+    except Exception as exc:
+        return None, watchlist_error_code(exc)
+
+
+def _watchlist_lock_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.lock")
+
+
+@contextmanager
+def _watchlist_lock(path: Path):
+    lock_path = _watchlist_lock_path(path)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+")
+    except OSError as exc:
+        raise WatchlistIntegrityError("WATCHLIST_LOCK_FAILED") from exc
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            raise WatchlistIntegrityError("WATCHLIST_LOCK_FAILED") from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
+
+
+def _save_watchlist_unlocked(items: list[dict], path: Path) -> None:
+    validated = _validate_persisted_items(items)
+    payload = {"schema_version": WATCHLIST_SCHEMA_VERSION, "items": validated}
+    temp_path: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+    except (OSError, TypeError, ValueError) as exc:
+        raise WatchlistIntegrityError("WATCHLIST_WRITE_FAILED") from exc
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def save_watchlist(items: list[dict], path: Path = WATCHLIST_PATH) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"schema_version": 1, "items": items}
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    with _watchlist_lock(path):
+        _save_watchlist_unlocked(items, path)
 
 
 def find_active_duplicate(items: list[dict], symbol: str, horizon: int) -> dict | None:
@@ -111,43 +251,45 @@ def watchlist_analysis_matches_selection(
 
 
 def upsert_watch_item(item: dict, path: Path = WATCHLIST_PATH) -> tuple[dict, bool]:
-    items = load_watchlist(path)
-    symbol = str(item.get("symbol") or "").upper().strip()
-    if not symbol:
-        raise ValueError("Watchlist item requires symbol")
-    horizon = int(item.get("horizon") or 0)
-    if horizon <= 0:
-        raise ValueError("Watchlist item requires positive horizon")
-    duplicate = find_active_duplicate(items, symbol, horizon)
-    if duplicate:
-        return duplicate, False
+    with _watchlist_lock(path):
+        items = load_watchlist(path)
+        symbol = str(item.get("symbol") or "").upper().strip()
+        if not symbol:
+            raise ValueError("Watchlist item requires symbol")
+        horizon = int(item.get("horizon") or 0)
+        if horizon <= 0:
+            raise ValueError("Watchlist item requires positive horizon")
+        duplicate = find_active_duplicate(items, symbol, horizon)
+        if duplicate:
+            return duplicate, False
 
-    created_at = str(item.get("created_at") or _now_iso())
-    normalized = {
-        **item,
-        "id": item.get("id") or _make_id(symbol, horizon, created_at, str(len(items))),
-        "symbol": symbol,
-        "horizon": horizon,
-        "created_at": created_at,
-        "status": str(item.get("status") or "ACTIVE").upper(),
-    }
-    items.append(normalized)
-    save_watchlist(items, path)
-    return normalized, True
+        created_at = str(item.get("created_at") or _now_iso())
+        normalized = {
+            **item,
+            "id": item.get("id") or _make_id(symbol, horizon, created_at, str(len(items))),
+            "symbol": symbol,
+            "horizon": horizon,
+            "created_at": created_at,
+            "status": str(item.get("status") or "ACTIVE").upper(),
+        }
+        items.append(normalized)
+        _save_watchlist_unlocked(items, path)
+        return normalized, True
 
 
 def archive_watch_item(item_id: str, path: Path = WATCHLIST_PATH, archived_at: str | None = None) -> bool:
-    items = load_watchlist(path)
-    changed = False
-    for item in items:
-        if str(item.get("id")) == str(item_id):
-            item["status"] = "ARCHIVED"
-            item["archived_at"] = archived_at or _now_iso()
-            changed = True
-            break
-    if changed:
-        save_watchlist(items, path)
-    return changed
+    with _watchlist_lock(path):
+        items = load_watchlist(path)
+        changed = False
+        for item in items:
+            if str(item.get("id")) == str(item_id):
+                item["status"] = "ARCHIVED"
+                item["archived_at"] = archived_at or _now_iso()
+                changed = True
+                break
+        if changed:
+            _save_watchlist_unlocked(items, path)
+        return changed
 
 
 def watchlist_summary(items: list[dict]) -> dict:

@@ -63,8 +63,9 @@ from market_oracle.presentation import (
 from market_oracle.search import search_assets
 from market_oracle.signals import DEFAULT_SIGNAL_THRESHOLD
 from market_oracle.watchlist import (
-    archive_watch_item, compare_watch_item_to_current, find_active_duplicate, load_watchlist, upsert_watch_item,
-    watch_item_current_snapshot, watch_item_from_analysis, watchlist_analysis_matches_selection, watchlist_summary,
+    archive_watch_item, compare_watch_item_to_current, find_active_duplicate, safe_load_watchlist, upsert_watch_item,
+    watch_item_current_snapshot, watch_item_from_analysis, watchlist_analysis_matches_selection, watchlist_error_code,
+    watchlist_summary,
 )
 
 
@@ -2519,9 +2520,29 @@ def render_watchlist_comparison(item: dict, current: dict, comparison: dict) -> 
     """, unsafe_allow_html=True)
 
 
+def watchlist_failure_message(error_code: str) -> str:
+    messages = {
+        "WATCHLIST_CORRUPT": "Zapis Watchlisty jest uszkodzony lub ma nieobsługiwany format.",
+        "WATCHLIST_READ_FAILED": "Nie udało się bezpiecznie odczytać Watchlisty.",
+        "WATCHLIST_WRITE_FAILED": "Nie udało się bezpiecznie zapisać Watchlisty.",
+        "WATCHLIST_LOCK_FAILED": "Watchlista jest chwilowo niedostępna dla bezpiecznej zmiany.",
+    }
+    message = messages.get(error_code)
+    if message is None:
+        return (
+            "Nie udało się potwierdzić stanu Watchlisty po tej operacji. "
+            f"Odśwież widok i sprawdź dane przed ponowną próbą. Kod: {error_code}."
+        )
+    return f"{message} Dane nie zostały zmienione. Kod: {error_code}."
+
+
 def render_watchlist_capture(result: dict, report: dict, source_context: dict | None = None) -> None:
     item = watch_item_from_analysis(result, report, source_context, source="ML", origin="full_analysis")
-    existing = find_active_duplicate(load_watchlist(), item["symbol"], item["horizon"])
+    items, load_error = safe_load_watchlist()
+    if load_error:
+        st.error(watchlist_failure_message(load_error))
+        return
+    existing = find_active_duplicate(items or [], item["symbol"], item["horizon"])
     st.markdown("---")
     st.subheader("Moje obserwacje")
     st.caption("Zapisuje snapshot tezy z tego momentu. To nie jest część Candidate v1 ani forward ledgera.")
@@ -2532,24 +2553,32 @@ def render_watchlist_capture(result: dict, report: dict, source_context: dict | 
         )
         return
     if st.button(f"Dodaj do obserwowanych: {item['symbol']} · {item['horizon']}d", key=f"watch_add_{item['symbol']}_{item['horizon']}", use_container_width=True):
-        saved, created = upsert_watch_item(item)
-        if created:
-            st.toast(f"Dodano {saved['symbol']} do obserwowanych.", icon="✅")
-            st.session_state["watchlist_last_added"] = f"{saved['symbol']} · {saved['horizon']}d"
-            st.rerun()
+        try:
+            saved, created = upsert_watch_item(item)
+        except Exception as exc:
+            st.error(watchlist_failure_message(watchlist_error_code(exc)))
         else:
-            st.info(f"Ten setup jest już na watchliście od {short_datetime(saved.get('created_at'))}.")
+            if created:
+                st.toast(f"Dodano {saved['symbol']} do obserwowanych.", icon="✅")
+                st.session_state["watchlist_last_added"] = f"{saved['symbol']} · {saved['horizon']}d"
+                st.rerun()
+            else:
+                st.info(f"Ten setup jest już na watchliście od {short_datetime(saved.get('created_at'))}.")
 
 
 def render_watchlist() -> None:
     st.header("Moje obserwacje")
     st.write("Zapisuj instrumenty i setupy, które chcesz sprawdzić później. Watchlista pamięta, co system widział w dniu dodania, i nie miesza się z forward proof.")
     st.caption("To prywatna lista pracy użytkownika: odkryj → zrozum → zapisz → wróć → porównaj. Nie jest rekomendacją transakcji.")
+    items, load_error = safe_load_watchlist()
+    if load_error:
+        st.error(watchlist_failure_message(load_error))
+        return
     last_added = st.session_state.pop("watchlist_last_added", None)
     if last_added:
         st.success(f"Dodano do obserwowanych: {last_added}. Możesz teraz wrócić do tej tezy później i porównać, co się zmieniło.")
 
-    items = load_watchlist()
+    items = items or []
     summary = watchlist_summary(items)
     st.markdown(f"""
     <div class="dashboard-grid">
@@ -2647,9 +2676,19 @@ def render_watchlist() -> None:
                 except Exception as exc:
                     st.error(f"Nie udało się uruchomić analizy: {exc}")
             if action_cols[1].button("Archiwizuj obserwację", key="watchlist_archive", use_container_width=True):
-                archive_watch_item(str(selected.get("id")))
-                st.success("Obserwacja przeniesiona do archiwum.")
-                st.rerun()
+                try:
+                    archived = archive_watch_item(str(selected.get("id")))
+                except Exception as exc:
+                    st.error(watchlist_failure_message(watchlist_error_code(exc)))
+                else:
+                    if not archived:
+                        st.error(
+                            "Nie znaleziono tej obserwacji do archiwizacji. "
+                            "Odśwież Watchlistę przed ponowną próbą."
+                        )
+                    else:
+                        st.success("Obserwacja przeniesiona do archiwum.")
+                        st.rerun()
             saved = st.session_state.get("watchlist_analysis")
             if watchlist_analysis_matches_selection(saved, selected, years):
                 current_snapshot = watch_item_current_snapshot(saved["result"], selected)
