@@ -12,7 +12,12 @@ from typing import Any
 
 import fcntl
 
-from market_oracle.product_verdict import finite_probability, product_forecast_verdict
+from market_oracle.product_verdict import (
+    MachineDecisionState,
+    finite_probability,
+    persisted_machine_decision_state,
+    product_forecast_verdict,
+)
 
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -311,20 +316,28 @@ def _forecast_for_horizon(result: dict, horizon: int) -> dict:
     return forecasts.get(horizon) or forecasts.get(str(horizon)) or {}
 
 
-def _direction_from_snapshot(snapshot: dict | None) -> int:
+def watchlist_machine_decision_state(snapshot: dict | None) -> MachineDecisionState:
+    """Classify Watchlist machine evidence without consulting display copy."""
     if not isinstance(snapshot, dict):
-        return 0
-    decision = _safe_int(snapshot.get("verdict_decision"))
-    if decision in (-1, 0, 1):
-        return decision
+        return MachineDecisionState.INVALID
+    return persisted_machine_decision_state(
+        {
+            "Decision": snapshot.get("verdict_decision"),
+            "DecisionReason": snapshot.get("verdict"),
+        }
+    )
 
-    label = str(snapshot.get("verdict_label") or snapshot.get("label") or "").upper()
-    reason = str(snapshot.get("verdict") or snapshot.get("reason") or "").upper()
-    if label == "LONG" or reason == "LONG_CONFIRMED":
-        return 1
-    if label == "SHORT" or reason == "SHORT_CONFIRMED":
-        return -1
-    return 0
+
+_WATCHLIST_MACHINE_DECISION_LABELS = {
+    MachineDecisionState.LONG: "Potwierdzony kierunek wzrostowy",
+    MachineDecisionState.SHORT: "Potwierdzony kierunek spadkowy",
+    MachineDecisionState.NEUTRAL: "Brak potwierdzenia kierunku",
+    MachineDecisionState.INVALID: "Klasyfikacja niedostępna",
+}
+
+
+def watchlist_machine_decision_label(snapshot: dict | None) -> str:
+    return _WATCHLIST_MACHINE_DECISION_LABELS[watchlist_machine_decision_state(snapshot)]
 
 
 def _parse_date(value: Any) -> date | None:
@@ -631,15 +644,19 @@ def compare_watch_item_to_current(item: dict, current: dict | None, now: date | 
             "reasons": [f"Obserwacja ma horyzont {item_horizon}, a aktualna analiza {current_horizon}."],
         }
 
-    then_direction = _direction_from_snapshot(item)
-    now_direction = _direction_from_snapshot(current)
-    if then_direction == 0 and now_direction == 0:
+    then_state = watchlist_machine_decision_state(item)
+    now_state = watchlist_machine_decision_state(current)
+    then_label = watchlist_machine_decision_label(item)
+    now_label = watchlist_machine_decision_label(current)
+    if MachineDecisionState.INVALID in {then_state, now_state}:
+        status, label = "DECISION_UNAVAILABLE", "Nie można wiarygodnie porównać kierunku"
+    elif then_state is MachineDecisionState.NEUTRAL and now_state is MachineDecisionState.NEUTRAL:
         status, label = "UNCHANGED", "Bez zmiany statusu"
-    elif then_direction == 0 and now_direction != 0:
+    elif then_state is MachineDecisionState.NEUTRAL:
         status, label = "GAINED_CONFIRMATION", "Teza zyskała potwierdzenie"
-    elif then_direction != 0 and now_direction == then_direction:
+    elif now_state is then_state:
         status, label = "STILL_CONFIRMED", "Teza nadal potwierdzona"
-    elif then_direction != 0 and now_direction == 0:
+    elif now_state is MachineDecisionState.NEUTRAL:
         status, label = "WEAKENED", "Teza osłabła"
     else:
         status, label = "REVERSED", "Kierunek zanegowany"
@@ -654,9 +671,16 @@ def compare_watch_item_to_current(item: dict, current: dict | None, now: date | 
     now_quality = str(current.get("quality") or "—")
     quality_change = "bez zmiany" if then_quality == now_quality else f"{then_quality} → {now_quality}"
 
-    reasons = [
-        f"Status bramki: {item.get('verdict_label') or '—'} → {current.get('verdict_label') or '—'} na tym samym horyzoncie {item_horizon or current_horizon}.",
-    ]
+    if status == "DECISION_UNAVAILABLE":
+        reasons = [
+            "Nie można potwierdzić klasyfikacji machine dla zapisu historycznego "
+            "lub aktualnej analizy; kierunek nie jest porównywany."
+        ]
+    else:
+        reasons = [
+            f"Status bramki: {then_label} → {now_label} na tym samym horyzoncie "
+            f"{item_horizon or current_horizon}."
+        ]
     if delta_probability is not None:
         reasons.append(f"P(wzrost) zmieniło się o {delta_probability * 100:+.1f} pp.")
     if delta_expected_return is not None:
@@ -669,7 +693,7 @@ def compare_watch_item_to_current(item: dict, current: dict | None, now: date | 
     return {
         "comparison_status": status,
         "label": label,
-        "verdict_transition": f"{item.get('verdict_label') or '—'} → {current.get('verdict_label') or '—'}",
+        "verdict_transition": None if status == "DECISION_UNAVAILABLE" else f"{then_label} → {now_label}",
         "lifecycle": lifecycle,
         "delta_probability": delta_probability,
         "delta_expected_return": delta_expected_return,

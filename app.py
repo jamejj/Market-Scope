@@ -65,7 +65,7 @@ from market_oracle.signals import DEFAULT_SIGNAL_THRESHOLD
 from market_oracle.watchlist import (
     archive_watch_item, compare_watch_item_to_current, find_active_duplicate, safe_load_watchlist, upsert_watch_item,
     watch_item_current_snapshot, watch_item_from_analysis, watchlist_analysis_matches_selection, watchlist_error_code,
-    watchlist_summary,
+    watchlist_machine_decision_label, watchlist_summary,
 )
 
 
@@ -2491,7 +2491,7 @@ def render_watchlist_comparison(item: dict, current: dict, comparison: dict) -> 
         lifecycle_card_text = f"{lifecycle_text} · {calendar_label}"
 
     now_available = bool(current.get("available"))
-    now_label = current.get("verdict_label") if now_available else "—"
+    now_label = watchlist_machine_decision_label(current) if now_available else "—"
     now_prob = current.get("probability_up") if now_available else None
     now_return = current.get("expected_return") if now_available else None
     now_quality = current.get("quality") if now_available else "—"
@@ -2509,7 +2509,7 @@ def render_watchlist_comparison(item: dict, current: dict, comparison: dict) -> 
             </div>
         </div>
         <div class="analysis-side">
-            <div class="analysis-card"><small>Wtedy</small><strong>{clean_text(item.get('verdict_label'))}</strong><span>P(wzrost): {clean_text(value_pct(item.get('probability_up')))} · ruch {clean_text(signed_pct(item.get('expected_return')))}</span></div>
+            <div class="analysis-card"><small>Wtedy</small><strong>{clean_text(watchlist_machine_decision_label(item))}</strong><span>P(wzrost): {clean_text(value_pct(item.get('probability_up')))} · ruch {clean_text(signed_pct(item.get('expected_return')))}</span></div>
             <div class="analysis-card"><small>Teraz</small><strong>{clean_text(now_label)}</strong><span>P(wzrost): {clean_text(value_pct(now_prob))} · ruch {clean_text(signed_pct(now_return))}</span></div>
             <div class="analysis-card"><small>Zmiana P(wzrost)</small><strong>{clean_text(signed_pp(comparison.get('delta_probability')))}</strong><span>Pokazane jako kontekst, nie osobny verdict.</span></div>
             <div class="analysis-card"><small>Zmiana ruchu</small><strong>{clean_text(signed_pp(comparison.get('delta_expected_return')))}</strong><span>Expected return wtedy vs teraz.</span></div>
@@ -2654,7 +2654,7 @@ def render_watchlist() -> None:
                     <div class="analysis-card"><small>Symbol</small><strong>{clean_text(selected.get('symbol'))}</strong><span>{clean_text(selected.get('source'))}</span></div>
                     <div class="analysis-card"><small>Horyzont</small><strong>{clean_text(selected.get('horizon'))}d</strong><span>status: {clean_text(watch_status_label(selected))}</span></div>
                     <div class="analysis-card"><small>P(wzrost)</small><strong>{clean_text(value_pct(selected.get('probability_up')))}</strong><span>expected {clean_text(signed_pct(selected.get('expected_return')))}</span></div>
-                    <div class="analysis-card"><small>Jakość</small><strong>{clean_text(selected.get('quality'))}</strong><span>{clean_text(selected.get('verdict_label'))}</span></div>
+                    <div class="analysis-card"><small>Jakość</small><strong>{clean_text(selected.get('quality'))}</strong><span>{clean_text(watchlist_machine_decision_label(selected))}</span></div>
                 </div>
             </div>
             """, unsafe_allow_html=True)

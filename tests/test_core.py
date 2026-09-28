@@ -2884,6 +2884,7 @@ def test_watchlist_comparison_uses_verdict_transition_not_delta_thresholds():
         "symbol": "XTB.WA",
         "horizon": 20,
         "created_at": "2026-08-03T10:00:00+02:00",
+        "verdict": "LONG_CONFIRMED",
         "verdict_label": "LONG",
         "verdict_decision": 1,
         "probability_up": 0.66,
@@ -2894,6 +2895,7 @@ def test_watchlist_comparison_uses_verdict_transition_not_delta_thresholds():
         "available": True,
         "symbol": "XTB.WA",
         "horizon": 20,
+        "verdict": "LONG_CONFIRMED",
         "verdict_label": "LONG",
         "verdict_decision": 1,
         "probability_up": 0.56,
@@ -2907,9 +2909,24 @@ def test_watchlist_comparison_uses_verdict_transition_not_delta_thresholds():
     assert comparison["delta_probability"] == pytest.approx(-0.10)
     assert comparison["delta_expected_return"] == pytest.approx(-0.04)
 
-    weakened = {**still_long, "verdict_label": "OBSERWUJ", "verdict_decision": 0}
-    neutral_item = {**item, "verdict_label": "OBSERWUJ", "verdict_decision": 0}
-    reversed_now = {**still_long, "verdict_label": "SHORT", "verdict_decision": -1}
+    weakened = {
+        **still_long,
+        "verdict": "PROBABILITY_INSIDE_BAND",
+        "verdict_label": "OBSERWUJ",
+        "verdict_decision": 0,
+    }
+    neutral_item = {
+        **item,
+        "verdict": "PROBABILITY_INSIDE_BAND",
+        "verdict_label": "OBSERWUJ",
+        "verdict_decision": 0,
+    }
+    reversed_now = {
+        **still_long,
+        "verdict": "SHORT_CONFIRMED",
+        "verdict_label": "SHORT",
+        "verdict_decision": -1,
+    }
 
     assert compare_watch_item_to_current(item, weakened)["comparison_status"] == "WEAKENED"
     assert compare_watch_item_to_current(neutral_item, still_long)["comparison_status"] == "GAINED_CONFIRMATION"
@@ -2921,6 +2938,7 @@ def test_watchlist_lifecycle_expiry_is_separate_from_current_verdict():
         "symbol": "XTB.WA",
         "horizon": 5,
         "created_at": "2026-07-01T10:00:00+02:00",
+        "verdict": "LONG_CONFIRMED",
         "verdict_label": "LONG",
         "verdict_decision": 1,
     }
@@ -2928,6 +2946,7 @@ def test_watchlist_lifecycle_expiry_is_separate_from_current_verdict():
         "available": True,
         "symbol": "XTB.WA",
         "horizon": 5,
+        "verdict": "LONG_CONFIRMED",
         "verdict_label": "LONG",
         "verdict_decision": 1,
     }
