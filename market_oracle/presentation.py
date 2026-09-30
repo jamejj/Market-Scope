@@ -11,6 +11,7 @@ from .product_verdict import (
     forecast_integrity_issue,
     has_complete_product_forecast,
     product_forecast_verdict,
+    strict_finite_real,
 )
 from .signals import SignalVerdict
 
@@ -116,7 +117,7 @@ def _primary_forecast(forecasts: dict[Any, dict]) -> tuple[int, dict]:
             _verdict_rank(_forecast_verdict(item[1])),
             _quality_rank(str(item[1].get("quality") or "")),
             probability_distance(item[1]),
-            abs(_finite_float(item[1].get("expected_return")) or 0.0),
+            abs(strict_finite_real(item[1].get("expected_return")) or 0.0),
             preferred.get(item[0], 0),
         ),
     )
@@ -253,6 +254,8 @@ def radar_display_frame(frame: Any, columns: list[str] | None = None) -> Any:
         output["Ocena"] = output.apply(display_radar_ml_status, axis=1)
     if "P(wzrost)" in output:
         output["P(wzrost)"] = output["P(wzrost)"].map(finite_probability)
+    if "Oczekiwany ruch" in output:
+        output["Oczekiwany ruch"] = output["Oczekiwany ruch"].map(strict_finite_real)
     if "Data" in output:
         output["Data"] = output["Data"].map(lambda value: radar_data_date(value) or "UNKNOWN")
     if columns is not None:
@@ -432,7 +435,8 @@ def build_analysis_report(
     risk = result.get("risk") or {}
     trend = _trend_label(technical)
     horizon_text = _horizon_label(horizon, crypto)
-    expected = _signed_pct(forecast.get("expected_return"))
+    expected_return = strict_finite_real(forecast.get("expected_return"))
+    expected = _signed_pct(expected_return)
     lower = _signed_pct(forecast.get("lower_return"))
     upper = _signed_pct(forecast.get("upper_return"))
     auc = _finite_float(forecast.get("auc"))
@@ -475,14 +479,14 @@ def build_analysis_report(
     if verdict.decision == -1:
         if _finite_float(forecast.get("upper_return")) is not None and float(forecast.get("upper_return")) > 0:
             counterpoints.append(f"Górny zakres 90% nadal zakłada możliwy wzrost ({upper}), więc ryzyko scenariusza przeciwnego jest realne.")
-        if _finite_float(forecast.get("expected_return")) is not None and float(forecast.get("expected_return")) >= 0:
+        if expected_return is not None and expected_return >= 0:
             counterpoints.append("Oczekiwany ruch nie jest ujemny — kierunek modelu nie wystarcza bez potencjału spadku.")
         if technical.get("above_sma_50") is True or technical.get("above_sma_200") is True:
             counterpoints.append("Cena pozostaje nad co najmniej jedną z kluczowych średnich 50/200, więc trend wzrostowy może osłabiać tezę spadkową.")
     else:
         if _finite_float(forecast.get("lower_return")) is not None and float(forecast.get("lower_return")) < 0:
             counterpoints.append(f"Dolny zakres 90% nadal zakłada możliwy spadek ({lower}), więc ryzyko scenariusza przeciwnego jest realne.")
-        if _finite_float(forecast.get("expected_return")) is not None and float(forecast.get("expected_return")) <= 0:
+        if expected_return is not None and expected_return <= 0:
             counterpoints.append("Oczekiwany ruch nie jest dodatni — kierunek modelu nie wystarcza bez potencjału zwrotu.")
         if technical.get("above_sma_50") is False or technical.get("above_sma_200") is False:
             counterpoints.append("Cena nie jest jednocześnie nad kluczowymi średnimi 50/200, więc trend nie jest w pełni potwierdzony.")
@@ -512,7 +516,7 @@ def build_analysis_report(
             "label": _horizon_label(h, crypto),
             "verdict": horizon_verdict.label,
             "probability": _pct(finite_probability(f.get("probability_up"))),
-            "expected": _signed_pct(f.get("expected_return")),
+            "expected": _signed_pct(strict_finite_real(f.get("expected_return"))),
             "lower": _signed_pct(f.get("lower_return")),
             "upper": _signed_pct(f.get("upper_return")),
             "quality": display_model_quality(f.get("quality")),
@@ -611,7 +615,7 @@ def _row_score(row: dict) -> tuple:
     score_keys = ["Deep score", "Setup score", "Radar score", "Edge score", "Score"]
     scores = tuple(_row_number(row, key) or 0.0 for key in score_keys)
     probability = _row_number(row, "P(wzrost)")
-    expected = _row_number(row, "Oczekiwany ruch")
+    expected = strict_finite_real(row.get("Oczekiwany ruch"))
     return (*scores, abs((0.5 if probability is None else probability) - 0.5), abs(expected or 0.0))
 
 
@@ -787,7 +791,7 @@ def build_start_guidance(
             card_id="risk_alert",
             priority=90,
             title=f"Przejrzyj ryzyko: {symbol} ma alert radaru.",
-            body=f"{display_radar_thesis(_row_text(risk_leader, 'Teza radaru'))}. Horyzont {_horizon_short(risk_leader)}, ruch/impet {_signed_pct(risk_leader.get('Oczekiwany ruch'))}.",
+            body=f"{display_radar_thesis(_row_text(risk_leader, 'Teza radaru'))}. Horyzont {_horizon_short(risk_leader)}, ruch/impet {_signed_pct(strict_finite_real(risk_leader.get('Oczekiwany ruch')))}.",
             source="Radar FAST/ML",
             status=display_radar_action(_row_text(risk_leader, "Akcja radaru")),
             cta=f"Uruchom pełną analizę: {symbol}",
@@ -807,7 +811,7 @@ def build_start_guidance(
             title=f"Przeanalizuj {symbol}: ML ma potwierdzony setup {_horizon_short(ml_leader)}.",
             body=(
                 f"Reguły MarketScope: {verdict.label}; P(wzrost) {_pct(ml_leader.get('P(wzrost)'))}, "
-                f"oczekiwany ruch {_signed_pct(ml_leader.get('Oczekiwany ruch'))}. To kandydat do analizy, nie polecenie transakcji."
+                f"oczekiwany ruch {_signed_pct(strict_finite_real(ml_leader.get('Oczekiwany ruch')))}. To kandydat do analizy, nie polecenie transakcji."
             ),
             source="Deep ML",
             status=display_model_quality(_row_text(ml_leader, "Jakość modelu")),

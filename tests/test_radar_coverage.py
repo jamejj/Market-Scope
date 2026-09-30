@@ -10,6 +10,7 @@ import pytest
 import market_oracle.monitor as monitor
 from market_oracle.journal import JournalSnapshotEligibility, journal_snapshot_eligibility
 from market_oracle.presentation import _scan_stage_text, build_start_guidance
+from market_oracle.product_verdict import strict_finite_real
 from market_oracle.radar_contract import RadarCoverageState, radar_coverage_state
 
 
@@ -31,7 +32,11 @@ def _app_functions(*names):
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     assert {node.name for node in nodes} == set(names)
-    namespace = {"pd": pd, "_unique_symbols": lambda frame: int(frame["Symbol"].nunique()) if not frame.empty else 0}
+    namespace = {
+        "pd": pd,
+        "strict_finite_real": strict_finite_real,
+        "_unique_symbols": lambda frame: int(frame["Symbol"].nunique()) if not frame.empty else 0,
+    }
     future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
     module = ast.fix_missing_locations(ast.Module(body=[future, *nodes], type_ignores=[]))
     exec(compile(module, str(source), "exec"), namespace)

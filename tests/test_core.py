@@ -329,6 +329,7 @@ def load_radar_view_functions():
         "display_radar_direction": display_radar_direction,
         "display_radar_thesis": display_radar_thesis,
         "finite_probability": finite_probability,
+        "strict_finite_real": product_verdict_module.strict_finite_real,
         "radar_risk_rows": radar_risk_rows,
         "_unique_symbols": lambda frame: int(frame["Symbol"].nunique()) if not frame.empty else 0,
         "signal_scan_contract": lambda frame, snapshot: {
@@ -446,6 +447,7 @@ def load_watchlist_dataframe():
         "html": html,
         "pd": pd,
         "radar_data_date": monitor_module.radar_data_date,
+        "strict_finite_real": product_verdict_module.strict_finite_real,
     }
     future_annotations = ast.ImportFrom(
         module="__future__",

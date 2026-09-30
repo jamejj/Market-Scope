@@ -17,6 +17,7 @@ from market_oracle.product_verdict import (
     finite_probability,
     persisted_machine_decision_state,
     product_forecast_verdict,
+    strict_finite_real,
 )
 
 
@@ -579,7 +580,7 @@ def watch_item_current_snapshot(result: dict, item: dict) -> dict:
         return {"available": False, "reason": "HORIZON_NOT_AVAILABLE", "symbol": result_symbol or symbol, "horizon": horizon}
 
     probability = finite_probability(forecast.get("probability_up"))
-    expected_return = _safe_float(forecast.get("expected_return"))
+    expected_return = strict_finite_real(forecast.get("expected_return"))
     auc = _safe_float(forecast.get("auc"))
     brier = _safe_float(forecast.get("brier"))
     quality = str(forecast.get("quality") or "NISKA — BRAK PRZEWAGI")
@@ -663,8 +664,8 @@ def compare_watch_item_to_current(item: dict, current: dict | None, now: date | 
 
     then_prob = _safe_float(item.get("probability_up"))
     now_prob = _safe_float(current.get("probability_up"))
-    then_return = _safe_float(item.get("expected_return"))
-    now_return = _safe_float(current.get("expected_return"))
+    then_return = strict_finite_real(item.get("expected_return"))
+    now_return = strict_finite_real(current.get("expected_return"))
     delta_probability = None if then_prob is None or now_prob is None else now_prob - then_prob
     delta_expected_return = None if then_return is None or now_return is None else now_return - then_return
     then_quality = str(item.get("quality") or "—")
@@ -734,7 +735,7 @@ def watch_item_from_analysis(
         "verdict_label": verdict.get("label") or "—",
         "verdict_decision": verdict.get("decision"),
         "probability_up": finite_probability(forecast.get("probability_up")),
-        "expected_return": _safe_float(forecast.get("expected_return")),
+        "expected_return": strict_finite_real(forecast.get("expected_return")),
         "quality": str(forecast.get("quality") or "—"),
         "reason": str(evidence[0] if evidence else report.get("headline") or "—"),
         "thesis": str(report.get("headline") or "—"),

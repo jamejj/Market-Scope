@@ -40,6 +40,7 @@ from market_oracle.product_verdict import (
     dataframe_machine_decision_state,
     finite_probability,
     radar_ml_input_error_code,
+    strict_finite_real,
 )
 from market_oracle.presentation import (
     ACCURACY_BASELINE_DELTA_LABEL,
@@ -1626,6 +1627,8 @@ def radar_scan_completion_view(snapshot: dict, stale: bool) -> dict[str, str]:
 def radar_export_frame(frame: pd.DataFrame, snapshot: dict) -> pd.DataFrame:
     """Add coverage provenance to a CSV copy, leaving ranking values untouched."""
     output = frame.copy()
+    if "Oczekiwany ruch" in output:
+        output["Oczekiwany ruch"] = output["Oczekiwany ruch"].map(strict_finite_real)
     coverage = snapshot.get("coverage") if isinstance(snapshot.get("coverage"), dict) else {}
     for mode, label in (("fast", "FAST coverage"), ("ml", "ML coverage")):
         section = coverage.get(mode) if isinstance(coverage.get(mode), dict) else {}
@@ -1640,7 +1643,7 @@ def with_signal_display_columns(frame: pd.DataFrame) -> pd.DataFrame:
         return output
 
     def move_text(row: pd.Series) -> str:
-        expected = row.get("Oczekiwany ruch")
+        expected = strict_finite_real(row.get("Oczekiwany ruch"))
         if str(row.get("Tryb analizy")) == "ML":
             return signed_pct(expected)
         return f"ruch FAST: {signed_pct(expected)}"
@@ -2453,7 +2456,7 @@ def watchlist_dataframe(items: list[dict]) -> pd.DataFrame:
             "Dodano": short_datetime(item.get("created_at")),
             "Dane z": radar_data_date(item.get("data_as_of")) or "UNKNOWN",
             "P(wzrost)": item.get("probability_up"),
-            "Oczekiwany ruch": item.get("expected_return"),
+            "Oczekiwany ruch": strict_finite_real(item.get("expected_return")),
             "Jakość": item.get("quality"),
             "Teza z momentu dodania": item.get("thesis"),
         })
@@ -2493,7 +2496,7 @@ def render_watchlist_comparison(item: dict, current: dict, comparison: dict) -> 
     now_available = bool(current.get("available"))
     now_label = watchlist_machine_decision_label(current) if now_available else "—"
     now_prob = current.get("probability_up") if now_available else None
-    now_return = current.get("expected_return") if now_available else None
+    now_return = strict_finite_real(current.get("expected_return")) if now_available else None
     now_quality = current.get("quality") if now_available else "—"
     now_data = current.get("data_as_of") if now_available else "—"
 
@@ -2509,7 +2512,7 @@ def render_watchlist_comparison(item: dict, current: dict, comparison: dict) -> 
             </div>
         </div>
         <div class="analysis-side">
-            <div class="analysis-card"><small>Wtedy</small><strong>{clean_text(watchlist_machine_decision_label(item))}</strong><span>P(wzrost): {clean_text(value_pct(item.get('probability_up')))} · ruch {clean_text(signed_pct(item.get('expected_return')))}</span></div>
+            <div class="analysis-card"><small>Wtedy</small><strong>{clean_text(watchlist_machine_decision_label(item))}</strong><span>P(wzrost): {clean_text(value_pct(item.get('probability_up')))} · ruch {clean_text(signed_pct(strict_finite_real(item.get('expected_return'))))}</span></div>
             <div class="analysis-card"><small>Teraz</small><strong>{clean_text(now_label)}</strong><span>P(wzrost): {clean_text(value_pct(now_prob))} · ruch {clean_text(signed_pct(now_return))}</span></div>
             <div class="analysis-card"><small>Zmiana P(wzrost)</small><strong>{clean_text(signed_pp(comparison.get('delta_probability')))}</strong><span>Pokazane jako kontekst, nie osobny verdict.</span></div>
             <div class="analysis-card"><small>Zmiana ruchu</small><strong>{clean_text(signed_pp(comparison.get('delta_expected_return')))}</strong><span>Expected return wtedy vs teraz.</span></div>
@@ -2653,7 +2656,7 @@ def render_watchlist() -> None:
                 <div class="analysis-side">
                     <div class="analysis-card"><small>Symbol</small><strong>{clean_text(selected.get('symbol'))}</strong><span>{clean_text(selected.get('source'))}</span></div>
                     <div class="analysis-card"><small>Horyzont</small><strong>{clean_text(selected.get('horizon'))}d</strong><span>status: {clean_text(watch_status_label(selected))}</span></div>
-                    <div class="analysis-card"><small>P(wzrost)</small><strong>{clean_text(value_pct(selected.get('probability_up')))}</strong><span>expected {clean_text(signed_pct(selected.get('expected_return')))}</span></div>
+                    <div class="analysis-card"><small>P(wzrost)</small><strong>{clean_text(value_pct(selected.get('probability_up')))}</strong><span>expected {clean_text(signed_pct(strict_finite_real(selected.get('expected_return'))))}</span></div>
                     <div class="analysis-card"><small>Jakość</small><strong>{clean_text(selected.get('quality'))}</strong><span>{clean_text(watchlist_machine_decision_label(selected))}</span></div>
                 </div>
             </div>
@@ -3028,6 +3031,8 @@ def _class_from_symbol(symbol: str) -> str:
 
 def _ensure_radar_columns(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.copy()
+    if "Oczekiwany ruch" in frame:
+        frame["Oczekiwany ruch"] = frame["Oczekiwany ruch"].map(strict_finite_real)
     for column in [
         "Zwrot 1d", "Zwrot 5d", "Zwrot 20d", "Zmienność roczna", "RSI 14",
         "P(wzrost)", "Oczekiwany ruch", "Dolna granica 90%", "Górna granica 90%",
