@@ -1329,6 +1329,12 @@ def safe_load_automation_status() -> tuple[dict | None, str | None]:
 def proof_state(cockpit: dict | None, automation: dict | None, cockpit_error: str | None, automation_error: str | None) -> dict:
     if cockpit_error or automation_error:
         return {"label": "Wymaga uwagi", "klass": "bad", "detail": cockpit_error or automation_error or "Błąd statusu"}
+    if (automation or {}).get("status_error"):
+        return {
+            "label": "Wymaga uwagi",
+            "klass": "bad",
+            "detail": "Status automatyzacji jest uszkodzony lub niedostępny.",
+        }
     if not cockpit:
         return {"label": "Brak danych", "klass": "warn", "detail": "Forward ledger nie jest jeszcze dostępny"}
     launchd = (automation or {}).get("launchd") or {}

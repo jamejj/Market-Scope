@@ -84,13 +84,18 @@ def _safe_json(value: Any) -> Any:
 
 def _read_json(path: Path) -> tuple[dict[str, Any], str | None]:
     try:
-        return json.loads(path.read_text(encoding="utf-8")), None
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}, None
+    except UnicodeError:
+        return {}, "Uszkodzony status automatu: nieprawidłowe kodowanie."
     except json.JSONDecodeError as exc:
         return {}, f"Uszkodzony status automatu: {path}:{exc.lineno}"
     except OSError as exc:
         return {}, str(exc)
+    if not isinstance(payload, dict):
+        return {}, "Nieprawidłowy format statusu automatu: oczekiwano obiektu JSON."
+    return payload, None
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
