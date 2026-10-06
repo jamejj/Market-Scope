@@ -16,7 +16,7 @@ from market_oracle.presentation import (
     build_start_guidance,
     radar_display_frame,
 )
-from market_oracle.product_verdict import strict_finite_real
+from market_oracle.product_verdict import finite_probability, strict_finite_real
 from market_oracle.watchlist import (
     compare_watch_item_to_current,
     load_watchlist,
@@ -133,6 +133,7 @@ def load_app_functions(*names: str, st_capture: MarkdownCapture | None = None) -
         "math": math,
         "pd": pd,
         "strict_finite_real": strict_finite_real,
+        "finite_probability": finite_probability,
         "pct": lambda value: f"{value:.1%}",
         "display_radar_direction": lambda row: "FAST discovery",
         "radar_data_date": lambda value: str(value)[:10] if value else None,

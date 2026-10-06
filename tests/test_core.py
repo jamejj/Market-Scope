@@ -448,6 +448,7 @@ def load_watchlist_dataframe():
         "pd": pd,
         "radar_data_date": monitor_module.radar_data_date,
         "strict_finite_real": product_verdict_module.strict_finite_real,
+        "finite_probability": product_verdict_module.finite_probability,
     }
     future_annotations = ast.ImportFrom(
         module="__future__",

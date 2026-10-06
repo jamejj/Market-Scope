@@ -2461,7 +2461,7 @@ def watchlist_dataframe(items: list[dict]) -> pd.DataFrame:
             "Źródło": item.get("source"),
             "Dodano": short_datetime(item.get("created_at")),
             "Dane z": radar_data_date(item.get("data_as_of")) or "UNKNOWN",
-            "P(wzrost)": item.get("probability_up"),
+            "P(wzrost)": finite_probability(item.get("probability_up")),
             "Oczekiwany ruch": strict_finite_real(item.get("expected_return")),
             "Jakość": item.get("quality"),
             "Teza z momentu dodania": item.get("thesis"),
@@ -2501,7 +2501,7 @@ def render_watchlist_comparison(item: dict, current: dict, comparison: dict) -> 
 
     now_available = bool(current.get("available"))
     now_label = watchlist_machine_decision_label(current) if now_available else "—"
-    now_prob = current.get("probability_up") if now_available else None
+    now_prob = finite_probability(current.get("probability_up")) if now_available else None
     now_return = strict_finite_real(current.get("expected_return")) if now_available else None
     now_quality = current.get("quality") if now_available else "—"
     now_data = current.get("data_as_of") if now_available else "—"
@@ -2518,7 +2518,7 @@ def render_watchlist_comparison(item: dict, current: dict, comparison: dict) -> 
             </div>
         </div>
         <div class="analysis-side">
-            <div class="analysis-card"><small>Wtedy</small><strong>{clean_text(watchlist_machine_decision_label(item))}</strong><span>P(wzrost): {clean_text(value_pct(item.get('probability_up')))} · ruch {clean_text(signed_pct(strict_finite_real(item.get('expected_return'))))}</span></div>
+            <div class="analysis-card"><small>Wtedy</small><strong>{clean_text(watchlist_machine_decision_label(item))}</strong><span>P(wzrost): {clean_text(value_pct(finite_probability(item.get('probability_up'))))} · ruch {clean_text(signed_pct(strict_finite_real(item.get('expected_return'))))}</span></div>
             <div class="analysis-card"><small>Teraz</small><strong>{clean_text(now_label)}</strong><span>P(wzrost): {clean_text(value_pct(now_prob))} · ruch {clean_text(signed_pct(now_return))}</span></div>
             <div class="analysis-card"><small>Zmiana P(wzrost)</small><strong>{clean_text(signed_pp(comparison.get('delta_probability')))}</strong><span>Pokazane jako kontekst, nie osobny verdict.</span></div>
             <div class="analysis-card"><small>Zmiana ruchu</small><strong>{clean_text(signed_pp(comparison.get('delta_expected_return')))}</strong><span>Expected return wtedy vs teraz.</span></div>
@@ -2662,7 +2662,7 @@ def render_watchlist() -> None:
                 <div class="analysis-side">
                     <div class="analysis-card"><small>Symbol</small><strong>{clean_text(selected.get('symbol'))}</strong><span>{clean_text(selected.get('source'))}</span></div>
                     <div class="analysis-card"><small>Horyzont</small><strong>{clean_text(selected.get('horizon'))}d</strong><span>status: {clean_text(watch_status_label(selected))}</span></div>
-                    <div class="analysis-card"><small>P(wzrost)</small><strong>{clean_text(value_pct(selected.get('probability_up')))}</strong><span>expected {clean_text(signed_pct(strict_finite_real(selected.get('expected_return'))))}</span></div>
+                    <div class="analysis-card"><small>P(wzrost)</small><strong>{clean_text(value_pct(finite_probability(selected.get('probability_up'))))}</strong><span>expected {clean_text(signed_pct(strict_finite_real(selected.get('expected_return'))))}</span></div>
                     <div class="analysis-card"><small>Jakość</small><strong>{clean_text(selected.get('quality'))}</strong><span>{clean_text(watchlist_machine_decision_label(selected))}</span></div>
                 </div>
             </div>

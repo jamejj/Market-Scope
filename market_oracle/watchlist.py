@@ -662,8 +662,8 @@ def compare_watch_item_to_current(item: dict, current: dict | None, now: date | 
     else:
         status, label = "REVERSED", "Kierunek zanegowany"
 
-    then_prob = _safe_float(item.get("probability_up"))
-    now_prob = _safe_float(current.get("probability_up"))
+    then_prob = finite_probability(item.get("probability_up"))
+    now_prob = finite_probability(current.get("probability_up"))
     then_return = strict_finite_real(item.get("expected_return"))
     now_return = strict_finite_real(current.get("expected_return"))
     delta_probability = None if then_prob is None or now_prob is None else now_prob - then_prob
